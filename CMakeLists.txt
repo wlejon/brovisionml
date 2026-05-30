@@ -109,6 +109,7 @@ target_sources(brovisionml PRIVATE
     src/version.cpp
     src/sam_preprocess.cpp
     src/sam_image_encoder.cpp
+    src/sam_prompt_encoder.cpp
 )
 
 # --- Install ---
