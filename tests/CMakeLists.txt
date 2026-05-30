@@ -9,5 +9,6 @@ function(brovisionml_add_test name)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-brovisionml_add_test(brovisionml_test_smoke          test_smoke.cpp)
-brovisionml_add_test(brovisionml_test_sam_preprocess test_sam_preprocess.cpp)
+brovisionml_add_test(brovisionml_test_smoke            test_smoke.cpp)
+brovisionml_add_test(brovisionml_test_sam_preprocess   test_sam_preprocess.cpp)
+brovisionml_add_test(brovisionml_test_sam_image_encoder test_sam_image_encoder.cpp)
