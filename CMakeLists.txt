@@ -107,6 +107,7 @@ endif()
 
 target_sources(brovisionml PRIVATE
     src/version.cpp
+    src/sam_preprocess.cpp
 )
 
 # --- Install ---
