@@ -8,6 +8,7 @@
 
 #include "brotensor/safetensors.h"
 #include "brotensor/tensor.h"
+#include "brotensor/runtime.h"
 
 #include <cmath>
 #include <cstdio>
@@ -134,7 +135,6 @@ int main() {
 
     ImageEncoder enc(cfg);
     enc.load_file(path);
-    std::remove(path.c_str());
 
     check(enc.config().grid() == 4 && enc.config().head_dim() == 4 &&
           enc.config().mlp_dim() == 16,
@@ -172,6 +172,39 @@ int main() {
         } catch (const std::exception&) { threw = true; }
         check(threw, "encode rejects a mis-shaped pixel tensor");
     }
+
+    // ── CUDA parity: the same encoder on the GPU must match the CPU result.
+    //    Exercises the device-neutral path end to end, including the new
+    //    windowed decomposed-rel-pos attention op on CUDA. Skipped cleanly when
+    //    no GPU is present. ──
+    brotensor::init();
+    if (brotensor::is_available(brotensor::Device::CUDA)) {
+        enc.to(brotensor::Device::CUDA);
+        check(enc.device() == brotensor::Device::CUDA, "to(CUDA) moved weights");
+
+        brotensor::Tensor pixels_gpu = pixels.to(brotensor::Device::CUDA);
+        brotensor::Tensor emb_gpu = enc.encode(pixels_gpu);
+        check(emb_gpu.device == brotensor::Device::CUDA,
+              "GPU embedding stays on the GPU");
+
+        brotensor::Tensor emb_back = emb_gpu.to(brotensor::Device::CPU);
+        check(emb_back.rows == emb.rows && emb_back.cols == emb.cols,
+              "GPU embedding has the CPU shape");
+        float worst = 0.0f;
+        const float* a = emb.host_f32();
+        const float* b = emb_back.host_f32();
+        for (int i = 0; i < emb.cols; ++i)
+            worst = std::max(worst, std::fabs(a[i] - b[i]));
+        if (worst > 1e-3f) {
+            std::fprintf(stderr, "FAIL: CPU/CUDA embedding diff %g > 1e-3\n", worst);
+            ++failures;
+        }
+        std::printf("sam_image_encoder: CUDA parity max abs diff %g\n", worst);
+    } else {
+        std::printf("sam_image_encoder: no CUDA device, GPU parity skipped\n");
+    }
+
+    std::remove(path.c_str());
 
     if (failures) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);

@@ -20,15 +20,16 @@
 //
 // Most blocks attend over local 14x14 windows; a handful (global_attn_indexes)
 // attend globally over the full 64x64 grid. Every op is composed from brotensor
-// primitives — the decomposed-rel-pos attention is `brotensor`'s
-// self_attention_decomposed_rel_pos_forward, the exact SAM/ViTDet kernel.
+// primitives — windowed blocks use `brotensor`'s
+// self_attention_decomposed_rel_pos_windowed_forward and global blocks use the
+// single-grid self_attention_decomposed_rel_pos_forward, the exact SAM/ViTDet
+// kernels — so the whole forward path is device-neutral.
 //
-// CPU/FP32 today. The windowed-attention path gathers per-window tokens with
-// host loops, so encode() requires host-resident FP32 tensors; the brotensor
-// ops it composes are device-neutral, so a GPU path only awaits a
-// window-partition gather op in brotensor (the "missing kernel -> add it to
-// brotensor" rule). Weights are loaded widened to host FP32 regardless of the
-// checkpoint's on-disk dtype (F32 / F16 / BF16).
+// FP32. Weights load widened to host FP32 regardless of the checkpoint's
+// on-disk dtype (F32 / F16 / BF16); call to(Device) to migrate the loaded
+// weights onto a compute device, then feed encode() a pixel tensor on that same
+// device and the entire encode runs there (CPU or CUDA). FP16 GPU weights are a
+// later optimization.
 
 #include "brotensor/tensor.h"
 
@@ -85,10 +86,21 @@ public:
     void load(const std::string& dir);
     void load_file(const std::string& path);
 
-    // Run the encoder. `pixels` must be a host FP32 (1, 3*img_size*img_size)
-    // NCHW tensor — the output of sam::preprocess. Returns the dense image
-    // embedding as a host FP32 (1, out_chans*grid*grid) NCHW tensor.
-    // Throws if pixels has the wrong shape/dtype/device or weights aren't loaded.
+    // Migrate the loaded weights onto `dev` (FP32 preserved). encode() then runs
+    // on `dev` and expects a pixel tensor resident there. No-op if already on
+    // `dev`. Throws if weights aren't loaded yet.
+    void to(brotensor::Device dev);
+
+    // The device the weights currently live on (where encode() runs). CPU until
+    // to() is called.
+    brotensor::Device device() const { return device_; }
+
+    // Run the encoder. `pixels` must be an FP32 (1, 3*img_size*img_size) NCHW
+    // tensor resident on device() — the output of sam::preprocess, migrated to
+    // the encoder's device if that isn't the CPU. Returns the dense image
+    // embedding as an FP32 (1, out_chans*grid*grid) NCHW tensor on the same
+    // device. Throws if pixels has the wrong shape/dtype/device or weights
+    // aren't loaded.
     brotensor::Tensor encode(const brotensor::Tensor& pixels) const;
 
     const EncoderConfig& config() const { return cfg_; }
@@ -96,6 +108,7 @@ public:
 private:
     EncoderConfig                   cfg_;
     std::unique_ptr<EncoderWeights> w_;
+    brotensor::Device               device_ = brotensor::Device::CPU;
 };
 
 }  // namespace brovisionml::sam

@@ -246,85 +246,33 @@ void layer_norm_2d(Tensor& X, const Tensor& gamma, const Tensor& beta,
     brotensor::sequence_to_nchw(normed, 1, C, H, W, X);
 }
 
-// Windowed multi-head attention with decomposed rel-pos. Mirrors SAM's
-// window_partition: zero-pad the bottom/right of the grid to a multiple of the
-// window, run the attention kernel independently per window (grid == window),
-// then crop back. The per-window gather/scatter is host-side, so X must be
-// host FP32.
-Tensor windowed_attention(const Tensor& X, const BlockWeights& b,
-                          int g, int win, int num_heads, float scale) {
-    const int D   = X.cols;
-    const int pad = (win - g % win) % win;
-    const int gp  = g + pad;          // padded grid side
-    const int nw  = gp / win;         // windows per side
-
-    // Scatter content into a zero-padded (gp*gp, D) grid (top-left aligned).
-    Tensor padded = Tensor::mat(gp * gp, D);
-    {
-        const float* src = X.host_f32();
-        float* dst = padded.host_f32_mut();
-        for (int h = 0; h < g; ++h)
-            for (int wv = 0; wv < g; ++wv) {
-                const float* s = src + static_cast<std::size_t>(h * g + wv) * D;
-                float* d = dst + static_cast<std::size_t>(h * gp + wv) * D;
-                for (int c = 0; c < D; ++c) d[c] = s[c];
-            }
-    }
-
-    Tensor out_padded = Tensor::mat(gp * gp, D);
-    Tensor win_in     = Tensor::mat(win * win, D);
-    Tensor win_out;
-    for (int wy = 0; wy < nw; ++wy) {
-        for (int wx = 0; wx < nw; ++wx) {
-            // Gather this window's tokens in row-major (r, c) order.
-            float* wi = win_in.host_f32_mut();
-            const float* pad_p = padded.host_f32();
-            for (int r = 0; r < win; ++r)
-                for (int c = 0; c < win; ++c) {
-                    const int srow = (wy * win + r) * gp + (wx * win + c);
-                    const float* s = pad_p + static_cast<std::size_t>(srow) * D;
-                    float* d = wi + static_cast<std::size_t>(r * win + c) * D;
-                    for (int e = 0; e < D; ++e) d[e] = s[e];
-                }
-
-            brotensor::self_attention_decomposed_rel_pos_forward(
-                win_in, b.q_w, &b.q_b, b.k_w, &b.k_b, b.v_w, &b.v_b,
-                b.proj_w, &b.proj_b, b.rel_pos_h, b.rel_pos_w,
-                num_heads, win, win, scale, win_out);
-
-            const float* wo = win_out.host_f32();
-            float* op = out_padded.host_f32_mut();
-            for (int r = 0; r < win; ++r)
-                for (int c = 0; c < win; ++c) {
-                    const int drow = (wy * win + r) * gp + (wx * win + c);
-                    const float* s = wo + static_cast<std::size_t>(r * win + c) * D;
-                    float* d = op + static_cast<std::size_t>(drow) * D;
-                    for (int e = 0; e < D; ++e) d[e] = s[e];
-                }
-        }
-    }
-
-    // Crop the padding away, back to (g*g, D).
-    Tensor out = Tensor::mat(g * g, D);
-    {
-        const float* src = out_padded.host_f32();
-        float* dst = out.host_f32_mut();
-        for (int h = 0; h < g; ++h)
-            for (int wv = 0; wv < g; ++wv) {
-                const float* s = src + static_cast<std::size_t>(h * gp + wv) * D;
-                float* d = dst + static_cast<std::size_t>(h * g + wv) * D;
-                for (int c = 0; c < D; ++c) d[c] = s[c];
-            }
-    }
-    return out;
-}
-
 }  // namespace
+
+void ImageEncoder::to(brotensor::Device dev) {
+    if (!w_->loaded) fail("to() called before load()");
+    if (dev == device_) return;
+    auto mv = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
+    mv(w_->patch_w); mv(w_->patch_b); mv(w_->pos_embed);
+    for (BlockWeights& b : w_->blocks) {
+        mv(b.ln1_w); mv(b.ln1_b);
+        mv(b.q_w); mv(b.q_b); mv(b.k_w); mv(b.k_b); mv(b.v_w); mv(b.v_b);
+        mv(b.proj_w); mv(b.proj_b);
+        mv(b.rel_pos_h); mv(b.rel_pos_w);
+        mv(b.ln2_w); mv(b.ln2_b);
+        mv(b.mlp1_w); mv(b.mlp1_b); mv(b.mlp2_w); mv(b.mlp2_b);
+    }
+    mv(w_->neck_c1_w); mv(w_->neck_ln1_w); mv(w_->neck_ln1_b);
+    mv(w_->neck_c2_w); mv(w_->neck_ln2_w); mv(w_->neck_ln2_b);
+    device_ = dev;
+}
 
 brotensor::Tensor ImageEncoder::encode(const brotensor::Tensor& pixels) const {
     if (!w_->loaded) fail("encode() called before load()");
-    if (pixels.device != brotensor::Device::CPU || pixels.dtype != brotensor::Dtype::FP32)
-        fail("encode() requires a host FP32 pixel tensor");
+    if (pixels.dtype != brotensor::Dtype::FP32)
+        fail("encode() requires an FP32 pixel tensor");
+    if (pixels.device != device_)
+        fail("encode() pixel tensor must be on the encoder's device "
+             "(call to() to move the weights, or migrate the pixels)");
     const int S = cfg_.img_size;
     if (pixels.rows != 1 || pixels.cols != cfg_.in_chans * S * S)
         fail("pixels must be (1, in_chans*img_size*img_size)");
@@ -359,8 +307,10 @@ brotensor::Tensor ImageEncoder::encode(const brotensor::Tensor& pixels) const {
                 b.proj_w, &b.proj_b, b.rel_pos_h, b.rel_pos_w,
                 cfg_.num_heads, g, g, scale, attn);
         } else {
-            attn = windowed_attention(h, b, g, cfg_.window_size,
-                                      cfg_.num_heads, scale);
+            brotensor::self_attention_decomposed_rel_pos_windowed_forward(
+                h, b.q_w, &b.q_b, b.k_w, &b.k_b, b.v_w, &b.v_b,
+                b.proj_w, &b.proj_b, b.rel_pos_h, b.rel_pos_w,
+                cfg_.num_heads, g, g, cfg_.window_size, scale, attn);
         }
         brotensor::add_inplace(x, attn);
 
