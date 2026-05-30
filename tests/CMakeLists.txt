@@ -1,0 +1,12 @@
+function(brovisionml_add_test name)
+    add_executable(${name} ${ARGN})
+    target_link_libraries(${name} PRIVATE brovisionml)
+    if(MSVC)
+        target_compile_options(${name} PRIVATE /W4)
+    else()
+        target_compile_options(${name} PRIVATE -Wall -Wextra)
+    endif()
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+brovisionml_add_test(brovisionml_test_smoke test_smoke.cpp)

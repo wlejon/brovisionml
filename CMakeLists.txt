@@ -1,0 +1,142 @@
+cmake_minimum_required(VERSION 3.24)
+project(brovisionml LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(MSVC)
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:/MP>
+        $<$<COMPILE_LANGUAGE:CXX>:/permissive->
+        $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
+    )
+    if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+endif()
+
+# --- GPU backend selection ---
+#
+# brovisionml composes brotensor ops — it ships no GPU kernels of its own, so it
+# enables no CUDA/Metal language. It only forwards the backend choice so a
+# standalone GPU build resolves brotensor's CUDA/Metal backend. Built inside
+# bro, brotensor is already a target (added transitively) and the
+# if(NOT TARGET ...) guards below reuse it, backend and all.
+option(BROTENSOR_WITH_CUDA  "Build the CUDA GPU backend"  OFF)
+option(BROTENSOR_WITH_METAL "Build the Metal GPU backend" OFF)
+
+# --- Siblings: bromath (header-only) + brotensor (tensor + ops) + broimage ---
+#
+# Prefer standalone repos at ../<name>; fall back to third_party/ submodules.
+# Matches the pattern documented in bro/docs/multi-repo-workflow.md.
+#
+# Order matters: bromath and brotensor are resolved first so broimage (which
+# links both, guarded with its own if(NOT TARGET ...)) reuses these targets
+# rather than adding a second copy.
+
+set(BROMATH_DIR "${CMAKE_SOURCE_DIR}/../bromath" CACHE PATH
+    "Path to standalone bromath repo (set to a missing path to force submodule fallback)")
+if(NOT TARGET bromath)
+    if(EXISTS "${BROMATH_DIR}/CMakeLists.txt")
+        add_subdirectory("${BROMATH_DIR}" "${CMAKE_BINARY_DIR}/bromath" EXCLUDE_FROM_ALL)
+    elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/bromath/CMakeLists.txt")
+        add_subdirectory(third_party/bromath EXCLUDE_FROM_ALL)
+    else()
+        message(FATAL_ERROR
+            "bromath not found at ${BROMATH_DIR} or third_party/bromath. "
+            "Clone the bromath repo next to this repo, or override with -DBROMATH_DIR=...")
+    endif()
+endif()
+
+set(BROTENSOR_DIR "${CMAKE_SOURCE_DIR}/../brotensor" CACHE PATH
+    "Path to standalone brotensor repo (set to a missing path to force submodule fallback)")
+if(NOT TARGET brotensor)
+    if(EXISTS "${BROTENSOR_DIR}/CMakeLists.txt")
+        add_subdirectory("${BROTENSOR_DIR}" "${CMAKE_BINARY_DIR}/brotensor" EXCLUDE_FROM_ALL)
+    elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/brotensor/CMakeLists.txt")
+        add_subdirectory(third_party/brotensor EXCLUDE_FROM_ALL)
+    else()
+        message(FATAL_ERROR
+            "brotensor not found at ${BROTENSOR_DIR} or third_party/brotensor. "
+            "Clone the brotensor repo next to this repo, or override with -DBROTENSOR_DIR=...")
+    endif()
+endif()
+
+# broimage — host-side image decode + geometric resampling + normalize presets
+# (CLIP/ImageNet/SAM). It is the preprocessing front-end every vision model in
+# this repo feeds: decode → resize/letterbox → normalize → NHWC->NCHW. Its own
+# CUDA/Metal image preproc forwards into brotensor, so no GPU language here.
+set(BROIMAGE_DIR "${CMAKE_SOURCE_DIR}/../broimage" CACHE PATH
+    "Path to standalone broimage repo (set to a missing path to force submodule fallback)")
+if(NOT TARGET broimage)
+    if(EXISTS "${BROIMAGE_DIR}/CMakeLists.txt")
+        add_subdirectory("${BROIMAGE_DIR}" "${CMAKE_BINARY_DIR}/broimage" EXCLUDE_FROM_ALL)
+    elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/broimage/CMakeLists.txt")
+        add_subdirectory(third_party/broimage EXCLUDE_FROM_ALL)
+    else()
+        message(FATAL_ERROR
+            "broimage not found at ${BROIMAGE_DIR} or third_party/broimage. "
+            "Clone the broimage repo next to this repo, or override with -DBROIMAGE_DIR=...")
+    endif()
+endif()
+
+# --- brovisionml library ---
+
+add_library(brovisionml STATIC)
+add_library(brovisionml::brovisionml ALIAS brovisionml)
+
+target_include_directories(brovisionml PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+target_compile_features(brovisionml PUBLIC cxx_std_20)
+target_link_libraries(brovisionml PUBLIC
+    bromath::bromath
+    brotensor::brotensor
+    broimage::broimage
+)
+
+if(MSVC)
+    target_compile_options(brovisionml PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4>)
+else()
+    target_compile_options(brovisionml PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wextra>)
+endif()
+
+target_sources(brovisionml PRIVATE
+    src/version.cpp
+)
+
+# --- Install ---
+#
+# Off by default: brovisionml is consumed as a sibling repo via the same
+# add_subdirectory pattern bro uses for its other libraries, not via
+# find_package. When enabled, this installs only the static library and the
+# public headers — no CMake package config, since the sibling libraries it
+# links are EXCLUDE_FROM_ALL add_subdirectory targets that are not themselves
+# exported. Consume brovisionml with add_subdirectory().
+option(BROVISIONML_INSTALL "Install the brovisionml static library and headers" OFF)
+if(BROVISIONML_INSTALL)
+    include(GNUInstallDirs)
+    install(TARGETS brovisionml
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+endif()
+
+# --- Tools ---
+option(BROVISIONML_TOOLS "Build brovisionml CLI tools" ON)
+if(BROVISIONML_TOOLS AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    # CLI drivers land here as models come online (e.g. a SAM segment tool).
+endif()
+
+# --- Tests ---
+option(BROVISIONML_TESTS "Build brovisionml tests" ON)
+if(BROVISIONML_TESTS AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
