@@ -8,7 +8,9 @@
 #include "brovisionml/sam.h"
 
 #include "brotensor/safetensors.h"
+#include "brotensor/runtime.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -221,8 +223,10 @@ int main() {
     check(sam.has_image(), "image set");
 
     // ── Point prompt (multimask): 3 masks at the original 50x40 resolution. ──
+    const std::vector<std::array<float, 2>> pt = {{25.0f, 20.0f}};
+    const std::vector<int> pt_labels = {1};
+    Segmentation seg = sam.segment(pt, pt_labels, {}, /*multimask=*/true);
     {
-        Segmentation seg = sam.segment({{25.0f, 20.0f}}, {1}, {}, /*multimask=*/true);
         check(seg.num == K - 1, "multimask returns 3 masks");
         check(seg.height == H && seg.width == W, "masks at original resolution");
         check(seg.logits.size() ==
@@ -237,13 +241,40 @@ int main() {
 
     // ── Box prompt (single mask). ──
     {
-        Segmentation seg = sam.segment({}, {}, {{5.0f, 5.0f, 45.0f, 35.0f}},
-                                       /*multimask=*/false);
-        check(seg.num == 1 && seg.height == H && seg.width == W,
+        Segmentation bseg = sam.segment({}, {}, {{5.0f, 5.0f, 45.0f, 35.0f}},
+                                        /*multimask=*/false);
+        check(bseg.num == 1 && bseg.height == H && bseg.width == W,
               "box single-mask shape");
         bool finite = true;
-        for (float v : seg.logits) if (!std::isfinite(v)) finite = false;
+        for (float v : bseg.logits) if (!std::isfinite(v)) finite = false;
         check(finite, "box mask finite");
+    }
+
+    // ── Full-pipeline CUDA parity: the same image + point prompt, run with the
+    //    whole model migrated to the GPU (set_image encodes on-device, segment
+    //    decodes on-device; mask postprocess is host either way). Skipped
+    //    cleanly when no GPU is present. ──
+    brotensor::init();
+    if (brotensor::is_available(brotensor::Device::CUDA)) {
+        Sam sam_gpu(cfg);
+        sam_gpu.load_file(path);
+        sam_gpu.to(brotensor::Device::CUDA);
+        check(sam_gpu.device() == brotensor::Device::CUDA, "Sam migrated to CUDA");
+        sam_gpu.set_image(img.data(), W, H, 3);
+        Segmentation gseg = sam_gpu.segment(pt, pt_labels, {}, /*multimask=*/true);
+        check(gseg.num == seg.num && gseg.height == H && gseg.width == W,
+              "GPU segmentation shape matches CPU");
+        float worst = 0.0f;
+        for (std::size_t i = 0;
+             i < seg.logits.size() && i < gseg.logits.size(); ++i)
+            worst = std::max(worst, std::fabs(seg.logits[i] - gseg.logits[i]));
+        if (worst > 1e-2f) {
+            std::fprintf(stderr, "FAIL: CPU/CUDA SAM logit diff %g > 1e-2\n", worst);
+            ++failures;
+        }
+        std::printf("sam (end-to-end): CUDA parity max abs diff %g\n", worst);
+    } else {
+        std::printf("sam (end-to-end): no CUDA device, GPU parity skipped\n");
     }
 
     std::remove(path.c_str());
