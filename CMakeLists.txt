@@ -112,6 +112,7 @@ target_sources(brovisionml PRIVATE
     src/sam_prompt_encoder.cpp
     src/sam_mask_decoder.cpp
     src/sam.cpp
+    src/sam_amg.cpp
 )
 
 # --- Install ---
@@ -136,15 +137,17 @@ endif()
 # --- Tools ---
 option(BROVISIONML_TOOLS "Build brovisionml CLI tools" ON)
 if(BROVISIONML_TOOLS AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    add_executable(sam_segment tools/sam_segment.cpp)
-    target_link_libraries(sam_segment PRIVATE brovisionml)
-    if(MSVC)
-        target_compile_options(sam_segment PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4>)
-    else()
-        target_compile_options(sam_segment PRIVATE
-            $<$<COMPILE_LANGUAGE:CXX>:-Wall>
-            $<$<COMPILE_LANGUAGE:CXX>:-Wextra>)
-    endif()
+    foreach(tool sam_segment sam_amg)
+        add_executable(${tool} tools/${tool}.cpp)
+        target_link_libraries(${tool} PRIVATE brovisionml)
+        if(MSVC)
+            target_compile_options(${tool} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4>)
+        else()
+            target_compile_options(${tool} PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+                $<$<COMPILE_LANGUAGE:CXX>:-Wextra>)
+        endif()
+    endforeach()
 endif()
 
 # --- Tests ---
