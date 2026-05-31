@@ -11,6 +11,8 @@
 #   scripts/download-weights.sh [model] [--repo R] [--out-dir D] [--force]
 #
 #   model            sam-vit-base (default) | sam-vit-large | sam-vit-huge
+#                    | depth-anything-v2-small | depth-anything-v2-base
+#                    | depth-anything-v2-large
 #   --repo R         override the HuggingFace repo id
 #   --out-dir D      override the output directory
 #   --force          re-download even if the file already exists
@@ -51,6 +53,7 @@ FORCE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         sam-vit-base|sam-vit-large|sam-vit-huge) MODEL="$1"; shift ;;
+        depth-anything-v2-small|depth-anything-v2-base|depth-anything-v2-large) MODEL="$1"; shift ;;
         --repo)    REPO="${2:?--repo needs a value}"; shift 2 ;;
         --out-dir) OUT_DIR="${2:?--out-dir needs a value}"; shift 2 ;;
         --force)   FORCE=1; shift ;;
@@ -66,12 +69,24 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # --- per-model file lists ---------------------------------------------------
 # Every SAM checkpoint is the same three files; only the source repo differs.
+# SUBDIR is the on-disk weights/<SUBDIR> name (kept HF-cased for the depth
+# models so it matches what the loaders/tests look for).
+SUBDIR="$MODEL"
 case "$MODEL" in
     sam-vit-base)  [ -n "$REPO" ] || REPO="facebook/sam-vit-base"  ;;
     sam-vit-large) [ -n "$REPO" ] || REPO="facebook/sam-vit-large" ;;
     sam-vit-huge)  [ -n "$REPO" ] || REPO="facebook/sam-vit-huge"  ;;
+    depth-anything-v2-small)
+        [ -n "$REPO" ] || REPO="depth-anything/Depth-Anything-V2-Small-hf"
+        SUBDIR="Depth-Anything-V2-Small" ;;
+    depth-anything-v2-base)
+        [ -n "$REPO" ] || REPO="depth-anything/Depth-Anything-V2-Base-hf"
+        SUBDIR="Depth-Anything-V2-Base" ;;
+    depth-anything-v2-large)
+        [ -n "$REPO" ] || REPO="depth-anything/Depth-Anything-V2-Large-hf"
+        SUBDIR="Depth-Anything-V2-Large" ;;
 esac
-[ -n "$OUT_DIR" ] || OUT_DIR="$REPO_ROOT/weights/$MODEL"
+[ -n "$OUT_DIR" ] || OUT_DIR="$REPO_ROOT/weights/$SUBDIR"
 FILES=(
     "config.json"
     "preprocessor_config.json"

@@ -27,7 +27,9 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("sam-vit-base", "sam-vit-large", "sam-vit-huge")]
+    [ValidateSet("sam-vit-base", "sam-vit-large", "sam-vit-huge",
+                 "depth-anything-v2-small", "depth-anything-v2-base",
+                 "depth-anything-v2-large")]
     [string]$Model  = "sam-vit-base",
     [string]$Repo   = "",
     [string]$OutDir = "",
@@ -36,12 +38,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# $SubDir is the on-disk weights\<SubDir> name (HF-cased for the depth models so
+# it matches what the loaders/tests look for).
+$SubDir = $Model
 switch ($Model) {
     "sam-vit-base"  { if (-not $Repo) { $Repo = "facebook/sam-vit-base"  } }
     "sam-vit-large" { if (-not $Repo) { $Repo = "facebook/sam-vit-large" } }
     "sam-vit-huge"  { if (-not $Repo) { $Repo = "facebook/sam-vit-huge"  } }
+    "depth-anything-v2-small" {
+        if (-not $Repo) { $Repo = "depth-anything/Depth-Anything-V2-Small-hf" }
+        $SubDir = "Depth-Anything-V2-Small" }
+    "depth-anything-v2-base" {
+        if (-not $Repo) { $Repo = "depth-anything/Depth-Anything-V2-Base-hf" }
+        $SubDir = "Depth-Anything-V2-Base" }
+    "depth-anything-v2-large" {
+        if (-not $Repo) { $Repo = "depth-anything/Depth-Anything-V2-Large-hf" }
+        $SubDir = "Depth-Anything-V2-Large" }
 }
-if (-not $OutDir) { $OutDir = Join-Path $PSScriptRoot "..\weights\$Model" }
+if (-not $OutDir) { $OutDir = Join-Path $PSScriptRoot "..\weights\$SubDir" }
 
 $files = @(
     "config.json",

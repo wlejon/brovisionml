@@ -13,6 +13,7 @@ brovisionml_add_test(brovisionml_test_smoke            test_smoke.cpp)
 brovisionml_add_test(brovisionml_test_dpt_preprocess   test_dpt_preprocess.cpp)
 brovisionml_add_test(brovisionml_test_dinov2           test_dinov2.cpp)
 brovisionml_add_test(brovisionml_test_dpt_head         test_dpt_head.cpp)
+brovisionml_add_test(brovisionml_test_depth_anything   test_depth_anything.cpp)
 brovisionml_add_test(brovisionml_test_sam_preprocess   test_sam_preprocess.cpp)
 brovisionml_add_test(brovisionml_test_sam_image_encoder test_sam_image_encoder.cpp)
 brovisionml_add_test(brovisionml_test_sam_prompt_encoder test_sam_prompt_encoder.cpp)
@@ -31,4 +32,11 @@ target_compile_definitions(brovisionml_test_sam_weights PRIVATE
 # The automatic-mask-generator test also exercises the real checkpoint when
 # present (a small grid for runtime), and skips that part cleanly when absent.
 target_compile_definitions(brovisionml_test_sam_amg PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+
+# Depth-Anything-V2 end-to-end test: structural checks always run; the
+# real-checkpoint run is gated on a Depth-Anything-V2 checkpoint under weights/
+# (download via scripts/download-weights.sh depth-anything-v2-small) and skips
+# cleanly when absent.
+target_compile_definitions(brovisionml_test_depth_anything PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")

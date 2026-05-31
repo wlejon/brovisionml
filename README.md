@@ -24,8 +24,13 @@ Models planned / implemented:
   decode-many-prompts) and a `sam_segment` CLI driver. The **automatic mask
   generator** ("segment everything") rides on top of the same orchestrator —
   see below.
-- Depth estimation, detection, and matting are natural follow-ons that reuse
-  the same ViT-encoder + task-head shape.
+- **Depth-Anything-V2** — monocular relative-depth estimation, **runnable end
+  to end**: a DINOv2 ViT backbone + a DPT (reassemble / RefineNet-fusion / head)
+  decoder, tied together by a `DepthEstimator` orchestrator and a
+  `depth_estimate` CLI driver. See below.
+- Detection and matting are natural follow-ons; the DINOv2 backbone and DPT head
+  here are the reusable substrate for further DPT-style tasks (e.g. surface
+  normals, semantic segmentation).
 
 ## Dependencies
 
@@ -154,6 +159,52 @@ sam_amg /path/to/sam-vit-huge photo.jpg --points-per-side 32 --out everything.pn
 # other flags: --pred-iou-thresh --stability-thresh --crop-n-layers
 #              --min-region-area --points-per-batch --variant --cuda
 ```
+
+## Depth-Anything-V2
+
+Monocular relative-depth estimation. The model is a DINOv2 ViT backbone feeding
+a DPT decoder — the same `image → dense map` shape SAM's encoder + head has, and
+every piece maps onto ops `brotensor` already exposes:
+
+| Component | brotensor ops |
+|---|---|
+| DINOv2 backbone | `conv2d` (patch embed), `mha_forward` (plain global self-attention), `layernorm`, `gelu`; absolute position embedding bicubically interpolated to the patch grid; per-block LayerScale folded into the projections at load |
+| DPT reassemble | `conv2d` (1×1 project), `conv_transpose2d` (up) / `interp2d` / strided `conv2d` (down) |
+| DPT RefineNet fusion | pre-activation residual `conv2d` units + `interp2d_align_corners_forward` (the align_corners=True bilinear upsample DPT needs) + 1×1 `conv2d` |
+| Depth head | `conv2d` + align-corners upsample + ReLU |
+
+Preprocessing (aspect-preserving resize to a multiple of 14 → ImageNet
+normalize, no padding) is `broimage`'s job via `dpt::preprocess`. The
+`DepthEstimator` orchestrator (`brovisionml/depth_anything.h`) loads one HF
+`DepthAnythingForDepthEstimation` `model.safetensors` and maps pixels to a depth
+map at the original resolution:
+
+```cpp
+brovisionml::depth::DepthEstimator est(
+    brovisionml::depth::DepthAnythingConfig::v2_small());
+est.load("/path/to/Depth-Anything-V2-Small");   // dir holding model.safetensors
+auto dm = est.estimate(rgb, w, h, /*channels=*/3);
+// dm.depth is row-major h*w relative inverse-depth (nearer = larger); not metric
+```
+
+The `depth_estimate` CLI tool is the same flow from the shell — it writes a
+min-max-normalized grayscale depth PNG (brighter = nearer):
+
+```bash
+depth_estimate /path/to/Depth-Anything-V2-Small photo.jpg --out depth.png
+# flags: --variant small|base|large  --invert  --cuda
+```
+
+Fetch a checkpoint with `scripts/download-weights.sh depth-anything-v2-small`
+(`-base` / `-large` for the larger ViT-B / ViT-L variants). The output is
+*relative* depth in Depth-Anything's convention (larger = nearer), not metric.
+
+Backends run identically: CPU (FP32) and CUDA (FP16) agree to a few times 1e-5
+on the real Small checkpoint. Note that the position-embedding and image
+resamples use brotensor's bicubic (Catmull-Rom, a=-0.5); PyTorch's
+`interpolate(mode="bicubic")` uses a=-0.75, so for non-square inputs the output
+differs from the HF Python reference by a small amount (the native-grid /
+square-input path is exact).
 
 ## License
 
