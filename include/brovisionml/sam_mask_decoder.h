@@ -105,6 +105,33 @@ public:
                         const brotensor::Tensor& dense,
                         bool multimask_output) const;
 
+    // Batched decode of `batch` independent prompt sets that share one image.
+    // The whole two-way transformer runs once over a block-diagonal pack of the
+    // prompts (packed variable-length attention), so the per-prompt decode
+    // overhead — tiny matmuls, kernel launches, the host token assembly — is
+    // paid once instead of `batch` times. This is what makes the automatic mask
+    // generator's dense point grid affordable.
+    //
+    // Constraints (the cheap, common case — point grids with no mask prompt):
+    //   * image_embedding / image_pe / dense are the SHARED (1, hidden*grid*grid)
+    //     maps, broadcast across every prompt (a single image, the no-mask dense
+    //     embedding). Per-prompt dense (mask prompts) is not supported here.
+    //   * sparse is (batch * n_sparse_per_prompt, hidden_size): the prompts'
+    //     sparse tokens packed in order, EVERY prompt contributing the same
+    //     `n_sparse_per_prompt` rows (a uniform prompt shape — e.g. one point
+    //     plus its padding token). Pass n_sparse_per_prompt explicitly.
+    //
+    // Returns masks (batch*num_out, mask_size*mask_size) and iou (batch*num_out,
+    // 1) with prompt b occupying rows [b*num_out, (b+1)*num_out); num_out is the
+    // per-prompt count (num_mask_tokens-1 if multimask else 1). Equivalent,
+    // within floating-point tolerance, to calling decode() once per prompt.
+    DecodedMasks decode_batched(const brotensor::Tensor& image_embedding,
+                                const brotensor::Tensor& image_pe,
+                                const brotensor::Tensor& sparse,
+                                int batch, int n_sparse_per_prompt,
+                                const brotensor::Tensor& dense,
+                                bool multimask_output) const;
+
     const MaskDecoderConfig& config() const { return cfg_; }
 
 private:

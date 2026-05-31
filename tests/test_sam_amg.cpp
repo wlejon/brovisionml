@@ -20,7 +20,9 @@
 #include "brotensor/safetensors.h"
 #include "brotensor/runtime.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -344,6 +346,46 @@ int main() {
             AutomaticMaskGenerator g(sam, c);
             std::vector<GeneratedMask> masks = g.generate(img.data(), W, H, 3);
             check_masks(masks, W, H, "min-region");
+        }
+
+        // Batched-decode parity: segment_points(B points) must reproduce, point
+        // for point, the result of B individual single-foreground-click
+        // segment() calls — same image, packed block-diagonally through one
+        // decoder pass instead of B. This is the correctness anchor for the
+        // batched mask-decoder path the AMG hot loop now uses.
+        {
+            sam.set_image(img.data(), W, H, 3);
+            const std::vector<std::array<float, 2>> pts = {
+                {10.f, 10.f}, {25.f, 20.f}, {40.f, 30.f}, {5.f, 35.f}, {30.f, 5.f}};
+            const std::vector<Segmentation> batched = sam.segment_points(pts, true);
+            check(batched.size() == pts.size(),
+                  "segment_points returns one result per point");
+
+            float max_logit_diff = 0.0f, max_iou_diff = 0.0f;
+            for (std::size_t i = 0; i < pts.size() && i < batched.size(); ++i) {
+                const Segmentation single = sam.segment({pts[i]}, {1}, {}, true);
+                const Segmentation& b = batched[i];
+                check(b.num == single.num && b.height == single.height &&
+                      b.width == single.width, "batched/single result shapes match");
+                check(b.logits.size() == single.logits.size(),
+                      "batched/single logit counts match");
+                check(b.iou.size() == single.iou.size(),
+                      "batched/single iou counts match");
+                const std::size_t nl = std::min(b.logits.size(), single.logits.size());
+                for (std::size_t k = 0; k < nl; ++k)
+                    max_logit_diff = std::max(
+                        max_logit_diff, std::fabs(b.logits[k] - single.logits[k]));
+                const std::size_t ni = std::min(b.iou.size(), single.iou.size());
+                for (std::size_t k = 0; k < ni; ++k)
+                    max_iou_diff = std::max(
+                        max_iou_diff, std::fabs(b.iou[k] - single.iou[k]));
+            }
+            std::printf("  batched-vs-single: max|dlogit|=%.2e max|diou|=%.2e\n",
+                        static_cast<double>(max_logit_diff),
+                        static_cast<double>(max_iou_diff));
+            check(max_logit_diff < 1e-4f,
+                  "batched decode matches single decode (logits)");
+            check(max_iou_diff < 1e-4f, "batched decode matches single decode (iou)");
         }
 
         std::remove(path.c_str());

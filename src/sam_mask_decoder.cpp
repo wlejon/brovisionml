@@ -5,6 +5,8 @@
 
 #include "sam_weights_util.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -215,35 +217,60 @@ void MaskDecoder::to(brotensor::Device dev) {
 
 namespace {
 
-// A device-resident INT32 cu_seqlens prefix-sum [0, total] (length 2, the
-// batch_size==1 case). Built on the host then migrated, so the same code path
-// yields a host pointer on CPU and a device pointer on GPU.
-Tensor make_cu(brotensor::Device dev, int total) {
-    int32_t h[2] = {0, total};
-    Tensor cpu = Tensor::view(brotensor::Device::CPU, h, 2, 1, brotensor::Dtype::INT32);
+// A device-resident INT32 cu_seqlens prefix-sum [0, seqlen, 2*seqlen, ...,
+// batch*seqlen] (length batch+1) for a packed batch of equal-length sequences.
+// Built on the host then migrated, so the same code path yields a host pointer
+// on CPU and a device pointer on GPU. batch==1 reduces to [0, seqlen].
+Tensor make_cu(brotensor::Device dev, int batch, int seqlen) {
+    std::vector<int32_t> h(static_cast<std::size_t>(batch) + 1);
+    for (int i = 0; i <= batch; ++i) h[static_cast<std::size_t>(i)] = i * seqlen;
+    Tensor cpu = Tensor::view(brotensor::Device::CPU, h.data(), batch + 1, 1,
+                              brotensor::Dtype::INT32);
     return cpu.to(dev);  // owning copy on dev (clone() when dev == CPU)
 }
 
 // out = SamAttention(q_in, k_in, v_in): project to internal dim, multi-head
 // scaled-dot-product over pre-projected Q/K/V, output projection back to D.
+// `batch` packs that many independent sequences block-diagonally: Q holds
+// batch*seqlen_q rows, K/V batch*seqlen_k rows; sequences do not cross-attend.
+// batch==1 (the default, with seqlen_* derived from the row counts) is the
+// single-prompt path.
 void run_attn(const AttnW& a, const Tensor& q_in, const Tensor& k_in,
-              const Tensor& v_in, int num_heads, Tensor& out) {
+              const Tensor& v_in, int num_heads, Tensor& out,
+              int batch = 1, int seqlen_q = -1, int seqlen_k = -1) {
     Tensor q, k, v;
     brotensor::linear_forward_batched(a.q_w, a.q_b, q_in, q);  // (Lq, internal)
     brotensor::linear_forward_batched(a.k_w, a.k_b, k_in, k);  // (Lk, internal)
     brotensor::linear_forward_batched(a.v_w, a.v_b, v_in, v);  // (Lk, internal)
     const int Lq = q.rows, Lk = k.rows, internal = q.cols;
     const int head_dim = internal / num_heads;
-    Tensor cu_q = make_cu(q.device, Lq);
-    Tensor cu_k = make_cu(k.device, Lk);
+    const int sq = seqlen_q < 0 ? Lq : seqlen_q;
+    const int sk = seqlen_k < 0 ? Lk : seqlen_k;
+    Tensor cu_q = make_cu(q.device, batch, sq);
+    Tensor cu_k = make_cu(k.device, batch, sk);
     Tensor o;
     brotensor::flash_attention_varlen_forward(
         q, k, v,
         reinterpret_cast<const int32_t*>(cu_q.data),
         reinterpret_cast<const int32_t*>(cu_k.data),
-        /*batch_size=*/1, /*max_seqlen_q=*/Lq, /*max_seqlen_k=*/Lk,
+        batch, /*max_seqlen_q=*/sq, /*max_seqlen_k=*/sk,
         num_heads, head_dim, /*causal=*/false, o);              // (Lq, internal)
     brotensor::linear_forward_batched(a.out_w, a.out_b, o, out);  // (Lq, D)
+}
+
+// Replicate a (R,C) tensor B times along its rows -> (B*R, C), via one host
+// round-trip. Used to broadcast the shared image keys / positional encoding
+// across a prompt batch so each prompt gets its own evolving copy.
+Tensor tile_rows(const Tensor& t, int B) {
+    Tensor host = t.to(brotensor::Device::CPU);
+    const int R = host.rows, C = host.cols;
+    Tensor out = Tensor::mat(B * R, C);
+    const float* s = host.host_f32();
+    float* d = out.host_f32_mut();
+    const std::size_t plane = static_cast<std::size_t>(R) * C;
+    for (int b = 0; b < B; ++b)
+        std::copy(s, s + plane, d + static_cast<std::size_t>(b) * plane);
+    return out.to(t.device);
 }
 
 Tensor add_pe(const Tensor& base, const Tensor& pe) {
@@ -461,6 +488,228 @@ DecodedMasks MaskDecoder::decode(const brotensor::Tensor& image_embedding,
         for (int j = 0; j < num_out; ++j) io[j] = ip[start + j];
         out.iou = io.to(device_);
     }
+    return out;
+}
+
+// ─── Batched decode ────────────────────────────────────────────────────────────
+//
+// The same two-way transformer as decode(), run once over B prompts packed
+// block-diagonally. Tokens, keys, and the image PE all carry a batch dimension;
+// the packed-varlen attention keeps prompts from cross-attending. The control
+// flow mirrors decode() exactly (so B==1 is numerically the single-prompt path),
+// differing only in the per-prompt tiling of the shared image maps and the
+// per-prompt gather of the hypernetwork filters / IoU tokens at the end.
+
+DecodedMasks MaskDecoder::decode_batched(const brotensor::Tensor& image_embedding,
+                                         const brotensor::Tensor& image_pe,
+                                         const brotensor::Tensor& sparse,
+                                         int batch, int n_sparse_per_prompt,
+                                         const brotensor::Tensor& dense,
+                                         bool multimask_output) const {
+    if (!w_->loaded) fail("decode_batched() called before load()");
+    const int B  = batch;
+    const int S  = n_sparse_per_prompt;
+    const int D  = cfg_.hidden_size;
+    const int g  = cfg_.grid();
+    const int HW = g * g;
+    const int K  = cfg_.num_mask_tokens();
+    const int nh = cfg_.num_attention_heads;
+    const float eps = cfg_.layer_norm_eps;
+    if (B < 1) fail("batch must be >= 1");
+    if (S < 0) fail("n_sparse_per_prompt must be >= 0");
+
+    auto want_map = [&](const Tensor& t, const char* name) {
+        if (t.dtype != brotensor::Dtype::FP32) fail(std::string(name) + " must be FP32");
+        if (t.device != device_) fail(std::string(name) + " must be on device()");
+        if (t.rows != 1 || t.cols != D * HW)
+            fail(std::string(name) + " must be (1, hidden*grid*grid)");
+    };
+    want_map(image_embedding, "image_embedding");
+    want_map(image_pe, "image_pe");
+    want_map(dense, "dense");
+    if (S > 0) {
+        if (sparse.dtype != brotensor::Dtype::FP32) fail("sparse must be FP32");
+        if (sparse.device != device_) fail("sparse must be on device()");
+        if (sparse.cols != D) fail("sparse must have hidden_size columns");
+        if (sparse.rows != B * S) fail("sparse must have batch*n_sparse_per_prompt rows");
+    }
+
+    // ── Assemble query tokens, per prompt [iou, masks(0..K-1), sparse(S)]. ──
+    const int n_tok = 1 + K + S;
+    const int T     = B * n_tok;
+    Tensor tokens;
+    {
+        Tensor th = Tensor::mat(T, D);
+        float* dst = th.host_f32_mut();
+        const float* iou = w_->iou_token.host_f32();   // (1,D)
+        const float* mt  = w_->mask_tokens.host_f32();  // (K,D)
+        Tensor sp_host = (S > 0) ? sparse.to(brotensor::Device::CPU) : Tensor{};
+        const float* sp = (S > 0) ? sp_host.host_f32() : nullptr;
+        for (int b = 0; b < B; ++b) {
+            float* base = dst + static_cast<std::size_t>(b) * n_tok * D;
+            for (int c = 0; c < D; ++c) base[c] = iou[c];
+            for (int i = 0; i < K; ++i)
+                for (int c = 0; c < D; ++c)
+                    base[static_cast<std::size_t>(1 + i) * D + c] = mt[i * D + c];
+            for (int i = 0; i < S; ++i)
+                for (int c = 0; c < D; ++c)
+                    base[static_cast<std::size_t>(1 + K + i) * D + c] =
+                        sp[static_cast<std::size_t>(b * S + i) * D + c];
+        }
+        tokens = th.to(device_);
+    }
+
+    // ── keys = flatten(image_embedding + dense), tiled B times; image PE too. ──
+    Tensor src = add_pe(image_embedding, dense);   // (1, D*HW) NCHW
+    Tensor keys1;       brotensor::nchw_to_sequence(src, 1, D, g, g, keys1);     // (HW,D)
+    Tensor image_pe1;   brotensor::nchw_to_sequence(image_pe, 1, D, g, g, image_pe1);
+    Tensor keys       = tile_rows(keys1, B);       // (B*HW, D)
+    Tensor image_pe_s = tile_rows(image_pe1, B);   // (B*HW, D)
+
+    Tensor queries = tokens;                  // (T, D)
+    const Tensor point_embeddings = tokens;   // query PE re-added each attention
+
+    // ── Two-way transformer (block-diagonal over B prompts) ──
+    for (int i = 0; i < cfg_.num_hidden_layers; ++i) {
+        const LayerW& L = w_->layers[i];
+        Tensor attn;
+
+        // (a) self-attention on the tokens (skip_first_layer_pe on layer 0).
+        if (i == 0) {
+            run_attn(L.self_attn, queries, queries, queries, nh, attn, B, n_tok, n_tok);
+            queries = std::move(attn);
+        } else {
+            Tensor q = add_pe(queries, point_embeddings);
+            run_attn(L.self_attn, q, q, queries, nh, attn, B, n_tok, n_tok);
+            brotensor::add_inplace(queries, attn);
+        }
+        ln_apply(queries, L.ln1, eps);
+
+        // (b) cross-attention tokens -> image
+        {
+            Tensor q = add_pe(queries, point_embeddings);
+            Tensor k = add_pe(keys, image_pe_s);
+            run_attn(L.cross_t2i, q, k, keys, nh, attn, B, n_tok, HW);
+            brotensor::add_inplace(queries, attn);
+            ln_apply(queries, L.ln2, eps);
+        }
+
+        // (c) token MLP (ReLU)
+        {
+            Tensor m1; brotensor::linear_forward_batched(L.mlp1_w, L.mlp1_b, queries, m1);
+            Tensor act; brotensor::relu_forward_batched(m1, act);
+            Tensor m2; brotensor::linear_forward_batched(L.mlp2_w, L.mlp2_b, act, m2);
+            brotensor::add_inplace(queries, m2);
+            ln_apply(queries, L.ln3, eps);
+        }
+
+        // (d) cross-attention image -> tokens (updates keys)
+        {
+            Tensor q = add_pe(queries, point_embeddings);
+            Tensor k = add_pe(keys, image_pe_s);
+            run_attn(L.cross_i2t, k, q, queries, nh, attn, B, HW, n_tok);   // (B*HW, D)
+            brotensor::add_inplace(keys, attn);
+            ln_apply(keys, L.ln4, eps);
+        }
+    }
+
+    // ── Final token -> image attention ──
+    {
+        Tensor attn;
+        Tensor q = add_pe(queries, point_embeddings);
+        Tensor k = add_pe(keys, image_pe_s);
+        run_attn(w_->final_attn, q, k, keys, nh, attn, B, n_tok, HW);
+        brotensor::add_inplace(queries, attn);
+        ln_apply(queries, w_->ln_final, eps);
+    }
+
+    // ── Upscale keys 4x (batched NCHW) ──
+    const int cup1 = D / 4, cup2 = D / 8, ms = cfg_.mask_size();
+    Tensor src_nchw; brotensor::sequence_to_nchw(keys, B, D, g, g, src_nchw);  // (B, D*HW)
+    Tensor u1;
+    brotensor::conv_transpose2d_forward(src_nchw, w_->uc1_w, &w_->uc1_b,
+                                        B, D, g, g, cup1, 2, 2, 2, 2, 0, 0,
+                                        0, 0, 1, 1, 1, u1);     // (B, cup1*2g*2g)
+    {
+        Tensor seq; brotensor::nchw_to_sequence(u1, B, cup1, 2 * g, 2 * g, seq);
+        Tensor n;   brotensor::layernorm_forward_inference_batched(seq, w_->up_ln.w,
+                                                                   w_->up_ln.b, n, eps);
+        brotensor::sequence_to_nchw(n, B, cup1, 2 * g, 2 * g, u1);
+    }
+    Tensor a1; brotensor::gelu_exact_forward(u1, a1);
+    Tensor u2;
+    brotensor::conv_transpose2d_forward(a1, w_->uc2_w, &w_->uc2_b,
+                                        B, cup1, 2 * g, 2 * g, cup2, 2, 2, 2, 2,
+                                        0, 0, 0, 0, 1, 1, 1, u2);  // (B, cup2*4g*4g)
+    Tensor upscaled; brotensor::gelu_exact_forward(u2, upscaled);  // (B, cup2*ms*ms)
+
+    // ── Hypernetwork filters per (prompt, mask token). For token i, gather the
+    //    B rows (one per prompt) and run hyper[i] once over the (B, D) block. ──
+    Tensor queries_host = queries.to(brotensor::Device::CPU);
+    const float* qh = queries_host.host_f32();
+    std::vector<Tensor> hyper_out(static_cast<std::size_t>(K));  // each (B, cup2) host
+    for (int i = 0; i < K; ++i) {
+        Tensor mt_i = Tensor::mat(B, D);
+        float* mp = mt_i.host_f32_mut();
+        for (int b = 0; b < B; ++b) {
+            const float* row = qh + static_cast<std::size_t>(b * n_tok + 1 + i) * D;
+            std::copy(row, row + D, mp + static_cast<std::size_t>(b) * D);
+        }
+        hyper_out[static_cast<std::size_t>(i)] =
+            ff_apply(w_->hyper[i], mt_i.to(device_)).to(brotensor::Device::CPU);
+    }
+
+    // ── IoU scores: gather the B iou tokens, run the head once over (B, D). ──
+    Tensor iou_all_host;
+    {
+        Tensor iou_tok = Tensor::mat(B, D);
+        float* ip = iou_tok.host_f32_mut();
+        for (int b = 0; b < B; ++b) {
+            const float* row = qh + static_cast<std::size_t>(b * n_tok) * D;
+            std::copy(row, row + D, ip + static_cast<std::size_t>(b) * D);
+        }
+        iou_all_host = ff_apply(w_->iou_head, iou_tok.to(device_))
+                           .to(brotensor::Device::CPU);            // (B, K)
+    }
+
+    // ── Per prompt: masks = filters @ upscaled_b, then slice the multimask
+    //    (skip the first "ambiguity" mask) or the single best mask. ──
+    const int start   = multimask_output ? 1 : 0;
+    const int num_out = multimask_output ? K - 1 : 1;
+
+    Tensor masks_h = Tensor::mat(B * num_out, ms * ms);
+    Tensor iou_h   = Tensor::mat(B * num_out, 1);
+    float* mdst = masks_h.host_f32_mut();
+    float* idst = iou_h.host_f32_mut();
+    for (int b = 0; b < B; ++b) {
+        // Assemble this prompt's (K, cup2) filter matrix from the gathered rows.
+        Tensor fb = Tensor::mat(K, cup2);
+        float* fp = fb.host_f32_mut();
+        for (int i = 0; i < K; ++i) {
+            const float* hp = hyper_out[static_cast<std::size_t>(i)].host_f32();
+            const float* src_row = hp + static_cast<std::size_t>(b) * cup2;
+            std::copy(src_row, src_row + cup2, fp + static_cast<std::size_t>(i) * cup2);
+        }
+        Tensor upscaled_b = row_view(upscaled, b * cup2 * ms * ms, cup2, ms * ms);
+        Tensor mb_all;
+        brotensor::matmul(fb.to(device_), upscaled_b, mb_all);   // (K, ms*ms)
+        Tensor mb = mb_all.to(brotensor::Device::CPU);
+        const float* mbp = mb.host_f32();
+        for (int j = 0; j < num_out; ++j) {
+            const float* src_row = mbp + static_cast<std::size_t>(start + j) * ms * ms;
+            std::copy(src_row, src_row + ms * ms,
+                      mdst + static_cast<std::size_t>(b * num_out + j) * ms * ms);
+        }
+        const float* ibp = iou_all_host.host_f32();
+        for (int j = 0; j < num_out; ++j)
+            idst[static_cast<std::size_t>(b * num_out + j)] = ibp[b * K + start + j];
+    }
+
+    DecodedMasks out;
+    out.num_out   = num_out;
+    out.mask_size = ms;
+    out.masks = masks_h.to(device_);   // (B*num_out, ms*ms)
+    out.iou   = iou_h.to(device_);     // (B*num_out, 1)
     return out;
 }
 

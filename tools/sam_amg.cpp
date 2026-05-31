@@ -6,6 +6,7 @@
 //
 //   sam_amg <checkpoint-dir-or-file> <image> [options]
 //     --points-per-side N     grid density per side (default 32)
+//     --points-per-batch N    grid points per batched decode pass (default 64)
 //     --pred-iou-thresh F     predicted-IoU cutoff (default 0.88)
 //     --stability-thresh F    stability-score cutoff (default 0.95)
 //     --crop-n-layers N       crop pyramid layers (default 0)
@@ -41,6 +42,7 @@ using brovisionml::sam::SamConfig;
     std::fprintf(stderr,
         "usage: %s <checkpoint-dir-or-file> <image> [options]\n"
         "  --points-per-side N   grid density per side (default 32)\n"
+        "  --points-per-batch N  grid points per batched decode (default 64)\n"
         "  --pred-iou-thresh F   predicted-IoU cutoff (default 0.88)\n"
         "  --stability-thresh F  stability-score cutoff (default 0.95)\n"
         "  --crop-n-layers N     crop pyramid layers (default 0)\n"
@@ -78,6 +80,7 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         if (a == "--points-per-side")     amg.points_per_side = std::atoi(next());
+        else if (a == "--points-per-batch") amg.points_per_batch = std::atoi(next());
         else if (a == "--pred-iou-thresh") amg.pred_iou_thresh = static_cast<float>(std::atof(next()));
         else if (a == "--stability-thresh") amg.stability_score_thresh = static_cast<float>(std::atof(next()));
         else if (a == "--crop-n-layers")  amg.crop_n_layers = std::atoi(next());

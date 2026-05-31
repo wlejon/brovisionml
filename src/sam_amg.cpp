@@ -327,6 +327,7 @@ struct Candidate {
 AutomaticMaskGenerator::AutomaticMaskGenerator(Sam& model, AmgConfig cfg)
     : model_(model), cfg_(cfg) {
     if (cfg_.points_per_side <= 0) fail("points_per_side must be positive");
+    if (cfg_.points_per_batch <= 0) fail("points_per_batch must be positive");
     if (cfg_.crop_n_layers < 0) fail("crop_n_layers must be >= 0");
     if (cfg_.crop_n_points_downscale_factor < 1)
         fail("crop_n_points_downscale_factor must be >= 1");
@@ -377,49 +378,64 @@ std::vector<GeneratedMask> AutomaticMaskGenerator::generate(const uint8_t* pixel
 
         std::vector<Candidate> crop_cands;
 
-        for (const auto& g : grid) {
-            const float px = g[0] * static_cast<float>(cw);
-            const float py = g[1] * static_cast<float>(ch);
+        // Grid points in crop-pixel coords; decoded in independent batches.
+        std::vector<std::array<float, 2>> pts;
+        pts.reserve(grid.size());
+        for (const auto& g : grid)
+            pts.push_back({g[0] * static_cast<float>(cw),
+                           g[1] * static_cast<float>(ch)});
 
-            const Segmentation seg =
-                model_.segment({{px, py}}, {1}, {}, /*multimask=*/true);
-            const int plane = seg.height * seg.width;  // == ch*cw
+        const int bs = std::max(1, cfg_.points_per_batch);
+        for (std::size_t off = 0; off < pts.size(); off += static_cast<std::size_t>(bs)) {
+            const std::size_t end =
+                std::min(pts.size(), off + static_cast<std::size_t>(bs));
+            std::vector<std::array<float, 2>> chunk(pts.begin() + static_cast<std::ptrdiff_t>(off),
+                                                    pts.begin() + static_cast<std::ptrdiff_t>(end));
 
-            for (int m = 0; m < seg.num; ++m) {
-                const float iou = seg.iou[static_cast<std::size_t>(m)];
-                if (cfg_.pred_iou_thresh > 0.0f && iou <= cfg_.pred_iou_thresh)
-                    continue;
+            const std::vector<Segmentation> segs =
+                model_.segment_points(chunk, /*multimask=*/true);
 
-                const float* logit =
-                    seg.logits.data() + static_cast<std::size_t>(m) * plane;
-                const float stab =
-                    stability_score(logit, plane, cfg_.stability_score_offset);
-                if (cfg_.stability_score_thresh > 0.0f &&
-                    stab < cfg_.stability_score_thresh)
-                    continue;
+            for (std::size_t si = 0; si < segs.size(); ++si) {
+                const Segmentation& seg = segs[si];
+                const float px = chunk[si][0], py = chunk[si][1];
+                const int plane = seg.height * seg.width;  // == ch*cw
 
-                bin.assign(static_cast<std::size_t>(plane), 0);
-                for (int i = 0; i < plane; ++i)
-                    bin[static_cast<std::size_t>(i)] = logit[i] > 0.0f ? 1 : 0;
+                for (int m = 0; m < seg.num; ++m) {
+                    const float iou = seg.iou[static_cast<std::size_t>(m)];
+                    if (cfg_.pred_iou_thresh > 0.0f && iou <= cfg_.pred_iou_thresh)
+                        continue;
 
-                const Box cbox = mask_to_box(bin, cw, ch);
-                const Box ibox = {cbox[0] + crop.x0, cbox[1] + crop.y0,
-                                  cbox[2] + crop.x0, cbox[3] + crop.y0};
-                if (near_crop_edge(ibox, crop, w, h)) continue;
+                    const float* logit =
+                        seg.logits.data() + static_cast<std::size_t>(m) * plane;
+                    const float stab =
+                        stability_score(logit, plane, cfg_.stability_score_offset);
+                    if (cfg_.stability_score_thresh > 0.0f &&
+                        stab < cfg_.stability_score_thresh)
+                        continue;
 
-                Candidate cand;
-                cand.rle = rle_encode(bin);
-                cand.cx0 = crop.x0;
-                cand.cy0 = crop.y0;
-                cand.cw = cw;
-                cand.ch = ch;
-                cand.box = ibox;
-                cand.point = {px + static_cast<float>(crop.x0),
-                              py + static_cast<float>(crop.y0)};
-                cand.iou = iou;
-                cand.stab = stab;
-                cand.crop = crop;
-                crop_cands.push_back(std::move(cand));
+                    bin.assign(static_cast<std::size_t>(plane), 0);
+                    for (int i = 0; i < plane; ++i)
+                        bin[static_cast<std::size_t>(i)] = logit[i] > 0.0f ? 1 : 0;
+
+                    const Box cbox = mask_to_box(bin, cw, ch);
+                    const Box ibox = {cbox[0] + crop.x0, cbox[1] + crop.y0,
+                                      cbox[2] + crop.x0, cbox[3] + crop.y0};
+                    if (near_crop_edge(ibox, crop, w, h)) continue;
+
+                    Candidate cand;
+                    cand.rle = rle_encode(bin);
+                    cand.cx0 = crop.x0;
+                    cand.cy0 = crop.y0;
+                    cand.cw = cw;
+                    cand.ch = ch;
+                    cand.box = ibox;
+                    cand.point = {px + static_cast<float>(crop.x0),
+                                  py + static_cast<float>(crop.y0)};
+                    cand.iou = iou;
+                    cand.stab = stab;
+                    cand.crop = crop;
+                    crop_cands.push_back(std::move(cand));
+                }
             }
         }
 

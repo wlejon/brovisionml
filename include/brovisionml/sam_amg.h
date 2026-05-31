@@ -13,8 +13,9 @@
 //   1. Lay down a `points_per_side`^2 regular grid over the image (and, for
 //      `crop_n_layers > 0`, over a pyramid of overlapping image crops, with a
 //      coarser grid per layer).
-//   2. For every grid point, run a single-foreground-point segment() to get the
-//      3 multimask proposals + their predicted IoU.
+//   2. Decode the grid in batches of `points_per_batch` single-foreground-point
+//      prompts (Sam::segment_points — one batched mask-decoder pass per chunk)
+//      to get the 3 multimask proposals + predicted IoU per point.
 //   3. Drop proposals below `pred_iou_thresh`, then below `stability_score_thresh`
 //      (a measure of how little the binarized mask changes when the logit
 //      threshold is nudged by ±`stability_score_offset`).
@@ -27,11 +28,11 @@
 //      creates.
 //
 // Coordinates in and out are ORIGINAL-image pixels; crops are taken from the
-// raw pixel buffer passed to generate(). The model decodes one grid point at a
-// time (the segment() prompt path treats multiple points as one multi-point
-// prompt, not a batch of independent prompts), so this is intentionally
-// correctness-first; batching independent point prompts through the decoder is
-// a future optimization.
+// raw pixel buffer passed to generate(). Grid points are decoded in independent
+// batches of `points_per_batch` through Sam::segment_points, which packs them
+// block-diagonally into one mask-decoder pass — so the per-click decode cost is
+// amortized rather than paid one grid point at a time. The slow ViT encode
+// still runs once per crop.
 
 #include "brovisionml/sam.h"
 
@@ -45,6 +46,7 @@ namespace brovisionml::sam {
 // SamAutomaticMaskGenerator (the values used to produce the SA-1B masks).
 struct AmgConfig {
     int   points_per_side               = 32;          // grid is this squared
+    int   points_per_batch              = 64;          // grid points decoded per batched pass
     float pred_iou_thresh               = 0.88f;       // drop masks below this predicted IoU
     float stability_score_thresh        = 0.95f;       // drop masks below this stability
     float stability_score_offset        = 1.0f;        // logit nudge for the stability measure

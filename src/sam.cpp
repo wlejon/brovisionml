@@ -2,8 +2,11 @@
 
 #include "brotensor/ops.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace brovisionml::sam {
 
@@ -107,16 +110,106 @@ Segmentation Sam::segment(const std::vector<std::array<float, 2>>& points,
     DecodedMasks dm = dec_.decode(image_embedding_, pe_.dense_pe(),
                                   emb.sparse, emb.dense, multimask_output);
 
-    // ── Postprocess masks back to the original image resolution (host). SAM:
-    //    upscale ms->input_size, crop off the letterbox padding, resize to the
-    //    original size — both resamples bilinear / align_corners=False. ──
     const int num = dm.num_out;
-    const int ms  = dm.mask_size;
-    const int S   = cfg_.encoder.img_size;
-    const int rh  = transform_.resized_h, rw = transform_.resized_w;
-    const int oh  = transform_.orig_h,    ow = transform_.orig_w;
+    Segmentation seg;
+    seg.num    = num;
+    seg.height = transform_.orig_h;
+    seg.width  = transform_.orig_w;
+    seg.logits = upscale_masks(dm.masks, num, dm.mask_size);
 
-    Tensor masks_cpu = dm.masks.to(brotensor::Device::CPU);   // (num, ms*ms)
+    Tensor iou_cpu = dm.iou.to(brotensor::Device::CPU);   // (num,1)
+    const float* iv = iou_cpu.host_f32();
+    seg.iou.assign(iv, iv + num);
+
+    return seg;
+}
+
+// ─── Batched single-point segment ─────────────────────────────────────────────
+
+std::vector<Segmentation> Sam::segment_points(
+    const std::vector<std::array<float, 2>>& points,
+    bool multimask_output) const {
+    if (!has_image_) fail("segment_points() called before set_image()");
+    std::vector<Segmentation> out;
+    const int B = static_cast<int>(points.size());
+    if (B == 0) return out;
+
+    // Encode each one-foreground-point prompt; collect the per-prompt sparse
+    // tokens (uniform count — point + its padding token) and the shared no-mask
+    // dense embedding (identical for every prompt, so we keep just the first).
+    std::vector<Tensor> sparse_hosts;
+    sparse_hosts.reserve(static_cast<std::size_t>(B));
+    Tensor dense;
+    int S = -1;
+    for (const auto& p : points) {
+        PromptInput in;
+        float mx, my;
+        apply_coords(transform_, p[0], p[1], mx, my);
+        in.points.push_back({mx, my});
+        in.labels.push_back(1);
+        PromptEmbeddings emb = pe_.encode(in);
+        const int s = (emb.sparse.data && emb.sparse.size() > 0) ? emb.sparse.rows : 0;
+        if (S < 0) S = s;
+        else if (s != S) fail("segment_points: non-uniform sparse token count");
+        sparse_hosts.push_back(emb.sparse.to(brotensor::Device::CPU));
+        if (!dense.data) dense = emb.dense;   // shared no-mask dense embedding
+    }
+
+    const int D = cfg_.prompt.hidden_size;
+    Tensor sparse_batched;
+    if (S > 0) {
+        Tensor sb = Tensor::mat(B * S, D);
+        float* dst = sb.host_f32_mut();
+        for (int b = 0; b < B; ++b) {
+            const float* sp = sparse_hosts[static_cast<std::size_t>(b)].host_f32();
+            std::copy(sp, sp + static_cast<std::size_t>(S) * D,
+                      dst + static_cast<std::size_t>(b) * S * D);
+        }
+        sparse_batched = sb.to(device_);
+    }
+
+    DecodedMasks dm = dec_.decode_batched(image_embedding_, pe_.dense_pe(),
+                                          sparse_batched, B, S, dense,
+                                          multimask_output);
+
+    const int num = dm.num_out;
+    std::vector<float> up = upscale_masks(dm.masks, B * num, dm.mask_size);
+
+    Tensor iou_cpu = dm.iou.to(brotensor::Device::CPU);   // (B*num,1)
+    const float* iv = iou_cpu.host_f32();
+    const int oh = transform_.orig_h, ow = transform_.orig_w;
+    const std::size_t plane = static_cast<std::size_t>(oh) * ow;
+
+    out.reserve(static_cast<std::size_t>(B));
+    for (int b = 0; b < B; ++b) {
+        Segmentation seg;
+        seg.num    = num;
+        seg.height = oh;
+        seg.width  = ow;
+        const float* base = up.data() + static_cast<std::size_t>(b) * num * plane;
+        seg.logits.assign(base, base + static_cast<std::size_t>(num) * plane);
+        seg.iou.assign(iv + static_cast<std::size_t>(b) * num,
+                       iv + static_cast<std::size_t>(b + 1) * num);
+        out.push_back(std::move(seg));
+    }
+    return out;
+}
+
+// ─── Mask upscale (shared postprocess) ────────────────────────────────────────
+//
+// SAM's mask postprocess: bilinear-upscale each (mask_size, mask_size) logit
+// plane to the model's square input size, crop off the letterbox padding (the
+// resized content occupies the top-left resized_h x resized_w), then resize to
+// the original image size. Both resamples are bilinear / align_corners=False.
+
+std::vector<float> Sam::upscale_masks(const brotensor::Tensor& masks,
+                                      int num, int mask_size) const {
+    const int ms = mask_size;
+    const int S  = cfg_.encoder.img_size;
+    const int rh = transform_.resized_h, rw = transform_.resized_w;
+    const int oh = transform_.orig_h,    ow = transform_.orig_w;
+
+    Tensor masks_cpu = masks.to(brotensor::Device::CPU);   // (num, ms*ms)
     Tensor in0 = Tensor::view(brotensor::Device::CPU, masks_cpu.data,
                               1, num * ms * ms);
 
@@ -141,19 +234,9 @@ Segmentation Sam::segment(const std::vector<std::array<float, 2>>& points,
     Tensor up2;
     brotensor::interp2d_forward(cropped, 1, num, rh, rw, oh, ow, /*bilinear=*/1, up2);
 
-    Segmentation seg;
-    seg.num    = num;
-    seg.height = oh;
-    seg.width  = ow;
     const float* logit = up2.host_f32();
-    seg.logits.assign(logit,
-                      logit + static_cast<std::size_t>(num) * oh * ow);
-
-    Tensor iou_cpu = dm.iou.to(brotensor::Device::CPU);   // (num,1)
-    const float* iv = iou_cpu.host_f32();
-    seg.iou.assign(iv, iv + num);
-
-    return seg;
+    return std::vector<float>(
+        logit, logit + static_cast<std::size_t>(num) * oh * ow);
 }
 
 }  // namespace brovisionml::sam

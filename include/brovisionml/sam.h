@@ -87,6 +87,17 @@ public:
                          const std::vector<std::array<float, 4>>& boxes,
                          bool multimask_output = true) const;
 
+    // Batched single-point segmentation: each entry of `points` is its own
+    // prompt — one foreground click, no box — and all are decoded together in a
+    // single batched mask-decoder pass over the shared image embedding, then
+    // mapped back to the original resolution. Returns one Segmentation per input
+    // point, in order; equivalent to calling segment({p},{1},{}) for each point
+    // but paying the per-decode overhead once. This is the automatic mask
+    // generator's hot path. Throws if no image has been set.
+    std::vector<Segmentation> segment_points(
+        const std::vector<std::array<float, 2>>& points,
+        bool multimask_output = true) const;
+
     const SamConfig& config() const { return cfg_; }
 
 private:
@@ -101,6 +112,13 @@ private:
     brotensor::Tensor image_embedding_;   // (1, D*grid*grid) on device_
     ImageTransform    transform_{};
     bool              has_image_ = false;
+
+    // Upscale `num` mask logit planes (num, mask_size*mask_size) on device_ back
+    // to the original image resolution, returning num*orig_h*orig_w host FP32
+    // (SAM's upscale -> de-letterbox crop -> resize). Shared by segment() and
+    // segment_points().
+    std::vector<float> upscale_masks(const brotensor::Tensor& masks,
+                                     int num, int mask_size) const;
 };
 
 }  // namespace brovisionml::sam
