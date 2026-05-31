@@ -40,3 +40,11 @@ target_compile_definitions(brovisionml_test_sam_amg PRIVATE
 # cleanly when absent.
 target_compile_definitions(brovisionml_test_depth_anything PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+
+# Depth-Anything-V2 HF numeric-parity test: compares brovisionml's output to a
+# golden dump of the actual HuggingFace model (generated out-of-repo, never
+# committed). Gated on both the checkpoint and the golden_*.bin under
+# weights/Depth-Anything-V2-Small/golden; skips cleanly when either is absent.
+brovisionml_add_test(brovisionml_test_depth_parity       test_depth_parity.cpp)
+target_compile_definitions(brovisionml_test_depth_parity PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
