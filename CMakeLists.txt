@@ -110,6 +110,7 @@ target_sources(brovisionml PRIVATE
     src/dpt_preprocess.cpp
     src/dsine_preprocess.cpp
     src/dsine_encoder.cpp
+    src/dsine_decoder.cpp
     src/dinov2.cpp
     src/dpt_head.cpp
     src/depth_anything.cpp
