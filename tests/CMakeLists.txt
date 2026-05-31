@@ -11,6 +11,7 @@ endfunction()
 
 brovisionml_add_test(brovisionml_test_smoke            test_smoke.cpp)
 brovisionml_add_test(brovisionml_test_dpt_preprocess   test_dpt_preprocess.cpp)
+brovisionml_add_test(brovisionml_test_dsine_preprocess test_dsine_preprocess.cpp)
 brovisionml_add_test(brovisionml_test_dinov2           test_dinov2.cpp)
 brovisionml_add_test(brovisionml_test_dpt_head         test_dpt_head.cpp)
 brovisionml_add_test(brovisionml_test_depth_anything   test_depth_anything.cpp)
@@ -47,4 +48,10 @@ target_compile_definitions(brovisionml_test_depth_anything PRIVATE
 # weights/Depth-Anything-V2-Small/golden; skips cleanly when either is absent.
 brovisionml_add_test(brovisionml_test_depth_parity       test_depth_parity.cpp)
 target_compile_definitions(brovisionml_test_depth_parity PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+
+# DSINE preprocessing test: structural CPU checks always run; the numeric-parity
+# part is gated on golden_dsine_*.bin under weights/dsine (generated out-of-repo,
+# never committed) and skips cleanly when absent.
+target_compile_definitions(brovisionml_test_dsine_preprocess PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
