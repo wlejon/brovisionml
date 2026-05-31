@@ -14,6 +14,7 @@ brovisionml_add_test(brovisionml_test_dpt_preprocess   test_dpt_preprocess.cpp)
 brovisionml_add_test(brovisionml_test_dsine_preprocess test_dsine_preprocess.cpp)
 brovisionml_add_test(brovisionml_test_dsine_encoder    test_dsine_encoder.cpp)
 brovisionml_add_test(brovisionml_test_dsine_decoder    test_dsine_decoder.cpp)
+brovisionml_add_test(brovisionml_test_dsine_refine     test_dsine_refine.cpp)
 brovisionml_add_test(brovisionml_test_dinov2           test_dinov2.cpp)
 brovisionml_add_test(brovisionml_test_dpt_head         test_dpt_head.cpp)
 brovisionml_add_test(brovisionml_test_depth_anything   test_depth_anything.cpp)
@@ -69,4 +70,11 @@ target_compile_definitions(brovisionml_test_dsine_encoder PRIVATE
 # golden_dsine_*.bin dumps under weights/dsine; skips cleanly when absent.
 # Compares the initial normal map (dec_normal record) against the golden.
 target_compile_definitions(brovisionml_test_dsine_decoder PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+
+# DSINE v02 iterative refinement (NRN) END-TO-END parity test: gated on the real
+# checkpoint and the golden_dsine_*.bin dumps under weights/dsine; skips cleanly
+# when absent. Runs encoder->decoder->refiner and compares the final full-res
+# normals against the golden `final` record (the LAST record in the dump).
+target_compile_definitions(brovisionml_test_dsine_refine PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
