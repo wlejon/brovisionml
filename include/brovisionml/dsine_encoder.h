@@ -60,8 +60,12 @@
 // tf_efficientnet default); num_batches_tracked is unused.
 //
 // Weights load directly from a `model.safetensors` (the `encoder.original_model.`
-// namespace). They land host-resident FP32; the forward runs on the host (CPU
-// FP32) for parity.
+// namespace). They land host-resident FP32; `to(Device)` then migrates them so
+// the forward runs on whatever device the input pixels live on. Every stage is a
+// brotensor op (conv2d, batch_norm, silu, pad2d, add), and the squeeze-excite
+// gate is composed from brotensor ops too (adaptive_avg_pool2d -> 1x1 conv ->
+// silu -> 1x1 conv -> sigmoid -> channel-broadcast multiply), so the encoder is
+// device-agnostic: CPU FP32 or CUDA FP32.
 
 #include "brotensor/tensor.h"
 
@@ -95,9 +99,15 @@ public:
     void load(const std::string& dir);
     void load_file(const std::string& path);
 
+    // Migrate the loaded weights to `dev` (no-op if already there). The forward
+    // then runs on `dev`; the input pixel tensor must live on the same device.
+    void to(brotensor::Device dev);
+    brotensor::Device device() const;
+
     // Run the encoder on a preprocessed pixel tensor (1, 3*H*W) NCHW FP32, where
     // H and W are the (already zero-padded, multiple-of-32) input dims from
-    // dsine::preprocess. Runs on the host; returns the three taps.
+    // dsine::preprocess. The tensor must be resident on the encoder's device
+    // (see to()); the returned taps are resident on that same device.
     EncoderTaps forward(const brotensor::Tensor& pixels, int H, int W) const;
 
 private:

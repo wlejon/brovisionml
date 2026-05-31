@@ -123,6 +123,7 @@ BN load_bn(const st::File& f, const std::string& prefix) {
 
 struct EncoderB5::Impl {
     bool loaded = false;
+    brotensor::Device device = brotensor::Device::CPU;
 
     // Stem.
     Tensor conv_stem;   // (48, 3*3*3) OIHW
@@ -250,6 +251,29 @@ void EncoderB5::load_file(const std::string& path) {
     *impl_ = std::move(m);
 }
 
+void EncoderB5::to(brotensor::Device dev) {
+    Impl& m = *impl_;
+    if (!m.loaded) fail("to() called before load()");
+    if (dev == m.device) return;
+    auto mv    = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
+    auto mv_bn = [&](BN& bn) { mv(bn.weight); mv(bn.bias); mv(bn.mean); mv(bn.var); };
+    mv(m.conv_stem);
+    mv_bn(m.bn1);
+    for (auto& stage : m.stages) {
+        for (Block& b : stage) {
+            mv(b.conv_pw_expand); mv_bn(b.bn1);
+            mv(b.conv_dw);        mv_bn(b.bn2);
+            mv(b.se_reduce_w); mv(b.se_reduce_b);
+            mv(b.se_expand_w); mv(b.se_expand_b);
+            mv(b.conv_project);   mv_bn(b.bn3);
+        }
+    }
+    mv(m.conv_head);
+    m.device = dev;
+}
+
+brotensor::Device EncoderB5::device() const { return impl_->device; }
+
 // ─── Forward ──────────────────────────────────────────────────────────────────
 
 namespace {
@@ -297,52 +321,46 @@ Tensor conv(const Tensor& x, const Tensor& Wt, int C_in, int H, int W,
 }
 
 // Squeeze-Excite on an NCHW feature (1, C*H*W): global avg pool -> reduce(1x1)
-// -> SiLU -> expand(1x1) -> sigmoid -> channel-wise multiply in place.
+// -> SiLU -> expand(1x1) -> sigmoid -> channel-wise gate. Device-agnostic — every
+// step is a brotensor op (the reduce/expand are 1x1 convs over the 1x1 pooled
+// map), so the big feature never leaves the active device. The channel gate is
+// applied by viewing x as (H*W, C) tokens and broadcast-multiplying by the
+// length-C gate, then viewing back to NCHW.
 void apply_se(Tensor& x, const Block& b, int C, int H, int W) {
-    const int HW = H * W;
-    const float* xp = x.host_f32();
-
-    // Global average pool -> (C,1).
-    std::vector<float> pooled(static_cast<std::size_t>(C));
-    for (int c = 0; c < C; ++c) {
-        const float* base = xp + static_cast<std::size_t>(c) * HW;
-        double acc = 0.0;
-        for (int i = 0; i < HW; ++i) acc += base[i];
-        pooled[c] = static_cast<float>(acc / HW);
-    }
-
-    // reduce: (rd,C) @ (C,1) + bias -> SiLU.
     const int rd = b.se_rd;
-    const float* rw = b.se_reduce_w.host_f32();
-    const float* rb = b.se_reduce_b.host_f32();
-    std::vector<float> red(static_cast<std::size_t>(rd));
-    for (int o = 0; o < rd; ++o) {
-        const float* row = rw + static_cast<std::size_t>(o) * C;
-        double acc = rb[o];
-        for (int c = 0; c < C; ++c) acc += static_cast<double>(row[c]) * pooled[c];
-        const float v = static_cast<float>(acc);
-        red[o] = v / (1.0f + std::exp(-v));   // SiLU
-    }
 
-    // expand: (C,rd) @ (rd,1) + bias -> sigmoid -> gate.
-    const float* ew = b.se_expand_w.host_f32();
-    const float* eb = b.se_expand_b.host_f32();
-    std::vector<float> gate(static_cast<std::size_t>(C));
-    for (int c = 0; c < C; ++c) {
-        const float* row = ew + static_cast<std::size_t>(c) * rd;
-        double acc = eb[c];
-        for (int o = 0; o < rd; ++o) acc += static_cast<double>(row[o]) * red[o];
-        const float v = static_cast<float>(acc);
-        gate[c] = 1.0f / (1.0f + std::exp(-v));   // sigmoid
-    }
+    // Global average pool -> (1, C*1*1).
+    Tensor pooled;
+    brotensor::adaptive_avg_pool2d_forward(x, /*N=*/1, C, H, W, /*H_out=*/1,
+                                           /*W_out=*/1, pooled);
 
-    // Channel-wise multiply.
-    float* xm = x.host_f32_mut();
-    for (int c = 0; c < C; ++c) {
-        const float g = gate[c];
-        float* base = xm + static_cast<std::size_t>(c) * HW;
-        for (int i = 0; i < HW; ++i) base[i] *= g;
-    }
+    // reduce: 1x1 conv (rd,C) + bias -> SiLU.
+    Tensor red;
+    brotensor::conv2d_forward(pooled, b.se_reduce_w, &b.se_reduce_b, /*N=*/1,
+                              /*C_in=*/C, /*H=*/1, /*W=*/1, /*C_out=*/rd,
+                              /*kH=*/1, /*kW=*/1, /*sh=*/1, /*sw=*/1,
+                              /*ph=*/0, /*pw=*/0, /*dh=*/1, /*dw=*/1,
+                              /*groups=*/1, red);
+    apply_silu(red);
+
+    // expand: 1x1 conv (C,rd) + bias -> sigmoid -> gate (1, C).
+    Tensor gate;
+    brotensor::conv2d_forward(red, b.se_expand_w, &b.se_expand_b, /*N=*/1,
+                              /*C_in=*/rd, /*H=*/1, /*W=*/1, /*C_out=*/C,
+                              /*kH=*/1, /*kW=*/1, /*sh=*/1, /*sw=*/1,
+                              /*ph=*/0, /*pw=*/0, /*dh=*/1, /*dw=*/1,
+                              /*groups=*/1, gate);
+    Tensor gate_s;
+    brotensor::sigmoid_forward(gate, gate_s);
+
+    // Channel-wise gate: x as (H*W, C), scale column c by gate[c], back to NCHW.
+    Tensor seq;
+    brotensor::nchw_to_sequence(x, /*N=*/1, C, H, W, seq);
+    Tensor seq_g;
+    brotensor::broadcast_mul(seq, gate_s, seq_g);
+    Tensor xg;
+    brotensor::sequence_to_nchw(seq_g, /*N=*/1, C, H, W, xg);
+    x = std::move(xg);
 }
 
 // Run one block; returns its output and updates H/W.
@@ -402,8 +420,9 @@ EncoderTaps EncoderB5::forward(const brotensor::Tensor& pixels,
     if (!m.loaded) fail("forward() called before load()");
     if (pixels.dtype != brotensor::Dtype::FP32)
         fail("forward() requires an FP32 pixel tensor");
-    if (pixels.device != brotensor::Device::CPU)
-        fail("forward() runs on the host; pixel tensor must be CPU-resident");
+    if (pixels.device != m.device)
+        fail("forward() pixel tensor must be resident on the encoder's device "
+             "(call to() to migrate, then upload the pixels to match)");
     if (pixels.rows != 1 || pixels.cols != 3 * H * W)
         fail("pixels must be (1, 3*H*W)");
 

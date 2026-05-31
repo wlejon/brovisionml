@@ -65,7 +65,12 @@
 // origW are the PADDED (multiple-of-32) dims from preprocess.
 //
 // Weights load directly from a `model.safetensors` (`decoder.*` namespace), FP32,
-// host-resident; the forward runs on the host (CPU FP32) for parity.
+// host-resident. After load, `to(Device)` migrates the weights so the forward
+// runs on whatever device the encoder taps live on — every stage is a brotensor
+// op (conv2d / group_norm / leaky_relu / relu / interp2d, channel-concat, and
+// the NCHW channel-L2-normalize), so the decoder is device-agnostic (CPU FP32 or
+// CUDA FP32). The uv conditioning maps are built host-side and uploaded to the
+// active device inside forward().
 
 #include "brovisionml/dsine_encoder.h"
 #include "brovisionml/dsine_preprocess.h"
@@ -119,10 +124,17 @@ public:
     void load(const std::string& dir);
     void load_file(const std::string& path);
 
+    // Migrate the loaded weights to `dev` (no-op if already there). The forward
+    // then runs on `dev`; the encoder taps passed to forward() must live on the
+    // same device. Mirrors DepthEstimator/SAM's runtime device-selection pattern.
+    void to(brotensor::Device dev);
+    brotensor::Device device() const;
+
     // Run the decoder on the three encoder taps + the camera intrinsics. origH,
     // origW are the PADDED dims (taps.h*/w* derive from them). The uv maps are
-    // built internally from `intrins` (pre-"+0.5"; +0.5 applied inside). Runs on
-    // the host; returns the normal/feature/hidden maps at /8.
+    // built internally from `intrins` (pre-"+0.5"; +0.5 applied inside) and
+    // uploaded to the active device. Returns the normal/feature/hidden maps at
+    // /8, resident on the active device.
     DecoderOutput forward(const EncoderTaps& taps, const Intrinsics& intrins,
                           int origH, int origW) const;
 

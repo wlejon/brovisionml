@@ -151,16 +151,13 @@ PredHead load_head(const st::File& f, const std::string& prefix) {
 
 // ── Forward helpers ─────────────────────────────────────────────────────────
 
-// Channel-concat two NCHW (1, C*H*W) tensors with the same (H,W).
+// Channel-concat two NCHW (1, C*H*W) tensors with the same (H,W). Device-
+// agnostic (out adopts the inputs' device); both inputs must share a device.
 Tensor cat_ch(const Tensor& a, int ca, const Tensor& b, int cb, int H, int W) {
-    const int HW = H * W;
-    Tensor out = Tensor::mat(1, (ca + cb) * HW);
-    float* o = out.host_f32_mut();
-    const float* ap = a.host_f32();
-    const float* bp = b.host_f32();
-    std::memcpy(o, ap, static_cast<std::size_t>(ca) * HW * sizeof(float));
-    std::memcpy(o + static_cast<std::size_t>(ca) * HW, bp,
-                static_cast<std::size_t>(cb) * HW * sizeof(float));
+    Tensor out;
+    const std::vector<const Tensor*> parts{&a, &b};
+    const std::vector<int> cs{ca, cb};
+    brotensor::concat_nchw_channels(parts, /*N=*/1, H, W, cs, out);
     return out;
 }
 
@@ -223,21 +220,12 @@ Tensor run_head(const PredHead& hd, const Tensor& x, int H, int W) {
     return h;
 }
 
-// L2-normalize a (1, C*H*W) tensor over the channel axis (per pixel), in place.
+// L2-normalize a (1, C*H*W) tensor over the channel axis (per pixel). Runs on
+// whatever device x lives on; torch F.normalize default eps = 1e-12.
 void l2norm_channels(Tensor& x, int C, int H, int W) {
-    const int HW = H * W;
-    float* p = x.host_f32_mut();
-    for (int i = 0; i < HW; ++i) {
-        double ss = 0.0;
-        for (int c = 0; c < C; ++c) {
-            const double v = p[static_cast<std::size_t>(c) * HW + i];
-            ss += v * v;
-        }
-        // torch F.normalize default eps = 1e-12.
-        const double inv = 1.0 / std::max(std::sqrt(ss), 1e-12);
-        for (int c = 0; c < C; ++c)
-            p[static_cast<std::size_t>(c) * HW + i] *= static_cast<float>(inv);
-    }
+    Tensor y;
+    brotensor::l2_normalize_nchw_forward(x, /*N=*/1, C, H, W, 1e-12f, y);
+    x = std::move(y);
 }
 
 }  // namespace
@@ -306,6 +294,7 @@ UvMap build_ray8(const Intrinsics& intrins, int Hf, int Wf, int origH, int origW
 
 struct Decoder::Impl {
     bool loaded = false;
+    brotensor::Device device = brotensor::Device::CPU;
     Conv       conv2;        // decoder.conv2  Conv2d(2050, 2048, 1x1)
     UpSampleGN up1;          // decoder.up1
     UpSampleGN up2;          // decoder.up2
@@ -336,6 +325,25 @@ void Decoder::load_file(const std::string& path) {
     *impl_ = std::move(m);
 }
 
+void Decoder::to(brotensor::Device dev) {
+    Impl& m = *impl_;
+    if (!m.loaded) fail("to() called before load()");
+    if (dev == m.device) return;
+    auto mv      = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
+    auto mv_conv = [&](Conv& c) { mv(c.weight); mv(c.bias); };
+    auto mv_gn   = [&](GN& g) { mv(g.weight); mv(g.bias); };
+    auto mv_up   = [&](UpSampleGN& u) {
+        mv_conv(u.conv0); mv_gn(u.gn1); mv_conv(u.conv3); mv_gn(u.gn4);
+    };
+    auto mv_head = [&](PredHead& h) { mv_conv(h.c0); mv_conv(h.c2); mv_conv(h.c4); };
+    mv_conv(m.conv2);
+    mv_up(m.up1); mv_up(m.up2);
+    mv_head(m.normal_head); mv_head(m.feature_head); mv_head(m.hidden_head);
+    m.device = dev;
+}
+
+brotensor::Device Decoder::device() const { return impl_->device; }
+
 DecoderOutput Decoder::forward(const EncoderTaps& taps, const Intrinsics& intrins,
                                int origH, int origW) const {
     const Impl& m = *impl_;
@@ -345,10 +353,17 @@ DecoderOutput Decoder::forward(const EncoderTaps& taps, const Intrinsics& intrin
     const int h16 = taps.h16, w16 = taps.w16;
     const int h8  = taps.h8,  w8  = taps.w8;
 
-    // uv maps from the intrinsics (+0.5 applied inside build_uv).
-    const UvMap uv32 = build_uv(intrins, origH / 32, origW / 32, origH, origW);
-    const UvMap uv16 = build_uv(intrins, origH / 16, origW / 16, origH, origW);
-    const UvMap uv8  = build_uv(intrins, origH / 8,  origW / 8,  origH, origW);
+    // uv maps from the intrinsics (+0.5 applied inside build_uv). Built host-side,
+    // then uploaded to the active device so the channel-concat below can fuse them
+    // with the (device-resident) encoder taps.
+    UvMap uv32 = build_uv(intrins, origH / 32, origW / 32, origH, origW);
+    UvMap uv16 = build_uv(intrins, origH / 16, origW / 16, origH, origW);
+    UvMap uv8  = build_uv(intrins, origH / 8,  origW / 8,  origH, origW);
+    if (m.device != brotensor::Device::CPU) {
+        uv32.data = uv32.data.to(m.device);
+        uv16.data = uv16.data.to(m.device);
+        uv8.data  = uv8.data.to(m.device);
+    }
 
     // The uv grid dims must match the encoder taps (both derive from origH/W).
     if (uv32.hf != h32 || uv32.wf != w32 || uv16.hf != h16 || uv16.wf != w16 ||
