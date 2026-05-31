@@ -112,6 +112,7 @@ target_sources(brovisionml PRIVATE
     src/dsine_encoder.cpp
     src/dsine_decoder.cpp
     src/dsine_refine.cpp
+    src/dsine.cpp
     src/dinov2.cpp
     src/dpt_head.cpp
     src/depth_anything.cpp
@@ -145,7 +146,7 @@ endif()
 # --- Tools ---
 option(BROVISIONML_TOOLS "Build brovisionml CLI tools" ON)
 if(BROVISIONML_TOOLS AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    foreach(tool sam_segment sam_amg depth_estimate)
+    foreach(tool sam_segment sam_amg depth_estimate normal_estimate)
         add_executable(${tool} tools/${tool}.cpp)
         target_link_libraries(${tool} PRIVATE brovisionml)
         if(MSVC)
