@@ -21,7 +21,9 @@ Models planned / implemented:
 - **SAM (Segment Anything)** — promptable segmentation, **runnable end to end**:
   ViT image encoder + prompt encoder (points / boxes / mask) + lightweight mask
   decoder, tied together by a `Sam` orchestrator (encode-image-once /
-  decode-many-prompts) and a `sam_segment` CLI driver.
+  decode-many-prompts) and a `sam_segment` CLI driver. The **automatic mask
+  generator** ("segment everything") rides on top of the same orchestrator —
+  see below.
 - Depth estimation, detection, and matting are natural follow-ons that reuse
   the same ViT-encoder + task-head shape.
 
@@ -96,6 +98,61 @@ The `sam_segment` CLI tool is the same flow from the shell:
 
 ```bash
 sam_segment /path/to/sam-vit-huge photo.jpg --point 320,240 --out mask.png
+```
+
+### Automatic mask generator ("segment everything")
+
+`AutomaticMaskGenerator` (`brovisionml/sam_amg.h`) is the C++ port of
+`segment_anything`'s `SamAutomaticMaskGenerator`: it samples a regular grid of
+foreground points, decodes a multi-mask proposal at each, and filters the pile
+down to a clean set — no prompts required. The pipeline matches upstream:
+
+regular point grid → per-point multi-mask decode → predicted-IoU filter →
+stability-score filter → binarize + box + crop-edge drop → box-NMS (within and
+across crops) → optional connected-components small-region / hole cleanup →
+masks sorted by area.
+
+It composes a `Sam` you already loaded — `set_image()` is called for you per
+crop — so it runs on the same backend (CPU or CUDA) the model lives on:
+
+```cpp
+brovisionml::sam::Sam sam(brovisionml::sam::SamConfig::vit_h());
+sam.load("/path/to/sam-vit-huge");
+
+brovisionml::sam::AmgConfig cfg;        // upstream defaults
+cfg.points_per_side = 32;               // 32x32 grid (the SAM default)
+brovisionml::sam::AutomaticMaskGenerator gen(sam, cfg);
+
+auto masks = gen.generate(rgb, w, h, /*channels=*/3);
+// each: .mask (h*w, 1=fg), .bbox {x,y,w,h}, .area,
+//       .predicted_iou, .stability_score, .point, .crop_box
+```
+
+The grid points are decoded in batches (`AmgConfig::points_per_batch`, default
+64) through one batched mask-decoder pass — independent prompts packed into a
+single block-diagonal attention call — so the per-click decode overhead is
+amortized instead of paid one grid point at a time. The slow ViT encode still
+happens once per crop.
+
+Knobs worth knowing (all on `AmgConfig`, defaults mirror upstream):
+
+| Field | Meaning |
+|---|---|
+| `points_per_side` | grid density (N×N points); `32` is the SAM default |
+| `points_per_batch` | grid points decoded per batched pass (`64`) |
+| `pred_iou_thresh` | drop masks below this predicted IoU (`0.88`) |
+| `stability_score_thresh` | drop masks below this binarization stability (`0.95`) |
+| `box_nms_thresh` / `crop_nms_thresh` | NMS IoU within / across crops (`0.7`) |
+| `crop_n_layers` | crop-pyramid layers for higher recall on big images (`0`) |
+| `min_mask_region_area` | remove islands / holes smaller than this (`0` = off) |
+
+The `sam_amg` CLI tool is the same from the shell — it writes a colored overlay
+PNG with every generated mask:
+
+```bash
+sam_amg /path/to/sam-vit-huge photo.jpg --points-per-side 32 --out everything.png
+# other flags: --pred-iou-thresh --stability-thresh --crop-n-layers
+#              --min-region-area --points-per-batch --variant --cuda
 ```
 
 ## License
