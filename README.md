@@ -199,19 +199,24 @@ Fetch a checkpoint with `scripts/download-weights.sh depth-anything-v2-small`
 (`-base` / `-large` for the larger ViT-B / ViT-L variants). The output is
 *relative* depth in Depth-Anything's convention (larger = nearer), not metric.
 
-Backends run identically: CPU (FP32) and CUDA (FP16) agree to a few times 1e-5
-on the real Small checkpoint — that cross-backend agreement is a self-consistency
-check, not a correctness proof against the HF Python model (not yet measured).
+Parity is measured against the actual HF `DepthAnythingForDepthEstimation`
+output, not just asserted: `tests/test_depth_parity.cpp` compares brovisionml to
+a golden dump of the Python model (generated out-of-repo; the goldens download
+like the weights). At a **square 518²** input — where the DPT resize is identity
+and DINOv2's position embedding is used at its native grid (no interpolation) —
+brovisionml agrees with HF to FP32 round-off: depth **rel-max ~1.4e-5**,
+preprocess ~7e-7, backbone stages ~5e-4. The model path is exact. CPU (FP32) and
+CUDA (FP16) additionally agree to a few times 1e-5 on the real Small checkpoint.
 
-One known convention gap vs the HF reference: DINOv2 interpolates its position
-embedding to non-native patch grids with `torch.interpolate(mode="bicubic")`,
-which uses the cubic coefficient a=-0.75, whereas brotensor's bicubic is
-Catmull-Rom (a=-0.5). So for **non-square / non-518²** inputs the position
-embedding differs slightly from HF. For a square 518² input that interpolation
-is skipped entirely (the grid already matches), so the path is faithful to HF.
-The image resize and the fusion/head upsamples do **not** introduce a gap: the
-image resize is bicubic a=-0.5, matching PIL's BICUBIC (what the HF processor
-uses), and the DPT upsamples are bilinear (no cubic coefficient).
+For **non-square** inputs the agreement is ~0.1% mean / ~0.7% max. DINOv2's
+position-embedding interpolation is faithful — brotensor's bicubic mode 3 uses
+the torch coefficient a=-0.75 (`torch.interpolate(mode="bicubic")`), matched
+exactly; mode 2 (a=-0.5, Catmull-Rom / PIL) is reserved for the PIL-matching
+image resize. The DPT fusion/head upsamples are bilinear (no cubic coefficient).
+The residual max is a preprocessing nuance: `broimage`'s bicubic image resize
+matches PIL in the interior but differs at image borders / hard edges (PIL
+renormalizes boundary weights), a few localized pixels. Square inputs avoid the
+resize entirely and are exact.
 
 ## License
 

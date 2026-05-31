@@ -202,10 +202,10 @@ namespace {
 
 // Absolute position embedding for a (gh, gw) patch grid: cls position row +
 // (bicubically interpolated, if the grid differs from native) patch positions.
-// align_corners=False bicubic, matching DINOv2 interpolate_pos_encoding. (Note:
-// brotensor's bicubic uses a=-0.5; torch's interpolate uses a=-0.75, so the
-// interpolated branch differs from HF by a small amount — the native-grid branch
-// is exact and is the common case at 518 input.)
+// align_corners=False bicubic with a=-0.75 (interp2d mode 3), matching DINOv2
+// interpolate_pos_encoding — torch.nn.functional.interpolate(mode="bicubic").
+// The native-grid branch is bit-exact (HF returns the stored embedding as-is
+// when the grid matches); the interpolated branch is the non-518 input path.
 Tensor position_embedding(const Tensor& cls_pos, const Tensor& patch_pos_native,
                           int D, int ng, int gh, int gw) {
     Tensor patch_pos;
@@ -215,7 +215,8 @@ Tensor position_embedding(const Tensor& cls_pos, const Tensor& patch_pos_native,
         Tensor nchw;
         brotensor::sequence_to_nchw(patch_pos_native, 1, D, ng, ng, nchw);
         Tensor resized;
-        brotensor::interp2d_forward(nchw, 1, D, ng, ng, gh, gw, /*bicubic=*/2, resized);
+        brotensor::interp2d_forward(nchw, 1, D, ng, ng, gh, gw,
+                                    /*bicubic a=-0.75 (torch)=*/3, resized);
         brotensor::nchw_to_sequence(resized, 1, D, gh, gw, patch_pos);
     }
     Tensor pos;

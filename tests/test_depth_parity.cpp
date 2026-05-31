@@ -199,7 +199,16 @@ int main() {
     if (file_exists(gdir + "/golden_wide.bin")) {
         Golden g;
         check(load_golden(gdir + "/golden_wide.bin", g), "load wide golden");
-        depth::DepthEstimator est(depth::DepthAnythingConfig::v2_small());
+        auto wcfg = depth::DepthAnythingConfig::v2_small();
+        // Isolate the image resize (broimage bicubic vs HF PIL BICUBIC) from the
+        // in-model pos-embed interpolation: compare preprocessed pixels too.
+        dpt::PreprocessedImage wpp = dpt::preprocess(
+            g.input.data(), g.W, g.H, 3, wcfg.input_size, wcfg.multiple,
+            wcfg.keep_aspect_ratio);
+        Diff wpx = diff(wpp.pixels.host_f32(), g.pixels.data(), g.pixels.size());
+        std::printf("wide preprocess pixels: max=%.3e mean=%.3e\n",
+                    wpx.max_abs, wpx.mean_abs);
+        depth::DepthEstimator est(wcfg);
         est.load(dir);
         depth::DepthMap dm = est.estimate(g.input.data(), g.W, g.H, 3);
         check(dm.depth.size() == g.depth.size(), "wide depth size matches golden");
@@ -209,11 +218,16 @@ int main() {
         double rel = dd.max_abs / std::max(1e-6, (double)(hi - lo));
         std::printf("wide %dx%d -> model %dx%d depth: max=%.3e mean=%.3e rel-max=%.3e\n",
                     g.W, g.H, g.model_w, g.model_h, dd.max_abs, dd.mean_abs, rel);
-        // Non-square inputs go through DINOv2's position-embedding interpolation,
-        // where brotensor's bicubic (a=-0.5) differs from PyTorch's (a=-0.75) —
-        // ~1.1% relative. This guards against a gross regression while that gap
-        // stands; tightens to round-off once the coefficient is matched.
-        check(rel < 1.5e-2, "wide depth parity (within known pos-embed bicubic gap)");
+        // The DINOv2 position-embedding interpolation now matches torch (interp2d
+        // mode 3, a=-0.75), so the mean depth error is ~0.1%. The residual max
+        // (~0.7%) is the preprocess image resize: broimage's bicubic differs from
+        // PIL only at image borders / hard edges (PIL renormalizes boundary
+        // weights), visible above as a localized ~0.1 pixel spike against a ~3e-3
+        // mean. It is a preprocessing nuance, not a model gap — the model path is
+        // exact (see square518). This guards against regression; it tightens once
+        // broimage's resize matches PIL's border handling.
+        check(wpx.mean_abs < 1e-2, "wide preprocess parity (interior matches PIL)");
+        check(rel < 1e-2, "wide depth parity (within broimage resize border gap)");
     }
 
     if (failures == 0) { std::printf("test_depth_parity: OK\n"); return 0; }
