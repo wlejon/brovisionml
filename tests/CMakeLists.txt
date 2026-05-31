@@ -11,6 +11,7 @@ endfunction()
 
 brovisionml_add_test(brovisionml_test_smoke            test_smoke.cpp)
 brovisionml_add_test(brovisionml_test_dpt_preprocess   test_dpt_preprocess.cpp)
+brovisionml_add_test(brovisionml_test_dinov2           test_dinov2.cpp)
 brovisionml_add_test(brovisionml_test_sam_preprocess   test_sam_preprocess.cpp)
 brovisionml_add_test(brovisionml_test_sam_image_encoder test_sam_image_encoder.cpp)
 brovisionml_add_test(brovisionml_test_sam_prompt_encoder test_sam_prompt_encoder.cpp)
