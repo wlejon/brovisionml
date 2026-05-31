@@ -18,9 +18,10 @@ the graph — there is **no tokenizer dependency**.
 
 Models planned / implemented:
 
-- **SAM (Segment Anything)** — promptable segmentation: ViT image encoder +
-  prompt encoder (points / boxes / mask) + lightweight mask decoder. *(first
-  target)*
+- **SAM (Segment Anything)** — promptable segmentation, **runnable end to end**:
+  ViT image encoder + prompt encoder (points / boxes / mask) + lightweight mask
+  decoder, tied together by a `Sam` orchestrator (encode-image-once /
+  decode-many-prompts) and a `sam_segment` CLI driver.
 - Depth estimation, detection, and matting are natural follow-ons that reuse
   the same ViT-encoder + task-head shape.
 
@@ -77,7 +78,25 @@ pad to 1024×1024) is `broimage`'s job; the model takes the prepared pixel
 tensor.
 
 Encode-image-once / decode-many-prompts is the natural split: a slow image
-encode followed by cheap per-click mask decodes.
+encode followed by cheap per-click mask decodes. The `Sam` orchestrator
+(`brovisionml/sam.h`) wires all three pieces together — load one HF
+`model.safetensors`, `set_image()` once, then `segment()` with points / boxes
+given in original-image pixel coordinates and get masks back at the original
+resolution:
+
+```cpp
+brovisionml::sam::Sam sam(brovisionml::sam::SamConfig::vit_h());
+sam.load("/path/to/sam-vit-huge");          // dir holding model.safetensors
+sam.set_image(rgb, w, h, /*channels=*/3);    // preprocess + ViT encode (once)
+auto seg = sam.segment({{x, y}}, {1}, {});    // a foreground click
+// seg.logits[seg.best()*h*w ...] — threshold at 0 for a binary mask
+```
+
+The `sam_segment` CLI tool is the same flow from the shell:
+
+```bash
+sam_segment /path/to/sam-vit-huge photo.jpg --point 320,240 --out mask.png
+```
 
 ## License
 
