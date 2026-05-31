@@ -224,14 +224,17 @@ Per-pixel surface-normal estimation. The model is **DSINE_v02** (Discontinuity-a
 Surface-normal Estimation): an EfficientNet-B5 backbone feeding a DPT-style
 decoder, then an iterative ConvGRU / AngMF ("angular mean-field") refinement that
 rotation-smooths the normals in SO(3) and convex-upsamples back to full
-resolution. Like SAM and Depth-Anything it is `image → dense map`, and every
-piece composes ops `brotensor` already exposes:
+resolution. Like SAM and Depth-Anything it is `image → dense map` and runs
+on-device (CPU FP32 or CUDA FP32) — `est.to(Device::CUDA)`. The encoder and
+decoder compose ops `brotensor` already exposes; the refinement adds the only
+two pieces with no brotensor primitive — DSINE's surface-normal *domain* math —
+as brovisionml's own ops, each with a CPU FP32 path and a CUDA kernel:
 
-| Component | brotensor ops |
+| Component | implementation |
 |---|---|
-| EfficientNet-B5 encoder | `conv2d` (stem / 1×1 / depthwise, TF-"SAME" dynamic pad), batchnorm fold, SiLU, squeeze-excite |
-| DPT-style decoder | weight-standardized `conv2d` (folded at load), bilinear `interp2d`, GroupNorm, LeakyReLU; 2-channel uv geometry conditioning per stage |
-| AngMF refinement | `conv2d` (5×5 ConvGRU gates + prediction heads); per-pixel per-neighbor axis-angle rotation, `get_unfold`, RayReLU, and convex mask upsample as host FP32 |
+| EfficientNet-B5 encoder | brotensor `conv2d` (stem / 1×1 / depthwise, TF-"SAME" dynamic pad), batchnorm fold, SiLU; squeeze-excite via `adaptive_avg_pool2d` + 1×1 conv + `broadcast_mul` |
+| DPT-style decoder | weight-standardized `conv2d` (folded at load), bilinear `interp2d`, GroupNorm, LeakyReLU, `concat_nchw_channels`, `l2_normalize_nchw`; 2-channel uv geometry conditioning per stage |
+| AngMF refinement | brotensor `conv2d` (5×5 ConvGRU gates + heads), GRU elementwise, `convex_upsample`, `slice2d`; plus brovisionml's **RayReLU** and the fused **AngMF propagate** (per-pixel per-neighbor axis-angle rotation + neighborhood unfold) ops — CPU FP32 + CUDA |
 
 Unlike DPT/Depth-Anything there is **no resize and no letterbox**: the image is
 consumed at native resolution and only zero-padded to a multiple of 32, then

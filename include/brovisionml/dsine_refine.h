@@ -110,15 +110,19 @@
 // origH,origW are the PADDED (multiple-of-32) dims. Pass the raw preprocess
 // intrinsics; the +0.5 is applied here for consistency with build_ray8.
 //
-// The ConvGRU gates and the four heads run through brotensor conv2d (5x5 pad2 for
-// the GRU, the head kernels for the heads); the per-pixel-per-neighbor rotation
-// math, the unfold, RayReLU, and the convex upsample have no direct brotensor op
-// and run as host (CPU FP32) routines — matching the decoder/encoder, which also
-// run host FP32 for parity. std::sin/cos drive the rotation.
+// The refinement is device-agnostic (CPU FP32 or CUDA FP32). The ConvGRU gates
+// and the four heads run through brotensor conv2d; the GRU elementwise combine,
+// channel concat, per-pixel channel L2-normalize, and convex mask upsample are
+// brotensor ops. The two pieces that are surface-normal *domain* math with no
+// brotensor primitive — RayReLU and the fused per-pixel-per-neighbor AngMF
+// rotation propagate (which folds in the neighborhood unfold and the xy-pair
+// normalize) — are brovisionml's own ops (brovisionml/dsine_ops.h), each with a
+// CPU FP32 path and a CUDA kernel. The uv/ray conditioning maps are built
+// host-side and uploaded to the active device.
 //
 // Weights load from a `model.safetensors` under the TOP-LEVEL keys
 // `gru.conv{z,r,q}.*`, `prob_head.*`, `xy_head.*`, `angle_head.*`,
-// `up_prob_head.*` (NOT `decoder.*`), FP32, host-resident.
+// `up_prob_head.*` (NOT `decoder.*`), FP32, host-resident until to().
 
 #include "brovisionml/dsine_decoder.h"
 #include "brovisionml/dsine_preprocess.h"
@@ -142,14 +146,20 @@ public:
     void load(const std::string& dir);
     void load_file(const std::string& path);
 
+    // Migrate the loaded weights to `dev` (no-op if already there). The forward
+    // then runs on `dev`; the decoder output passed to forward() must live on the
+    // same device.
+    void to(brotensor::Device dev);
+    brotensor::Device device() const;
+
     // Run the 5-iteration refinement on the decoder output. `intrins` is the raw
     // preprocess intrinsics (pre-"+0.5"; +0.5 applied internally). origH,origW
     // are the PADDED dims (the /8 grid is dec.h8/w8). `tf` carries the pad
     // offsets used to crop the full-res result back to the original image.
     //
-    // Returns the final surface normals as a flat NCHW (1, 3*H*W) host FP32
-    // tensor at the ORIGINAL (unpadded) resolution (H = tf.orig_h, W = tf.orig_w),
-    // L2-normalized per pixel.
+    // Returns the final surface normals as a flat NCHW (1, 3*H*W) tensor at the
+    // ORIGINAL (unpadded) resolution (H = tf.orig_h, W = tf.orig_w), L2-normalized
+    // per pixel, resident on the active device.
     brotensor::Tensor forward(const DecoderOutput& dec, const Intrinsics& intrins,
                               int origH, int origW, const DsineTransform& tf) const;
 

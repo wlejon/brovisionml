@@ -23,8 +23,11 @@
 // channel 0 = nx, 1 = ny, 2 = nz. Each pixel's (nx,ny,nz) is L2-normalized.
 // Visualize by mapping to RGB with (n+1)*0.5.
 //
-// CPU only: the four DSINE stages run host-side FP32 for parity with the
-// reference. There is no CUDA path here (unlike DepthEstimator).
+// Device: like DepthEstimator/SAM, call to(Device) after load() to run on a
+// device. The encoder/decoder compose brotensor ops; the refinement adds
+// brovisionml's own RayReLU + AngMF-propagate ops (CPU FP32 + CUDA). estimate()
+// preprocesses on the host, uploads the pixels to the active device, and copies
+// the final normal map back to the host. Default device is CPU.
 
 #include "brovisionml/dsine_decoder.h"
 #include "brovisionml/dsine_encoder.h"
@@ -75,6 +78,11 @@ public:
     void load(const std::string& dir);
     void load_file(const std::string& path);
 
+    // Migrate all three stages to `dev` (no-op if already there). estimate()
+    // then runs on `dev` and returns a host-resident NormalMap.
+    void to(brotensor::Device dev);
+    brotensor::Device device() const { return device_; }
+
     const DsineConfig& config() const { return cfg_; }
 
     // Estimate surface normals for an 8-bit interleaved HWC image (channels
@@ -95,6 +103,7 @@ private:
     EncoderB5   encoder_;
     Decoder     decoder_;
     Refiner     refiner_;
+    brotensor::Device device_ = brotensor::Device::CPU;
 };
 
 }  // namespace brovisionml::dsine

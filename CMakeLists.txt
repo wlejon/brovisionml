@@ -26,6 +26,25 @@ endif()
 option(BROTENSOR_WITH_CUDA  "Build the CUDA GPU backend"  OFF)
 option(BROTENSOR_WITH_METAL "Build the Metal GPU backend" OFF)
 
+# Unlike the rest of the stack (which composes brotensor ops), brovisionml ships
+# a small number of its own CUDA kernels for DSINE's surface-normal *domain* math
+# — RayReLU and the fused AngMF propagate — which have no brotensor primitive.
+# Enable the CUDA language only when the GPU backend is requested, mirroring
+# brotensor's own setup. The .cu sources are added to the brovisionml target
+# below, guarded by the same option.
+if(BROTENSOR_WITH_CUDA)
+    if(NOT CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES native)
+    endif()
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    find_package(CUDAToolkit REQUIRED)
+    if(MSVC AND DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+        set(CMAKE_CUDA_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
+    endif()
+endif()
+
 # --- Siblings: bromath (header-only) + brotensor (tensor + ops) + broimage ---
 #
 # Prefer standalone repos at ../<name>; fall back to third_party/ submodules.
@@ -112,6 +131,7 @@ target_sources(brovisionml PRIVATE
     src/dsine_encoder.cpp
     src/dsine_decoder.cpp
     src/dsine_refine.cpp
+    src/dsine_ops.cpp
     src/dsine.cpp
     src/dinov2.cpp
     src/dpt_head.cpp
@@ -123,6 +143,24 @@ target_sources(brovisionml PRIVATE
     src/sam.cpp
     src/sam_amg.cpp
 )
+
+# brovisionml's own CUDA kernels (DSINE RayReLU + AngMF propagate). Compiled into
+# the library only when the GPU backend is on; BROVISIONML_WITH_CUDA gates the
+# device-dispatch branch in src/dsine_ops.cpp that calls them. Everything else in
+# the library stays device-agnostic by composing brotensor ops.
+if(BROTENSOR_WITH_CUDA)
+    target_sources(brovisionml PRIVATE src/dsine_ops.cu)
+    target_compile_definitions(brovisionml PRIVATE BROVISIONML_WITH_CUDA=1)
+    target_link_libraries(brovisionml PUBLIC CUDA::cudart)
+    # dsine_ops.cu is self-contained (kernels + host launchers in one TU, no
+    # cross-TU device symbols), so it uses whole-program compilation — no
+    # separable/relocatable device code, which would otherwise need a device-link
+    # step (__cudaRegisterLinkedBinary) the static library does not perform.
+    set_target_properties(brovisionml PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_SEPARABLE_COMPILATION OFF)
+endif()
 
 # --- Install ---
 #

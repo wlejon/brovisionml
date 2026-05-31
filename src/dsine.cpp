@@ -25,6 +25,19 @@ void NormalEstimator::load_file(const std::string& path) {
     encoder_.load_file(path);
     decoder_.load_file(path);
     refiner_.load_file(path);
+    if (device_ != brotensor::Device::CPU) {
+        encoder_.to(device_);
+        decoder_.to(device_);
+        refiner_.to(device_);
+    }
+}
+
+void NormalEstimator::to(brotensor::Device dev) {
+    if (dev == device_) return;
+    encoder_.to(dev);
+    decoder_.to(dev);
+    refiner_.to(dev);
+    device_ = dev;
 }
 
 // ─── Estimate ─────────────────────────────────────────────────────────────────
@@ -33,18 +46,27 @@ NormalMap NormalEstimator::run(const PreprocessedImage& pp) const {
     const int padH = pp.transform.pad_h;
     const int padW = pp.transform.pad_w;
 
-    // encoder -> decoder -> refiner. All host-side FP32 for parity.
-    EncoderTaps taps = encoder_.forward(pp.pixels, padH, padW);
+    // Upload the host-preprocessed pixels to the active device, then run
+    // encoder -> decoder -> refiner on-device (CPU FP32 or CUDA FP32).
+    brotensor::Tensor px = (device_ == brotensor::Device::CPU)
+                               ? pp.pixels
+                               : pp.pixels.to(device_);
+    EncoderTaps taps = encoder_.forward(px, padH, padW);
     DecoderOutput dout = decoder_.forward(taps, pp.intrins, padH, padW);
     brotensor::Tensor normals =
         refiner_.forward(dout, pp.intrins, padH, padW, pp.transform);
+
+    // Pull the final normal map back to the host for the caller.
+    brotensor::Tensor host = (normals.device == brotensor::Device::CPU)
+                                 ? normals
+                                 : normals.to(brotensor::Device::CPU);
 
     const int W = pp.transform.orig_w;
     const int H = pp.transform.orig_h;
     NormalMap out;
     out.width  = W;
     out.height = H;
-    const float* n = normals.host_f32();
+    const float* n = host.host_f32();
     out.normals.assign(n, n + static_cast<std::size_t>(3) * H * W);
     return out;
 }
