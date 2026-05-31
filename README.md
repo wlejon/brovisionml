@@ -200,11 +200,18 @@ Fetch a checkpoint with `scripts/download-weights.sh depth-anything-v2-small`
 *relative* depth in Depth-Anything's convention (larger = nearer), not metric.
 
 Backends run identically: CPU (FP32) and CUDA (FP16) agree to a few times 1e-5
-on the real Small checkpoint. Note that the position-embedding and image
-resamples use brotensor's bicubic (Catmull-Rom, a=-0.5); PyTorch's
-`interpolate(mode="bicubic")` uses a=-0.75, so for non-square inputs the output
-differs from the HF Python reference by a small amount (the native-grid /
-square-input path is exact).
+on the real Small checkpoint — that cross-backend agreement is a self-consistency
+check, not a correctness proof against the HF Python model (not yet measured).
+
+One known convention gap vs the HF reference: DINOv2 interpolates its position
+embedding to non-native patch grids with `torch.interpolate(mode="bicubic")`,
+which uses the cubic coefficient a=-0.75, whereas brotensor's bicubic is
+Catmull-Rom (a=-0.5). So for **non-square / non-518²** inputs the position
+embedding differs slightly from HF. For a square 518² input that interpolation
+is skipped entirely (the grid already matches), so the path is faithful to HF.
+The image resize and the fusion/head upsamples do **not** introduce a gap: the
+image resize is bicubic a=-0.5, matching PIL's BICUBIC (what the HF processor
+uses), and the DPT upsamples are bilinear (no cubic coefficient).
 
 ## License
 
