@@ -15,3 +15,11 @@ brovisionml_add_test(brovisionml_test_sam_image_encoder test_sam_image_encoder.c
 brovisionml_add_test(brovisionml_test_sam_prompt_encoder test_sam_prompt_encoder.cpp)
 brovisionml_add_test(brovisionml_test_sam_mask_decoder   test_sam_mask_decoder.cpp)
 brovisionml_add_test(brovisionml_test_sam               test_sam.cpp)
+
+# Real-checkpoint end-to-end test: loads actual facebook/sam-vit-* weights from
+# weights/ (downloaded via scripts/download-weights.sh) and skips cleanly when
+# absent. The weights dir is passed in at configure time; an env var of the same
+# name overrides it at run time.
+brovisionml_add_test(brovisionml_test_sam_weights        test_sam_weights.cpp)
+target_compile_definitions(brovisionml_test_sam_weights PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
