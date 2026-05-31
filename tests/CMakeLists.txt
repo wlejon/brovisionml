@@ -12,6 +12,7 @@ endfunction()
 brovisionml_add_test(brovisionml_test_smoke            test_smoke.cpp)
 brovisionml_add_test(brovisionml_test_dpt_preprocess   test_dpt_preprocess.cpp)
 brovisionml_add_test(brovisionml_test_dsine_preprocess test_dsine_preprocess.cpp)
+brovisionml_add_test(brovisionml_test_dsine_encoder    test_dsine_encoder.cpp)
 brovisionml_add_test(brovisionml_test_dinov2           test_dinov2.cpp)
 brovisionml_add_test(brovisionml_test_dpt_head         test_dpt_head.cpp)
 brovisionml_add_test(brovisionml_test_depth_anything   test_depth_anything.cpp)
@@ -54,4 +55,11 @@ target_compile_definitions(brovisionml_test_depth_parity PRIVATE
 # part is gated on golden_dsine_*.bin under weights/dsine (generated out-of-repo,
 # never committed) and skips cleanly when absent.
 target_compile_definitions(brovisionml_test_dsine_preprocess PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+
+# DSINE EfficientNet-B5 encoder parity test: gated on the real checkpoint
+# (weights/dsine/model.safetensors) and the golden_dsine_*.bin dumps under
+# weights/dsine (generated out-of-repo, never committed); skips cleanly when
+# either is absent. Compares the three encoder taps against the golden.
+target_compile_definitions(brovisionml_test_dsine_encoder PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
