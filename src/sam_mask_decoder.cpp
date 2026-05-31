@@ -349,14 +349,17 @@ DecodedMasks MaskDecoder::decode(const brotensor::Tensor& image_embedding,
         const LayerW& L = w_->layers[i];
         Tensor attn;
 
-        // (a) self-attention on the tokens (skip query PE on the first layer)
+        // (a) self-attention on the tokens. The first layer skips the query PE
+        //     AND has no residual — SAM's skip_first_layer_pe replaces queries
+        //     with the attention output rather than adding it.
         if (i == 0) {
             run_attn(L.self_attn, queries, queries, queries, nh, attn);
+            queries = std::move(attn);
         } else {
             Tensor q = add_pe(queries, point_embeddings);
             run_attn(L.self_attn, q, q, queries, nh, attn);
+            brotensor::add_inplace(queries, attn);
         }
-        brotensor::add_inplace(queries, attn);
         ln_apply(queries, L.ln1, eps);
 
         // (b) cross-attention tokens -> image
@@ -368,10 +371,10 @@ DecodedMasks MaskDecoder::decode(const brotensor::Tensor& image_embedding,
             ln_apply(queries, L.ln2, eps);
         }
 
-        // (c) token MLP
+        // (c) token MLP (ReLU activation — SAM's mask-decoder hidden_act)
         {
             Tensor m1; brotensor::linear_forward_batched(L.mlp1_w, L.mlp1_b, queries, m1);
-            Tensor act; brotensor::gelu_exact_forward(m1, act);
+            Tensor act; brotensor::relu_forward_batched(m1, act);
             Tensor m2; brotensor::linear_forward_batched(L.mlp2_w, L.mlp2_b, act, m2);
             brotensor::add_inplace(queries, m2);
             ln_apply(queries, L.ln3, eps);

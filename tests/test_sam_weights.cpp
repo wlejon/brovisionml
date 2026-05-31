@@ -12,9 +12,13 @@
 // configure time via -DBROVISIONML_WEIGHTS_DIR; the env var of the same name
 // overrides it at run time.
 //
-// The input is a synthetic deterministic image — we are validating that real
-// weights LOAD and the pipeline produces finite, correctly-shaped, backend-
-// consistent output, not segmentation quality (which needs a real photo).
+// The input is a procedurally-rendered high-contrast disk with an exactly-known
+// ground-truth mask, so we can assert correctness, not just that the pipeline
+// runs: a single click at the disk's center (and a box around it) must recover
+// the disk with high IoU. This is what distinguishes "loaded correctly" from
+// "loaded plausibly-but-wrong" — a transposed weight, a wrong activation, or an
+// off-by-one positional encoding stays finite and backend-consistent but tanks
+// the IoU. We still also assert shape, finiteness, and CPU/CUDA parity.
 
 #define _CRT_SECURE_NO_WARNINGS  // std::getenv, matching tools/sam_segment.cpp
 
@@ -53,20 +57,47 @@ bool all_finite(const std::vector<float>& v) {
     return true;
 }
 
-// A deterministic non-square RGB image with some structure (a bright block) so
-// a foreground click has something to latch onto. Quality is not asserted.
-std::vector<uint8_t> make_image(int W, int H) {
+// Minimum IoU a correctly-loaded model must reach recovering the disk. The real
+// pipeline measures ~0.996; 0.90 is a generous regression tripwire, not a tight
+// fit — a transposed weight or wrong activation drops this to near 0.
+constexpr float kMinIoU = 0.90f;
+
+// A hard-edged filled disk (bright) over a gradient background — an unambiguous
+// "object" with an exactly-known ground-truth mask. Fills `gt` (W*H, 1 inside
+// the disk) alongside the returned interleaved-RGB buffer.
+std::vector<uint8_t> make_disk_image(int W, int H, int cx, int cy, int r,
+                                     std::vector<uint8_t>& gt) {
     std::vector<uint8_t> img(static_cast<std::size_t>(W) * H * 3);
+    gt.assign(static_cast<std::size_t>(W) * H, 0);
+    const long long r2 = static_cast<long long>(r) * r;
     for (int y = 0; y < H; ++y)
         for (int x = 0; x < W; ++x) {
-            const std::size_t o = (static_cast<std::size_t>(y) * W + x) * 3;
-            const bool block = (x > W / 3 && x < 2 * W / 3 &&
-                                y > H / 3 && y < 2 * H / 3);
-            img[o + 0] = static_cast<uint8_t>(block ? 240 : ((x * 5) & 0xff));
-            img[o + 1] = static_cast<uint8_t>(block ? 240 : ((y * 7) & 0xff));
-            img[o + 2] = static_cast<uint8_t>(block ? 240 : (((x + y) * 3) & 0xff));
+            const std::size_t px = static_cast<std::size_t>(y) * W + x;
+            const long long dx = x - cx, dy = y - cy;
+            const bool inside = dx * dx + dy * dy <= r2;
+            const std::size_t o = px * 3;
+            if (inside) {
+                img[o + 0] = img[o + 1] = img[o + 2] = 245;
+                gt[px] = 1;
+            } else {
+                img[o + 0] = static_cast<uint8_t>((x * 5) & 0xff);
+                img[o + 1] = static_cast<uint8_t>((y * 7) & 0xff);
+                img[o + 2] = static_cast<uint8_t>(((x + y) * 3) & 0xff);
+            }
         }
     return img;
+}
+
+// IoU of a binarized mask (logit > 0) against the ground-truth mask.
+float mask_iou(const float* logits, const std::vector<uint8_t>& gt) {
+    long long inter = 0, uni = 0;
+    for (std::size_t i = 0; i < gt.size(); ++i) {
+        const bool m = logits[i] > 0.0f;
+        const bool g = gt[i] != 0;
+        if (m && g) ++inter;
+        if (m || g) ++uni;
+    }
+    return uni ? static_cast<float>(inter) / static_cast<float>(uni) : 0.0f;
 }
 
 struct Variant {
@@ -75,21 +106,23 @@ struct Variant {
     const char* label;
 };
 
-// Run the full pipeline for one loaded model and assert shape/finiteness. When
-// CUDA is available, also run on the GPU and assert CPU/CUDA parity. `cpu` is
-// already loaded on the host.
+// Run the full pipeline for one loaded model and assert shape/finiteness/IoU.
+// When CUDA is available, also run on the GPU and assert CPU/CUDA parity. `cpu`
+// is already loaded on the host.
 void exercise(brovisionml::sam::Sam& cpu, const std::string& path,
               brovisionml::sam::SamConfig (*make_cfg)(), const char* label) {
     using namespace brovisionml::sam;
 
-    const int W = 96, H = 72;
-    const std::vector<uint8_t> img = make_image(W, H);
-    const std::vector<std::array<float, 2>> pt = {{48.0f, 36.0f}};
+    const int W = 320, H = 256, cx = 160, cy = 128, r = 80;
+    std::vector<uint8_t> gt;
+    const std::vector<uint8_t> img = make_disk_image(W, H, cx, cy, r, gt);
+    const std::vector<std::array<float, 2>> pt = {
+        {static_cast<float>(cx), static_cast<float>(cy)}};
     const std::vector<int> pt_labels = {1};
 
     cpu.set_image(img.data(), W, H, 3);
 
-    // Point prompt, multimask -> 3 masks at original resolution.
+    // Point prompt at the disk center, multimask -> 3 masks at original res.
     Segmentation seg = cpu.segment(pt, pt_labels, {}, /*multimask=*/true);
     check(seg.num == 3, "multimask returns 3 masks");
     check(seg.height == H && seg.width == W, "masks at original resolution");
@@ -106,16 +139,27 @@ void exercise(brovisionml::sam::Sam& cpu, const std::string& path,
         check(seg.best() == argmax, "best() selects max iou");
     }
 
-    // Box prompt, single mask.
-    {
-        Segmentation b = cpu.segment({}, {}, {{10.f, 10.f, 80.f, 60.f}},
-                                     /*multimask=*/false);
-        check(b.num == 1 && b.height == H && b.width == W, "box single-mask shape");
-        check(all_finite(b.logits), "box mask finite");
-    }
+    // Correctness: the click must recover the disk.
+    const int b = seg.best();
+    const float iou_best =
+        mask_iou(seg.logits.data() + static_cast<std::size_t>(b) * H * W, gt);
+    std::printf("  %s: point disk IoU best=%.3f (head iou=%.3f)\n",
+                label, iou_best, seg.iou[b]);
+    check(iou_best >= kMinIoU, "point: best mask recovers the disk (IoU)");
 
-    std::printf("  %s: loaded + ran on CPU (best #%d iou=%.3f)\n",
-                label, seg.best(), seg.iou[seg.best()]);
+    // Box prompt tight around the disk -> single mask should also recover it.
+    {
+        const std::array<float, 4> box = {
+            static_cast<float>(cx - r - 4), static_cast<float>(cy - r - 4),
+            static_cast<float>(cx + r + 4), static_cast<float>(cy + r + 4)};
+        Segmentation bs = cpu.segment({}, {}, {box}, /*multimask=*/false);
+        check(bs.num == 1 && bs.height == H && bs.width == W,
+              "box single-mask shape");
+        check(all_finite(bs.logits), "box mask finite");
+        const float biou = mask_iou(bs.logits.data(), gt);
+        std::printf("  %s: box disk IoU=%.3f\n", label, biou);
+        check(biou >= kMinIoU, "box: mask recovers the disk (IoU)");
+    }
 
     // CPU/CUDA parity on the real weights.
     if (brotensor::is_available(brotensor::Device::CUDA)) {
