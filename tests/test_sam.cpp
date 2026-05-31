@@ -126,7 +126,10 @@ int main() {
     // ── prompt_encoder.* ──
     {
         const std::string pre = "prompt_encoder.";
-        cb.add(pre + "shared_embedding.positional_embedding", {2, F});
+        // Tied weight: HF SamModel stores the shared positional-encoding
+        // gaussian once at the top level, not under prompt_encoder.* — match
+        // the real checkpoint layout so this test exercises the real key.
+        cb.add("shared_image_embedding.positional_embedding", {2, F});
         for (int i = 0; i < 4; ++i)
             cb.add(pre + "point_embed." + std::to_string(i) + ".weight", {1, D});
         cb.add(pre + "not_a_point_embed.weight", {1, D});

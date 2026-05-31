@@ -91,7 +91,12 @@ void PromptEncoder::load_file(const std::string& path) {
 
     PromptEncoderWeights w;
 
-    w.gaussian = load_whole(f, kWho, pre + "shared_embedding.positional_embedding",
+    // The positional-encoding gaussian is a TIED weight in HF's SamModel: it is
+    // shared between the prompt encoder and the mask decoder, so transformers
+    // serializes it once at the TOP level as `shared_image_embedding.*` (and
+    // records the `prompt_encoder.shared_embedding.*` alias only in the file's
+    // __metadata__, not as a real tensor). Load it from the canonical key.
+    w.gaussian = load_whole(f, kWho, "shared_image_embedding.positional_embedding",
                             2, F);
     for (int i = 0; i < 4; ++i)
         w.point_embed[i] =

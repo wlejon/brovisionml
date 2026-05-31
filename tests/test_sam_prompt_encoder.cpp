@@ -65,7 +65,8 @@ int main() {
 
     CheckpointBuilder cb;
     const std::string pre = "prompt_encoder.";
-    cb.add(pre + "shared_embedding.positional_embedding", {2, F});
+    // Tied weight stored at the top level in real HF checkpoints (see loader).
+    cb.add("shared_image_embedding.positional_embedding", {2, F});
     for (int i = 0; i < 4; ++i)
         cb.add(pre + "point_embed." + std::to_string(i) + ".weight", {1, H});
     cb.add(pre + "not_a_point_embed.weight", {1, H});
