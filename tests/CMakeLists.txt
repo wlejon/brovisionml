@@ -17,6 +17,7 @@ brovisionml_add_test(brovisionml_test_dsine_decoder    test_dsine_decoder.cpp)
 brovisionml_add_test(brovisionml_test_dsine_refine     test_dsine_refine.cpp)
 brovisionml_add_test(brovisionml_test_dsine             test_dsine.cpp)
 brovisionml_add_test(brovisionml_test_hed              test_hed.cpp)
+brovisionml_add_test(brovisionml_test_lineart          test_lineart.cpp)
 brovisionml_add_test(brovisionml_test_dinov2           test_dinov2.cpp)
 brovisionml_add_test(brovisionml_test_dpt_head         test_dpt_head.cpp)
 brovisionml_add_test(brovisionml_test_depth_anything   test_depth_anything.cpp)
@@ -95,4 +96,13 @@ target_compile_definitions(brovisionml_test_dsine PRIVATE
 # either is absent. Loads via SoftEdgeDetector, runs the full conv trunk at
 # native resolution, and compares the edge map against the golden `edge` record.
 target_compile_definitions(brovisionml_test_hed PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+
+# Lineart END-TO-END parity test: gated on the real checkpoint
+# (weights/lineart/model.safetensors) and the golden_lineart_*.bin dumps under
+# weights/lineart (generated out-of-repo, never committed); skips cleanly when
+# either is absent. Loads via LineartDetector, runs the generator at native
+# resolution (dims divisible by 4 so it round-trips), and compares the raw
+# (un-inverted) line map against the golden.
+target_compile_definitions(brovisionml_test_lineart PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
