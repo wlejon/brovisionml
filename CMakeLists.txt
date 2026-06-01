@@ -137,6 +137,8 @@ target_sources(brovisionml PRIVATE
     src/hed.cpp
     src/lineart_preprocess.cpp
     src/lineart.cpp
+    src/mlsd_preprocess.cpp
+    src/mlsd.cpp
     src/dinov2.cpp
     src/dpt_head.cpp
     src/depth_anything.cpp
@@ -188,7 +190,7 @@ endif()
 # --- Tools ---
 option(BROVISIONML_TOOLS "Build brovisionml CLI tools" ON)
 if(BROVISIONML_TOOLS AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    foreach(tool sam_segment sam_amg depth_estimate normal_estimate hed_edges lineart)
+    foreach(tool sam_segment sam_amg depth_estimate normal_estimate hed_edges lineart mlsd_lines)
         add_executable(${tool} tools/${tool}.cpp)
         target_link_libraries(${tool} PRIVATE brovisionml)
         if(MSVC)
