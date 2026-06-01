@@ -20,6 +20,7 @@ brovisionml_add_test(brovisionml_test_hed              test_hed.cpp)
 brovisionml_add_test(brovisionml_test_lineart          test_lineart.cpp)
 brovisionml_add_test(brovisionml_test_mlsd             test_mlsd.cpp)
 brovisionml_add_test(brovisionml_test_openpose         test_openpose.cpp)
+brovisionml_add_test(brovisionml_test_segformer        test_segformer.cpp)
 brovisionml_add_test(brovisionml_test_dinov2           test_dinov2.cpp)
 brovisionml_add_test(brovisionml_test_dpt_head         test_dpt_head.cpp)
 brovisionml_add_test(brovisionml_test_depth_anything   test_depth_anything.cpp)
@@ -122,4 +123,12 @@ target_compile_definitions(brovisionml_test_mlsd PRIVATE
 # either is absent. Gate 1 compares the raw stage-6 PAF + heatmap (tight conv
 # parity); gate 2 matches decoded people + keypoint recall against the golden.
 target_compile_definitions(brovisionml_test_openpose PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+
+# SegFormer semantic-seg END-TO-END parity test: gated on the real checkpoint
+# (weights/segformer-b0-ade/model.safetensors) and the golden_segformer.bin dump
+# under weights/segformer-b0-ade (generated out-of-repo, never committed); skips
+# cleanly when either is absent. Gate 1 compares the decode-head logits (tight
+# transformer parity); gate 2 compares the per-pixel class map agreement.
+target_compile_definitions(brovisionml_test_segformer PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
