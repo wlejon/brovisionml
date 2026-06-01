@@ -7,8 +7,9 @@ Project-specific guidance for Claude Code. Read this before editing.
 `brovisionml` is the vision-model inference library for the **bro** stack — the
 vision counterpart to `brolm` (text), `brosoundml` (audio), and `brodiffusion`
 (image generation). Pure C++20. It owns standalone image→X models: promptable
-segmentation (SAM, the first target), and — as natural follow-ons — depth
-estimation, detection, and matting.
+segmentation (SAM), monocular depth, surface normals, and the ControlNet
+conditioning annotators (soft edge, lineart, straight lines, body pose, semantic
+segmentation).
 
 These are *vision tasks*, not multimodal language models. There is no tokenizer
 and no text in the graph, which is exactly why they do **not** belong in
@@ -83,8 +84,7 @@ When adding a new model family: header in `include/brovisionml/`, impl in
   offline conversion step. Models read sharded safetensors + `config.json`
   from a directory.
 - **Not wired into bro.** brovisionml stands on its own — its own build, its
-  own test suite, its own CLI tools. JS bindings in the bro engine come later,
-  if at all; do not add a bro dependency here.
+  own test suite, its own CLI tools. Do not add a bro dependency here.
 
 ## Git / workflow
 

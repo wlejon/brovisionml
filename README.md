@@ -16,7 +16,7 @@ Unlike the vision *encoders* that live in `brolm` (CLIP vision, the Qwen-VL
 tower), the models here are standalone image→X tasks with no language model in
 the graph — there is **no tokenizer dependency**.
 
-Models planned / implemented:
+Models implemented:
 
 - **SAM (Segment Anything)** — promptable segmentation, **runnable end to end**:
   ViT image encoder + prompt encoder (points / boxes / mask) + lightweight mask
@@ -46,9 +46,19 @@ Models planned / implemented:
   truncated MobileNetV2 backbone + FPN decode head) plus a host-side TP-map
   decode, tied together by an `MLSDdetector` orchestrator and an `mlsd_lines` CLI
   driver. See below.
-- Detection and matting are natural follow-ons; the DINOv2 backbone and DPT head
-  here are the reusable substrate for further DPT-style tasks (e.g. semantic
-  segmentation).
+- **OpenPose** — multi-person 2D body-pose estimation (the ControlNet "openpose"
+  annotator), **runnable end to end** on CPU or CUDA: a VGG trunk + six two-branch
+  Part-Affinity-Field / heatmap refinement stages, with a host-side peak-NMS +
+  bipartite limb-matching decode, tied together by an `OpenposeDetector`
+  orchestrator and an `openpose_pose` CLI driver. See below.
+- **SegFormer** — per-pixel semantic segmentation (the ControlNet "seg"
+  annotator), **runnable end to end** on CPU or CUDA: a hierarchical
+  Mix-Transformer (MiT) encoder + all-MLP decode head producing an ADE20K class
+  map, tied together by a `SegformerDetector` orchestrator and a `segformer_seg`
+  CLI driver. See below.
+
+The DINOv2 backbone and DPT head are a reusable substrate shared by the
+DPT-style tasks here (Depth-Anything, DSINE).
 
 ## Dependencies
 
@@ -89,8 +99,8 @@ forwarding `BROTENSOR_WITH_CUDA=ON` or `BROTENSOR_WITH_METAL=ON` to brotensor.
 
 ## SAM
 
-The first target. SAM splits cleanly into three pieces, and every piece maps
-onto ops `brotensor` already exposes:
+SAM splits cleanly into three pieces, and every piece maps onto ops `brotensor`
+already exposes:
 
 | SAM component | brotensor ops |
 |---|---|
