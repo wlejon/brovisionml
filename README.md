@@ -28,9 +28,17 @@ Models planned / implemented:
   to end**: a DINOv2 ViT backbone + a DPT (reassemble / RefineNet-fusion / head)
   decoder, tied together by a `DepthEstimator` orchestrator and a
   `depth_estimate` CLI driver. See below.
+- **DSINE** — per-pixel surface-normal estimation, **runnable end to end** on
+  CPU or CUDA: an EfficientNet-B5 encoder + DPT-style decoder + iterative
+  ConvGRU/AngMF refinement, tied together by a `NormalEstimator` orchestrator and
+  a `normal_estimate` CLI driver. See below.
+- **HED** — soft-edge estimation (the ControlNet "softedge" annotator),
+  **runnable end to end** on CPU or CUDA: a VGG-style 5-block conv trunk with
+  per-block side outputs, fused into one edge map, tied together by a
+  `SoftEdgeDetector` orchestrator and a `hed_edges` CLI driver. See below.
 - Detection and matting are natural follow-ons; the DINOv2 backbone and DPT head
-  here are the reusable substrate for further DPT-style tasks (e.g. surface
-  normals, semantic segmentation).
+  here are the reusable substrate for further DPT-style tasks (e.g. semantic
+  segmentation).
 
 ## Dependencies
 
@@ -284,6 +292,68 @@ model (generated like the Depth-Anything goldens; never committed):
 agreement is **exact to FP32 round-off — max-abs ~2–5e-6** on the unit normals
 for both square and zero-padded inputs; the staged refinement test bounds at
 max-abs ~1e-2 only to leave headroom over the 5-iteration rotation accumulation.
+
+## Soft edges (HED)
+
+Soft-edge estimation — the ControlNet **softedge** conditioning annotator. The
+model is the self-contained "ControlNetHED" reimplementation lllyasviel ships
+(Apache-2): a VGG-style five-block convolutional trunk where each block ends in a
+1×1 projection to a single-channel side output. Like SAM / Depth-Anything / DSINE
+it is `image → dense map` and runs on-device (CPU FP32 or CUDA FP32) —
+`det.to(Device::CUDA)`. It ships **no** HED-specific kernel; the forward pass is a
+pure composition of ops `brotensor` already exposes:
+
+| Component | brotensor ops |
+|---|---|
+| 5-block conv trunk | `conv2d` (3×3 blocks, ReLU between), `max_pool2d` (2×2 before blocks 2–5), 1×1 `conv2d` per-block side projection |
+| Side-map fusion | bilinear `interp2d` (each side → working resolution), mean, `sigmoid` |
+
+The learned per-channel `norm` bias (the VGG mean, in the [0,255] scale the model
+consumes) is **folded into the first conv's bias at load time** — `b'[o] = b[o] -
+Σ_c norm[c]·Σ_k W[o,c,k]` — so the forward never needs a broadcast subtract.
+Preprocessing is minimal (optional resize to a working resolution, pack to RGB
+FP32 in [0,255]) and lives in `hed::preprocess`; there is no normalize step here
+because the `norm` bias is part of the model. The `SoftEdgeDetector` orchestrator
+(`brovisionml/hed.h`) loads one HED `model.safetensors` and maps pixels to an
+edge probability map at the original resolution:
+
+```cpp
+brovisionml::hed::SoftEdgeDetector det;            // default HedConfig (native res)
+det.load("/path/to/hed");                           // dir holding model.safetensors
+auto em = det.detect(rgb, w, h, /*channels=*/3);
+// em.edge is row-major h*w FP32 in [0,1] (higher = stronger edge). em.at(x,y).
+```
+
+The `hed_edges` CLI tool is the same flow from the shell — it writes a grayscale
+edge PNG (`edge*255`):
+
+```bash
+hed_edges /path/to/hed photo.jpg --out edges.png
+# flags: --resolution N (longer-side working resolution; 0 = native)  --cuda
+```
+
+### Weights
+
+HED ships only a pickled `ControlNetHED.pth` (`lllyasviel/Annotators`); there is
+no clean HF safetensors release. The checkpoint this loader reads is produced by
+a one-off, **out-of-repo** conversion of that `.pth` to `model.safetensors` — no
+Python is committed here and the repo carries no Python dependency, consistent
+with the project's C++/shell-only rule. Once converted, the loader reads the
+safetensors directly via `brotensor::safetensors`.
+
+Parity is validated against an out-of-repo golden dump of the reference network
+(generated like the Depth-Anything / DSINE goldens; never committed):
+`tests/test_hed.cpp` runs the full `SoftEdgeDetector` end to end and compares the
+edge map against the golden. Whole-map agreement is **mean-abs ~2–4e-4** on the
+[0,1] edge map for both square and non-square inputs, and CPU↔CUDA agree to
+~4e-7. The worst single pixel can reach ~0.1: the edge map is the sigmoid of the
+*mean* of five side maps bilinear-upsampled to the working resolution (the
+coarsest is a 16× upsample of a 32×32 map). brotensor's bilinear matches torch's
+`F.interpolate` to ~1e-7, so the resize is exact — the residual is inherent
+`conv2d` FP-accumulation difference at coarse-map edges, where the 16× upsample
+through the steep sigmoid turns a sub-pixel logit shift into a narrow band of
+flipped fine pixels (~1% of pixels). The map is visually identical; this is the
+ballpark-exact agreement the annotator's ControlNet-conditioning role needs.
 
 ## License
 
