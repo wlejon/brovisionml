@@ -19,6 +19,7 @@ brovisionml_add_test(brovisionml_test_dsine             test_dsine.cpp)
 brovisionml_add_test(brovisionml_test_hed              test_hed.cpp)
 brovisionml_add_test(brovisionml_test_lineart          test_lineart.cpp)
 brovisionml_add_test(brovisionml_test_mlsd             test_mlsd.cpp)
+brovisionml_add_test(brovisionml_test_openpose         test_openpose.cpp)
 brovisionml_add_test(brovisionml_test_dinov2           test_dinov2.cpp)
 brovisionml_add_test(brovisionml_test_dpt_head         test_dpt_head.cpp)
 brovisionml_add_test(brovisionml_test_depth_anything   test_depth_anything.cpp)
@@ -113,4 +114,12 @@ target_compile_definitions(brovisionml_test_lineart PRIVATE
 # weights/mlsd (generated out-of-repo, never committed); skips cleanly when
 # either is absent. Compares the raw TP map (tight) and the decoded segment set.
 target_compile_definitions(brovisionml_test_mlsd PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+
+# OpenPose body-pose END-TO-END parity test: gated on the real checkpoint
+# (weights/openpose/model.safetensors) and the golden_openpose.bin dump under
+# weights/openpose (generated out-of-repo, never committed); skips cleanly when
+# either is absent. Gate 1 compares the raw stage-6 PAF + heatmap (tight conv
+# parity); gate 2 matches decoded people + keypoint recall against the golden.
+target_compile_definitions(brovisionml_test_openpose PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
