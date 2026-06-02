@@ -32,6 +32,7 @@
 // generator on-device, and copies the line map back to the host. Default CPU.
 
 #include "brovisionml/lineart_preprocess.h"
+#include "brovisionml/tile_runner.h"
 
 #include "brotensor/tensor.h"
 
@@ -52,6 +53,14 @@ struct LineartConfig {
     // field with dark lines; inverting yields bright lines on a dark field, the
     // convention ControlNet feeds downstream. Defaults to true.
     bool invert = true;
+
+    // Process large images as overlapping tiles, blending the per-tile line maps
+    // into one full-resolution map (the generator is fully convolutional, so a
+    // tile's lines depend only on local pixels). `tile.tile == 0` (default)
+    // disables tiling and runs whole-image. When tiling is active each tile runs
+    // at its native size, so `detect_resolution` is ignored. Inversion is applied
+    // per tile; since it is pointwise (1 - x) it commutes with the blend.
+    tiling::TileConfig tile;
 };
 
 // A dense line map at the original image resolution. `line` holds height*width

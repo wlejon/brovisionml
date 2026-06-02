@@ -10,6 +10,7 @@ function(brovisionml_add_test name)
 endfunction()
 
 brovisionml_add_test(brovisionml_test_smoke            test_smoke.cpp)
+brovisionml_add_test(brovisionml_test_tile_runner      test_tile_runner.cpp)
 brovisionml_add_test(brovisionml_test_dpt_preprocess   test_dpt_preprocess.cpp)
 brovisionml_add_test(brovisionml_test_dsine_preprocess test_dsine_preprocess.cpp)
 brovisionml_add_test(brovisionml_test_dsine_encoder    test_dsine_encoder.cpp)

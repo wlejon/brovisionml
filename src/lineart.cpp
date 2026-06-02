@@ -3,6 +3,8 @@
 #include "brotensor/ops.h"
 #include "brotensor/safetensors.h"
 
+#include "broimage/geometric.h"
+
 #include "weights_util.h"
 
 #include <map>
@@ -310,8 +312,27 @@ LineMap LineartDetector::run(const PreprocessedImage& pp) const {
 
 LineMap LineartDetector::detect(const uint8_t* rgb, int w, int h,
                                 int channels) const {
-    PreprocessedImage pp = preprocess(rgb, w, h, channels, cfg_.detect_resolution);
-    return run(pp);
+    std::vector<tiling::TileRect> tiles = tiling::plan_tiles(w, h, cfg_.tile);
+    if (tiles.empty()) {
+        PreprocessedImage pp = preprocess(rgb, w, h, channels, cfg_.detect_resolution);
+        return run(pp);
+    }
+
+    // Tiled path: crop each tile, run it at native resolution, feather-blend the
+    // per-tile line maps into one full-size map. (run() applies cfg_.invert per
+    // tile; 1 - x is pointwise so it commutes with the weighted blend.)
+    LineMap out;
+    out.width  = w;
+    out.height = h;
+    out.line = tiling::blend_1ch(w, h, tiles, [&](const tiling::TileRect& t) {
+        std::vector<uint8_t> crop(static_cast<std::size_t>(t.w) * t.h * channels);
+        broimage::crop_hwc_u8(rgb, w, h, channels, crop.data(),
+                              t.x, t.y, t.w, t.h);
+        PreprocessedImage pp = preprocess(crop.data(), t.w, t.h, channels,
+                                          /*detect_resolution=*/0);
+        return run(pp).line;
+    });
+    return out;
 }
 
 }  // namespace brovisionml::lineart

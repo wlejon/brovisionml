@@ -28,6 +28,7 @@
 // Default device is CPU.
 
 #include "brovisionml/hed_preprocess.h"
+#include "brovisionml/tile_runner.h"
 
 #include "brotensor/tensor.h"
 
@@ -43,6 +44,14 @@ struct HedConfig {
     // ControlNet's softedge preprocessor runs HED at a fixed resolution (often
     // 512) and resizes the edge map back afterwards — set this to match.
     int detect_resolution = 0;
+
+    // Process large images as overlapping tiles, blending the per-tile edge maps
+    // back into one full-resolution map (HED is fully convolutional, so a tile's
+    // edges depend only on local pixels — tiling is seamless and keeps memory
+    // bounded). `tile.tile == 0` (default) disables tiling and runs whole-image.
+    // When tiling is active each tile runs at its native size, so
+    // `detect_resolution` is ignored.
+    tiling::TileConfig tile;
 };
 
 // A dense edge probability map at the original image resolution. `edge` holds

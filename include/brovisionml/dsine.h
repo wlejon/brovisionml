@@ -36,6 +36,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,15 @@ namespace brovisionml::dsine {
 // to synthesize intrinsics when none are supplied.
 struct DsineConfig {
     float fov_deg = 60.0f;   // assumed FOV for the synthesized intrinsics
+
+    // Cap on the working resolution: if the image's longer side exceeds this,
+    // the input is downscaled (preserving aspect) before inference and the
+    // normal map is upscaled back to the original size and re-normalized to unit
+    // length. 0 (default) runs at native resolution. DSINE runs at the input
+    // resolution with no internal cap, so this is the guard against OOM on large
+    // images. Normals are geometry-conditioned on global intrinsics, so DSINE is
+    // capped (downscaled) rather than tiled.
+    int max_resolution = 0;
 };
 
 // A dense surface-normal map at the original image resolution. `normals` holds
@@ -98,6 +108,14 @@ public:
 
 private:
     NormalMap run(const PreprocessedImage& pp) const;
+
+    // Run at a capped working resolution (downscale → run → upscale + unit
+    // re-normalize). `set_intrins(pp, sx, sy)` overrides the synthesized
+    // intrinsics, given the downscale factors; empty leaves the FOV-synthesized
+    // intrinsics in place.
+    NormalMap run_capped(const uint8_t* rgb, int w, int h, int channels,
+                         const std::function<void(PreprocessedImage&,
+                                                  float, float)>& set_intrins) const;
 
     DsineConfig cfg_;
     EncoderB5   encoder_;

@@ -154,6 +154,30 @@ void run_case(const std::string& dir, const std::string& path) {
     CHECK(fr < 0.03);        // <3% of pixels diverge (edge-band fp amplification)
     CHECK(mx < 0.25);        // gross-breakage tripwire only
 
+    // Tiled parity: HED is a local FCN, so running the image as overlapping
+    // tiles and feather-blending the per-tile edge maps must closely reproduce
+    // the whole-image result. Divergence is confined to thin bands at tile
+    // interiors where the receptive field loses cross-seam context (the feather
+    // down-weights exactly there), so the whole-map mean stays small. This
+    // exercises the full crop -> preprocess -> run -> blend path.
+    {
+        HedConfig tcfg;
+        tcfg.tile.tile = 256;
+        tcfg.tile.overlap = 64;
+        SoftEdgeDetector tdet(tcfg);
+        tdet.load(dir);
+        EdgeMap tiled = tdet.detect(g.input.data(), g.W, g.H, 3);
+        CHECK(tiled.width == g.W && tiled.height == g.H);
+        CHECK(tiled.edge.size() == n);
+        if (tiled.edge.size() == n) {
+            double tmx = 0.0, tmn = 0.0, tfr = 0.0;
+            diff_stats(tiled.edge.data(), cpu.edge.data(), n, tmx, tmn, tfr);
+            std::printf("    tiled(256/64) vs whole: max-abs=%.3e  mean-abs=%.3e"
+                        "  frac>1e-2=%.4f%%\n", tmx, tmn, tfr * 100.0);
+            CHECK(tmn < 1e-2);   // local operator: blended tiles track whole-image
+        }
+    }
+
     // On-device: if a CUDA device is present, migrate and re-run; FP32-on-CUDA
     // should track both the golden and the CPU result tightly.
     brotensor::init();

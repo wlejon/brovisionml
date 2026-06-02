@@ -3,6 +3,8 @@
 #include "brotensor/ops.h"
 #include "brotensor/safetensors.h"
 
+#include "broimage/geometric.h"
+
 #include "weights_util.h"
 
 #include <stdexcept>
@@ -251,8 +253,27 @@ EdgeMap SoftEdgeDetector::run(const PreprocessedImage& pp) const {
 
 EdgeMap SoftEdgeDetector::detect(const uint8_t* rgb, int w, int h,
                                  int channels) const {
-    PreprocessedImage pp = preprocess(rgb, w, h, channels, cfg_.detect_resolution);
-    return run(pp);
+    std::vector<tiling::TileRect> tiles = tiling::plan_tiles(w, h, cfg_.tile);
+    if (tiles.empty()) {
+        PreprocessedImage pp = preprocess(rgb, w, h, channels, cfg_.detect_resolution);
+        return run(pp);
+    }
+
+    // Tiled path: crop each tile, run it at native resolution, feather-blend the
+    // per-tile edge maps into one full-size map. Each tile pass is bounded by the
+    // tile size, so a huge image never allocates a full-frame activation.
+    EdgeMap out;
+    out.width  = w;
+    out.height = h;
+    out.edge = tiling::blend_1ch(w, h, tiles, [&](const tiling::TileRect& t) {
+        std::vector<uint8_t> crop(static_cast<std::size_t>(t.w) * t.h * channels);
+        broimage::crop_hwc_u8(rgb, w, h, channels, crop.data(),
+                              t.x, t.y, t.w, t.h);
+        PreprocessedImage pp = preprocess(crop.data(), t.w, t.h, channels,
+                                          /*detect_resolution=*/0);
+        return run(pp).edge;
+    });
+    return out;
 }
 
 }  // namespace brovisionml::hed
