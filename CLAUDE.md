@@ -17,9 +17,15 @@ and no text in the graph, which is exactly why they do **not** belong in
 tower) are components of text/multimodal models; the models here take pixels in
 and emit masks / maps / boxes.
 
-CPU-by-default (FP32 scalar backend); a GPU backend (FP16) is enabled by
-forwarding `BROTENSOR_WITH_CUDA=ON` or `BROTENSOR_WITH_METAL=ON` to brotensor.
-brovisionml itself ships **no GPU kernels** — it composes brotensor ops.
+CPU-by-default (FP32 scalar backend); a GPU backend is enabled by forwarding
+`BROTENSOR_WITH_CUDA=ON` or `BROTENSOR_WITH_METAL=ON` to brotensor. Almost
+everything composes brotensor ops, so brovisionml ships **almost no GPU kernels**.
+The lone exception is DSINE's surface-normal *domain* math — RayReLU and the fused
+AngMF propagate — which has no brotensor primitive; `src/dsine_ops.cu` provides a
+CUDA path, compiled into the library and dispatched behind `BROVISIONML_WITH_CUDA`
+only when `BROTENSOR_WITH_CUDA=ON` (whole-program compilation, no separable device
+code). If a *general* op is missing, still add it to brotensor — only true
+domain-specific kernels belong here.
 
 ## Sibling dependencies
 
@@ -61,13 +67,22 @@ unconditional; tests gated on real HF checkpoints look for files under
 ## Source layout
 
 ```
-include/brovisionml/
-  version.h
-src/                       — one .cpp per public header
+include/brovisionml/       — public headers: one orchestrator per model
+                             (sam.h, sam_amg.h, depth_anything.h, dsine.h,
+                             hed.h, lineart.h, mlsd.h, openpose.h, segformer.h),
+                             their stage/preprocess headers, the shared dinov2.h
+                             / dpt_head.h substrate, tile_runner.h (overlapping-
+                             tile driver for the local annotators), version.h
+src/                       — one .cpp per public header; src/dsine_ops.cu holds
+                             brovisionml's only GPU kernels (DSINE RayReLU +
+                             AngMF propagate), compiled in under BROTENSOR_WITH_CUDA
 tests/                     — one test file per header; test_smoke.cpp proves
-                             the brotensor + broimage links
-tools/                     — ad-hoc CLI driver binaries (e.g. a SAM segment
-                             tool), built standalone only, not run by ctest
+                             the brotensor + broimage links. Real-checkpoint /
+                             golden-parity tests skip cleanly when weights/ is empty
+tools/                     — CLI driver binaries (sam_segment, sam_amg,
+                             depth_estimate, normal_estimate, hed_edges, lineart,
+                             mlsd_lines, openpose_pose, segformer_seg), built
+                             standalone only, not run by ctest
 ```
 
 When adding a new model family: header in `include/brovisionml/`, impl in
@@ -78,8 +93,12 @@ When adding a new model family: header in `include/brovisionml/`, impl in
 
 - **C++20, pure C++.** No Python anywhere in this stack — not for scripts, not
   for validation, not for weight conversion. Shell or C++ only.
-- **No CUDA/Metal in this repo.** GPU paths must go through brotensor ops; if a
-  kernel is missing, add it to brotensor.
+- **GPU paths go through brotensor ops** for everything except DSINE's
+  surface-normal domain ops (RayReLU + AngMF propagate), which ship as
+  brovisionml's own CUDA kernels in `src/dsine_ops.cu` (gated on
+  `BROTENSOR_WITH_CUDA`, dispatched behind `BROVISIONML_WITH_CUDA`). If a general
+  op is missing, add it to brotensor — don't grow the local kernel set beyond the
+  genuine domain math.
 - **Load HF safetensors directly** through `brotensor::safetensors` — no
   offline conversion step. Models read sharded safetensors + `config.json`
   from a directory.

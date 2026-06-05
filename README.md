@@ -62,8 +62,11 @@ DPT-style tasks here (Depth-Anything, DSINE).
 
 ## Dependencies
 
-brovisionml is a standalone sibling repo. It links three siblings and ships no
-GPU kernels of its own — GPU work happens inside `brotensor`.
+brovisionml is a standalone sibling repo. It links three siblings; almost all
+GPU work happens inside `brotensor`. The one exception is DSINE's surface-normal
+*domain* math (RayReLU + the fused AngMF propagate), which has no brotensor
+primitive — brovisionml ships its own CUDA kernels for those, gated on
+`BROTENSOR_WITH_CUDA` (see below).
 
 | Library | Role |
 |---|---|
@@ -291,7 +294,10 @@ normal_estimate /path/to/dsine photo.jpg --out normal.png
 
 The output convention is **camera-space unit normals**; visualize each component
 mapped from [-1,1] to [0,1] as `(n+1)/2` (the usual blue-ish normal map). It runs
-host-side FP32 (CPU only — there is no CUDA path here).
+FP32 on either backend — `est.to(Device::CUDA)` after `load()` moves the whole
+pipeline (the brotensor-composed encoder/decoder plus brovisionml's own RayReLU
+and AngMF-propagate CUDA kernels) onto the GPU. The `normal_estimate` CLI runs
+CPU only; use the C++ API for the CUDA path.
 
 ### Weights
 
@@ -343,6 +349,16 @@ det.load("/path/to/hed");                           // dir holding model.safeten
 auto em = det.detect(rgb, w, h, /*channels=*/3);
 // em.edge is row-major h*w FP32 in [0,1] (higher = stronger edge). em.at(x,y).
 ```
+
+HED is fully convolutional, so an edge at a pixel depends only on a local
+neighbourhood — `HedConfig::tile` (a `brovisionml::tiling::TileConfig`) splits a
+large source into overlapping tiles, runs each at its native size, and feathers
+the per-tile maps back into one full-resolution edge map. This bounds the working
+resolution (and GPU memory) of every pass without the detail loss of a whole-image
+downscale. `tile.tile == 0` (the default) disables tiling and runs whole-image;
+the blend mechanics live in `broimage::tiling`, the planning/driver in
+`brovisionml/tile_runner.h`. (Global / relative-scale maps — depth, semantic
+segmentation — must *not* be tiled; they need whole-image context.)
 
 The `hed_edges` CLI tool is the same flow from the shell — it writes a grayscale
 edge PNG (`edge*255`):
@@ -407,6 +423,11 @@ det.load("/path/to/lineart");                        // dir holding model.safete
 auto lm = det.detect(rgb, w, h, /*channels=*/3);
 // lm.line is row-major h*w FP32 in [0,1] (brighter = stronger line). lm.at(x,y).
 ```
+
+Like HED, lineart is fully convolutional, so it supports the same overlapping-tile
+path — `LineartConfig::tile` (a `brovisionml::tiling::TileConfig`) bounds the
+per-pass working resolution on large images; inversion is pointwise so it commutes
+with the blend.
 
 The raw generator output is a bright field with dark lines; `LineartConfig::invert`
 (on by default) flips it to bright lines on a dark field — the convention
