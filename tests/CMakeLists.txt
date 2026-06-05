@@ -23,6 +23,7 @@ brovisionml_add_test(brovisionml_test_mlsd             test_mlsd.cpp)
 brovisionml_add_test(brovisionml_test_openpose         test_openpose.cpp)
 brovisionml_add_test(brovisionml_test_segformer        test_segformer.cpp)
 brovisionml_add_test(brovisionml_test_dinov2           test_dinov2.cpp)
+brovisionml_add_test(brovisionml_test_dinov3           test_dinov3.cpp)
 brovisionml_add_test(brovisionml_test_dpt_head         test_dpt_head.cpp)
 brovisionml_add_test(brovisionml_test_depth_anything   test_depth_anything.cpp)
 brovisionml_add_test(brovisionml_test_sam_preprocess   test_sam_preprocess.cpp)
@@ -58,6 +59,14 @@ target_compile_definitions(brovisionml_test_depth_anything PRIVATE
 # weights/Depth-Anything-V2-Small/golden; skips cleanly when either is absent.
 brovisionml_add_test(brovisionml_test_depth_parity       test_depth_parity.cpp)
 target_compile_definitions(brovisionml_test_depth_parity PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+
+# DINOv3 ViT-H backbone test: structural CPU checks always run; the HF
+# numeric-parity part is gated on the real checkpoint
+# (weights/triposplat/clip_vision/dino_v3_vit_h.safetensors) and the
+# golden_dinov3.bin under weights/triposplat/clip_vision/golden (generated
+# out-of-repo, never committed) and skips cleanly when either is absent.
+target_compile_definitions(brovisionml_test_dinov3 PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
 
 # DSINE preprocessing test: structural CPU checks always run; the numeric-parity
