@@ -1,6 +1,7 @@
 #include "brovisionml/dinov3.h"
 
 #include "brotensor/ops.h"
+#include "brotensor/runtime.h"
 #include "brotensor/safetensors.h"
 
 #include "weights_util.h"
@@ -201,19 +202,43 @@ void Backbone::load_file(const std::string& path) {
 void Backbone::to(brotensor::Device dev) {
     if (!w_->loaded) fail("to() called before load()");
     if (dev == device_) return;
-    auto mv = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
-    mv(w_->patch_w); mv(w_->patch_b);
-    mv(w_->cls_token); mv(w_->register_tokens);
-    mv(w_->final_ln_w); mv(w_->final_ln_b);
+    // Mixed precision on a GPU backend: the projection weights run FP16
+    // tensor-core GEMMs (the speed win), but the residual stream and every
+    // LayerNorm stay FP32. DINOv3 ViT-H has "massive activations" whose magnitude
+    // runs into the thousands — well past FP16's 65504 ceiling — so an FP16
+    // residual would store them as inf and flood the output with NaNs. The
+    // LayerNorm params and token embeddings therefore live on the FP32 side (they
+    // touch the FP32 residual directly); only the matmul weights go to half.
+    // CPU stays all-FP32 (its exact parity path). cast is registered both
+    // directions on CPU and CUDA, so to(CPU) after a GPU stint widens back.
+    const bool fp16 = dev != brotensor::Device::CPU &&
+                      brotensor::compute_dtype() == brotensor::Dtype::FP16;
+    auto to_dt = [&](Tensor& t, brotensor::Dtype want) {
+        if (!t.data) return;
+        t = t.to(dev);
+        if (t.dtype != want) { Tensor c; brotensor::cast(t, c, want); t = std::move(c); }
+    };
+    const brotensor::Dtype proj = fp16 ? brotensor::Dtype::FP16 : brotensor::Dtype::FP32;
+    auto mv32 = [&](Tensor& t) { to_dt(t, brotensor::Dtype::FP32); };  // FP32 residual side
+    auto mv16 = [&](Tensor& t) { to_dt(t, proj); };                   // FP16 GEMM weights
+    // The four projections that read from the LayerNorm'd (bounded) stream stay
+    // FP16 — q/k/v/gate/up — as does the patch embed. The two that WRITE the
+    // residual — o_proj and down_proj — carry the LayerScale-amplified massive
+    // activations (down_proj's output hits ~1e5 by layer 22, well over FP16's
+    // 65504 ceiling, and would store as inf), so they run FP32.
+    mv16(w_->patch_w); mv16(w_->patch_b);
+    mv32(w_->cls_token); mv32(w_->register_tokens);
+    mv32(w_->final_ln_w); mv32(w_->final_ln_b);
     for (BlockWeights& b : w_->blocks) {
-        mv(b.n1_w); mv(b.n1_b);
-        mv(b.q_w); mv(b.q_b); mv(b.k_w); mv(b.k_b); mv(b.v_w); mv(b.v_b);
-        mv(b.o_w); mv(b.o_b);
-        mv(b.n2_w); mv(b.n2_b);
-        mv(b.gate_w); mv(b.gate_b); mv(b.up_w); mv(b.up_b);
-        mv(b.down_w); mv(b.down_b);
+        mv32(b.n1_w); mv32(b.n1_b);
+        mv16(b.q_w); mv16(b.q_b); mv16(b.k_w); mv16(b.k_b); mv16(b.v_w); mv16(b.v_b);
+        mv32(b.o_w); mv32(b.o_b);
+        mv32(b.n2_w); mv32(b.n2_b);
+        mv16(b.gate_w); mv16(b.gate_b); mv16(b.up_w); mv16(b.up_b);
+        mv32(b.down_w); mv32(b.down_b);
     }
     device_ = dev;
+    fp16_ = fp16;
 }
 
 // ─── RoPE tables ──────────────────────────────────────────────────────────────
@@ -260,6 +285,27 @@ void build_rope_tables(int K, int num_prefix, int gh, int gw, int head_dim,
     }
 }
 
+// Dtype-aware projection GEMM: FP16 weights/activations on the GPU path, FP32 on
+// CPU. The other dispatched ops the forward uses (conv2d, nchw_to_sequence,
+// concat, rope_apply, flash-attn, swiglu) pick their kernel from the tensor
+// dtype, so they need no fork; LayerNorm always runs FP32 (the residual is FP32).
+void linear_b(bool fp16, const Tensor& W, const Tensor& bias,
+              const Tensor& X, Tensor& Y) {
+    if (fp16) brotensor::linear_forward_batched_fp16(W, &bias, X, Y);
+    else      brotensor::linear_forward_batched(W, bias, X, Y);
+}
+
+// Half-precision copy of a (range-bounded) FP32 activation, for feeding an FP16
+// GEMM; widen back the same way after. No-op pass-through when fp16 is off.
+Tensor to16(bool fp16, const Tensor& t) {
+    if (!fp16) return t;
+    Tensor c; brotensor::cast(t, c, brotensor::Dtype::FP16); return c;
+}
+Tensor to32(bool fp16, const Tensor& t) {
+    if (!fp16) return t;
+    Tensor c; brotensor::cast(t, c, brotensor::Dtype::FP32); return c;
+}
+
 }  // namespace
 
 // ─── Forward ──────────────────────────────────────────────────────────────────
@@ -286,14 +332,22 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
     const int K   = pre + np;
     const float eps = cfg_.layer_norm_eps;
 
-    // 1. Patch embed -> token-major (np, D).
+    // 0. The patch-embed conv runs in the projection dtype (FP16 on GPU); its
+    //    input image is range-bounded, so half precision is safe here. Everything
+    //    downstream of the embedding — the residual stream — is FP32.
+    Tensor px16;
+    if (fp16_) brotensor::cast(pixels, px16, brotensor::Dtype::FP16);
+    const Tensor& px = fp16_ ? px16 : pixels;
+
+    // 1. Patch embed -> token-major (np, D), then widen to the FP32 residual.
     Tensor feat;
-    brotensor::conv2d_forward(pixels, w_->patch_w, &w_->patch_b,
+    brotensor::conv2d_forward(px, w_->patch_w, &w_->patch_b,
                               /*N=*/1, cfg_.in_chans, H, W,
                               /*C_out=*/D, p, p, /*stride=*/p, p,
                               /*pad=*/0, 0, /*dil=*/1, 1, feat);
-    Tensor patch_tokens;
-    brotensor::nchw_to_sequence(feat, 1, D, gh, gw, patch_tokens);
+    Tensor patch_seq;
+    brotensor::nchw_to_sequence(feat, 1, D, gh, gw, patch_seq);
+    Tensor patch_tokens = to32(fp16_, patch_seq);  // FP32 token embeddings
 
     // 2. Assemble [cls, register..., patches] -> (K, D). concat_rows yields a flat
     //    (K*D,1) buffer whose row-major bytes already are the (K, D) matrix.
@@ -302,7 +356,7 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
     parts.push_back(&patch_tokens);
     Tensor x_owned;
     brotensor::concat_rows(parts, x_owned);
-    Tensor x = Tensor::view(device_, x_owned.data, K, D);
+    Tensor x = Tensor::view(device_, x_owned.data, K, D, x_owned.dtype);
 
     // 3. RoPE cos/sin tables for the patch tokens, on the compute device.
     Tensor cos_tbl, sin_tbl;
@@ -326,12 +380,16 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
         const BlockWeights& b = w_->blocks[i];
 
         // Attention: x = x + LS1·o_proj(attn(rope(q),rope(k),v)).  LS1 in o_w/o_b.
+        // LN(x) is FP32 and range-bounded; drop to FP16 only to feed q/k/v. The
+        // attention output is a convex mix of (bounded) V, but o_proj carries LS1
+        // so its result re-enters the residual at full FP32 width.
         Tensor h1;
         brotensor::layernorm_forward_inference_batched(x, b.n1_w, b.n1_b, h1, eps);
+        Tensor h1c = to16(fp16_, h1);
         Tensor q, k, v;
-        brotensor::linear_forward_batched(b.q_w, b.q_b, h1, q);
-        brotensor::linear_forward_batched(b.k_w, b.k_b, h1, k);
-        brotensor::linear_forward_batched(b.v_w, b.v_b, h1, v);
+        linear_b(fp16_, b.q_w, b.q_b, h1c, q);
+        linear_b(fp16_, b.k_w, b.k_b, h1c, k);
+        linear_b(fp16_, b.v_w, b.v_b, h1c, v);
         Tensor qr, kr;
         brotensor::rope_apply(q, cos_tbl, sin_tbl, hd, nh, qr);
         brotensor::rope_apply(k, cos_tbl, sin_tbl, hd, nh, kr);
@@ -341,26 +399,32 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
                                                   /*max_seqlen_q=*/K,
                                                   /*max_seqlen_k=*/K,
                                                   nh, hd, /*causal=*/false, attn);
+        Tensor attn32 = to32(fp16_, attn);
         Tensor o;
-        brotensor::linear_forward_batched(b.o_w, b.o_b, attn, o);
-        brotensor::add_inplace(x, o);
+        linear_b(/*fp16=*/false, b.o_w, b.o_b, attn32, o);    // FP32 o_proj
+        brotensor::add_inplace(x, o);                         // FP32 residual
 
         // MLP: x = x + LS2·down(silu(gate(LN2(x))) * up(LN2(x))).  LS2 in down.
+        // gate/up read bounded LN(x) → FP16; down_proj writes the residual and
+        // carries LS2 + the massive activations (~1e5), so it runs FP32.
         Tensor h2;
         brotensor::layernorm_forward_inference_batched(x, b.n2_w, b.n2_b, h2, eps);
+        Tensor h2c = to16(fp16_, h2);
         Tensor gate, up;
-        brotensor::linear_forward_batched(b.gate_w, b.gate_b, h2, gate);
-        brotensor::linear_forward_batched(b.up_w, b.up_b, h2, up);
+        linear_b(fp16_, b.gate_w, b.gate_b, h2c, gate);
+        linear_b(fp16_, b.up_w, b.up_b, h2c, up);
         Tensor swin;
         brotensor::concat_batched_rows({&gate, &up}, swin);  // per row [gate|up]
         Tensor act;
         brotensor::swiglu_forward(swin, act);
+        Tensor act32 = to32(fp16_, act);
         Tensor down;
-        brotensor::linear_forward_batched(b.down_w, b.down_b, act, down);
-        brotensor::add_inplace(x, down);
+        linear_b(/*fp16=*/false, b.down_w, b.down_b, act32, down);  // FP32 down_proj
+        brotensor::add_inplace(x, down);                      // FP32 residual
     }
 
-    // 5. Final LayerNorm (HF apply_layernorm=True).
+    // 5. Final LayerNorm (HF apply_layernorm=True). Output is FP32: the residual
+    //    and the final norm are FP32, and the normalized result is range-safe.
     BackboneOutput out;
     brotensor::layernorm_forward_inference_batched(
         x, w_->final_ln_w, w_->final_ln_b, out.last_hidden_state, eps);

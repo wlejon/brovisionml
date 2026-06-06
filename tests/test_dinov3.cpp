@@ -18,6 +18,7 @@
 
 #include "brovisionml/dinov3.h"
 
+#include "brotensor/ops.h"
 #include "brotensor/safetensors.h"
 #include "brotensor/tensor.h"
 #include "brotensor/runtime.h"
@@ -207,20 +208,31 @@ int main() {
     brotensor::init();
 
     // ── CUDA parity on the tiny model ──
+    // The CUDA backend computes in FP16 (to(CUDA) migrates the weights to half),
+    // so this is an FP32-CPU vs FP16-GPU comparison, not a bit-for-bit one: the
+    // tolerance bounds half-precision round-off, not a transcription bug (which
+    // moves the diff by orders of magnitude). A wider tolerance also re-widens the
+    // weights to FP32 on the way back via to(CPU).
     if (brotensor::is_available(brotensor::Device::CUDA)) {
         bb.to(brotensor::Device::CUDA);
         check(bb.device() == brotensor::Device::CUDA, "to(CUDA) moved weights");
         brotensor::Tensor px_gpu = px.to(brotensor::Device::CUDA);
         BackboneOutput o_gpu = bb.encode(px_gpu, 32, 32);
-        brotensor::Tensor back = o_gpu.last_hidden_state.to(brotensor::Device::CPU);
+        // The GPU output is FP16; widen to FP32 on the host before host_f32().
+        brotensor::Tensor back_h = o_gpu.last_hidden_state.to(brotensor::Device::CPU);
+        brotensor::Tensor back;
+        if (back_h.dtype == brotensor::Dtype::FP16)
+            brotensor::cast(back_h, back, brotensor::Dtype::FP32);
+        else
+            back = back_h;
         Diff dg = diff(o_cpu.last_hidden_state.host_f32(), back.host_f32(),
                        static_cast<std::size_t>(o_cpu.last_hidden_state.rows) *
                            o_cpu.last_hidden_state.cols);
-        if (dg.max_abs > 1e-2) {
-            std::fprintf(stderr, "FAIL: CPU/CUDA dinov3 diff %g > 1e-2\n", dg.max_abs);
+        if (dg.max_abs > 5e-2) {
+            std::fprintf(stderr, "FAIL: CPU/CUDA dinov3 FP16 diff %g > 5e-2\n", dg.max_abs);
             ++failures;
         } else {
-            std::printf("  CUDA parity OK (worst diff %g)\n", dg.max_abs);
+            std::printf("  CUDA FP16 parity OK (worst diff %g)\n", dg.max_abs);
         }
         bb.to(brotensor::Device::CPU);
     } else {
@@ -258,6 +270,32 @@ int main() {
             // transcription bug moves this by orders of magnitude, not factors.
             std::printf("  last_hidden_state: max=%.3e mean=%.3e\n", dh.max_abs, dh.mean_abs);
             check(dh.max_abs < 2e-2, "DINOv3 HF parity (last_hidden_state)");
+
+            // Production path: the real ViT-H on CUDA runs mixed precision (FP16
+            // GEMMs, FP32 residual). Validate it against the same HF golden — the
+            // FP16 matmuls drift past the pure-FP32 tolerance but stay small
+            // relative to the values, and crucially the output is finite (an FP16
+            // residual would overflow DINOv3's massive activations into NaNs).
+            if (brotensor::is_available(brotensor::Device::CUDA)) {
+                real.to(brotensor::Device::CUDA);
+                brotensor::Tensor px_gpu = px_real.to(brotensor::Device::CUDA);
+                BackboneOutput rg = real.encode(px_gpu, g.H, g.W);
+                brotensor::Tensor h32 = rg.last_hidden_state.to(brotensor::Device::CPU);
+                Diff dgpu = diff(h32.host_f32(), g.hidden.data(),
+                                 std::min<std::size_t>(g.hidden.size(),
+                                     static_cast<std::size_t>(h32.rows) * h32.cols));
+                std::printf("  CUDA mixed-precision vs HF golden: max=%.3e mean=%.3e\n",
+                            dgpu.max_abs, dgpu.mean_abs);
+                // Finite first: an FP16 residual would NaN here (massive
+                // activations > 65504). Then bound the drift — the mean is the
+                // meaningful figure (~1e-3); the max is a lone outlier in the
+                // massive-activation channel, kept well under the flow model's
+                // own FP16 max tolerance (0.35).
+                check(std::isfinite(dgpu.max_abs) && std::isfinite(dgpu.mean_abs),
+                      "DINOv3 CUDA output is finite");
+                check(dgpu.mean_abs < 1e-2, "DINOv3 CUDA mixed-precision mean drift");
+                check(dgpu.max_abs < 3.5e-1, "DINOv3 CUDA mixed-precision max drift");
+            }
         }
     }
 

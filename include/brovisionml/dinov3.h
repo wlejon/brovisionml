@@ -56,7 +56,9 @@ struct BackboneOutput {
     // (num_prefix_tokens + patch_h*patch_w, embed_dim) on the backbone's device.
     // Rows [0, num_prefix_tokens) are CLS + register tokens; the rest are patch
     // tokens in row-major (h-major) order. The backbone's final LayerNorm has
-    // been applied (HF apply_layernorm=True).
+    // been applied (HF apply_layernorm=True). Always FP32 — even on the GPU
+    // mixed-precision path the residual stream and final norm are FP32, and the
+    // normalized output is range-safe.
     brotensor::Tensor last_hidden_state;
     int patch_h = 0;             // H / patch_size
     int patch_w = 0;             // W / patch_size
@@ -76,6 +78,10 @@ public:
     void load_file(const std::string& path);
 
     // Migrate weights to a compute device (CPU/CUDA/Metal). No-op if already there.
+    // On a GPU backend (brotensor::compute_dtype() == FP16) encode() runs mixed
+    // precision: the projection weights migrate to FP16 for tensor-core GEMMs while
+    // the residual stream and LayerNorm stay FP32 (DINOv3's massive activations
+    // overflow FP16). CPU keeps the all-FP32 path and its exact parity.
     void to(brotensor::Device dev);
     brotensor::Device device() const { return device_; }
 
@@ -88,6 +94,7 @@ public:
 private:
     Config cfg_;
     brotensor::Device device_ = brotensor::Device::CPU;
+    bool fp16_ = false;  // weights migrated to FP16 (set by to() on a GPU backend)
     struct Weights;
     std::unique_ptr<Weights> w_;
 };
