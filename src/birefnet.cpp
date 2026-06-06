@@ -64,6 +64,43 @@ struct Swin {
     std::vector<Layer> layers;
 };
 
+// ── ASPP-deformable decoder weight containers ───────────────────────────────
+
+struct BN { Tensor w, b, m, v; };         // batch-norm (gamma/beta/mean/var)
+struct DeformConv {                       // _DeformableConv2d (modulated DCNv2)
+    Tensor off_w, off_b, mod_w, mod_b, reg_w;   // reg_w has no bias
+    int k = 0, pad = 0;
+};
+struct ASPPMod { DeformConv dc; BN bn; }; // _ASPPModuleDeformable (+ relu)
+struct ASPP {                             // _ASPPDeformable (in=out=64, inter=256)
+    ASPPMod aspp1;                        // k=1
+    std::vector<ASPPMod> deforms;         // k=1,3,7
+    Tensor gap_conv_w;                    // global pool: conv 64->256 (no bias)
+    BN gap_bn;
+    Tensor conv1_w;                       // 1280->64 (no bias)
+    BN bn1;
+};
+struct DecBlk {                           // _BasicDecBlk
+    Tensor cin_w, cin_b; BN bin;          // conv_in (->64) + bn_in + relu
+    ASPP att;
+    Tensor cout_w, cout_b; BN bout;       // conv_out (64->out) + bn_out
+    int in_ch = 0, out_ch = 0;
+};
+struct SimpleConvs { Tensor c1_w, c1_b, co_w, co_b; };  // ipt blocks
+struct GdtBranch {                        // gdt_convs_N (conv->16 + bn + relu) + attn 16->1
+    Tensor c_w, c_b; BN bn; Tensor attn_w, attn_b;
+};
+struct LatBlk { Tensor w, b; };           // lateral 1x1 conv
+
+struct Decoder {
+    DecBlk squeeze;                       // squeeze_module.0  (5760->3072)
+    SimpleConvs ipt[5];                   // [0]=ipt_blk5 .. [4]=ipt_blk1
+    DecBlk block[4];                      // [0]=decoder_block4 .. [3]=decoder_block1
+    LatBlk lat[3];                        // [0]=lateral_block4,3,2
+    GdtBranch gdt[3];                     // [0]=gdt_4,3,2
+    Tensor convout1_w, convout1_b;        // 240->1
+};
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 // Reinterpret a contiguous (R, C) tensor as (R/g, C*g) (or any equal-size
@@ -101,12 +138,20 @@ std::vector<int64_t> read_i64(const st::TensorView& v) {
 
 struct BiRefNet::Impl {
     Swin bb;
+    Decoder dec;
     Device dev = Device::CPU;
     bool loaded = false;
 
     // ── loading ──
     void load(const std::string& path);
     void to(Device d);
+
+    // ── decoder / top-level ──
+    // Dual-resolution backbone + mul_scl concat (returns x1,x2,x3 and the
+    // squeeze input x4).
+    void forwardEnc(const Tensor& img, int H, int W,
+                    Tensor& x1, Tensor& x2, Tensor& x3, Tensor& x4sq) const;
+    Tensor forwardLogits(const Tensor& img, int H, int W) const;
 
     // ── Swin backbone ──
     // Run the raw Swin-L backbone on an NCHW FP32 input; returns the 4 stage
@@ -202,6 +247,89 @@ void BiRefNet::Impl::load(const std::string& path) {
         ly.norm_w = V1("bb.norm" + std::to_string(s) + ".weight", C);
         ly.norm_b = V1("bb.norm" + std::to_string(s) + ".bias", C);
     }
+
+    // ── decoder ──
+    auto conv_w = [&](const std::string& n, int oc, int ic, int k) {
+        return W2(n, oc, ic * k * k);
+    };
+    auto load_bn = [&](const std::string& p, int C) {
+        BN bn; bn.w = V1(p + ".weight", C); bn.b = V1(p + ".bias", C);
+        bn.m = V1(p + ".running_mean", C); bn.v = V1(p + ".running_var", C);
+        return bn;
+    };
+    auto load_deform = [&](const std::string& p, int ic, int oc, int k) {
+        DeformConv dc; dc.k = k; dc.pad = k / 2;
+        dc.off_w = conv_w(p + ".offset_conv.weight", 2 * k * k, ic, k);
+        dc.off_b = V1(p + ".offset_conv.bias", 2 * k * k);
+        dc.mod_w = conv_w(p + ".modulator_conv.weight", k * k, ic, k);
+        dc.mod_b = V1(p + ".modulator_conv.bias", k * k);
+        dc.reg_w = conv_w(p + ".regular_conv.weight", oc, ic, k);
+        return dc;
+    };
+    auto load_asppmod = [&](const std::string& p, int ic, int k) {
+        ASPPMod m; m.dc = load_deform(p + ".atrous_conv", ic, 256, k);
+        m.bn = load_bn(p + ".bn", 256); return m;
+    };
+    auto load_aspp = [&](const std::string& p) {   // in=out=64, inter=256
+        ASPP a;
+        a.aspp1 = load_asppmod(p + ".aspp1", 64, 1);
+        const int ks[3] = {1, 3, 7};
+        for (int i = 0; i < 3; ++i)
+            a.deforms.push_back(load_asppmod(p + ".aspp_deforms." + std::to_string(i), 64, ks[i]));
+        a.gap_conv_w = conv_w(p + ".global_avg_pool.1.weight", 256, 64, 1);
+        a.gap_bn = load_bn(p + ".global_avg_pool.2", 256);
+        a.conv1_w = conv_w(p + ".conv1.weight", 64, 256 * 5, 1);
+        a.bn1 = load_bn(p + ".bn1", 64);
+        return a;
+    };
+    auto load_decblk = [&](const std::string& p, int ic, int oc) {
+        DecBlk d; d.in_ch = ic; d.out_ch = oc;
+        d.cin_w = conv_w(p + ".conv_in.weight", 64, ic, 3);
+        d.cin_b = V1(p + ".conv_in.bias", 64);
+        d.bin = load_bn(p + ".bn_in", 64);
+        d.att = load_aspp(p + ".dec_att");
+        d.cout_w = conv_w(p + ".conv_out.weight", oc, 64, 3);
+        d.cout_b = V1(p + ".conv_out.bias", oc);
+        d.bout = load_bn(p + ".bn_out", oc);
+        return d;
+    };
+    auto load_simple = [&](const std::string& p, int ic, int oc) {
+        SimpleConvs s;
+        s.c1_w = conv_w(p + ".conv1.weight", 64, ic, 3); s.c1_b = V1(p + ".conv1.bias", 64);
+        s.co_w = conv_w(p + ".conv_out.weight", oc, 64, 3); s.co_b = V1(p + ".conv_out.bias", oc);
+        return s;
+    };
+    auto load_gdt = [&](const std::string& p, int ic) {
+        GdtBranch g;
+        g.c_w = conv_w(p + ".0.weight", 16, ic, 3); g.c_b = V1(p + ".0.bias", 16);
+        g.bn = load_bn(p + ".1", 16);
+        return g;
+    };
+
+    dec.squeeze = load_decblk("squeeze_module.0", 5760, 3072);
+    const int IPT_IN[5]  = {3072, 768, 192, 48, 3};   // ipt_blk5..1
+    const int IPT_OUT[5] = {384, 384, 192, 96, 48};
+    for (int i = 0; i < 5; ++i)
+        dec.ipt[i] = load_simple("decoder.ipt_blk" + std::to_string(5 - i), IPT_IN[i], IPT_OUT[i]);
+    const int BIN[4]  = {3456, 1920, 960, 480};       // decoder_block4..1 in
+    const int BOUT[4] = {1536, 768, 384, 192};        // out
+    for (int i = 0; i < 4; ++i)
+        dec.block[i] = load_decblk("decoder.decoder_block" + std::to_string(4 - i), BIN[i], BOUT[i]);
+    const int LAT[3] = {1536, 768, 384};              // lateral_block4,3,2
+    for (int i = 0; i < 3; ++i) {
+        const std::string lp = "decoder.lateral_block" + std::to_string(4 - i) + ".conv";
+        dec.lat[i].w = conv_w(lp + ".weight", LAT[i], LAT[i], 1);
+        dec.lat[i].b = V1(lp + ".bias", LAT[i]);
+    }
+    const int GDT[3] = {1536, 768, 384};              // gdt_4,3,2 in
+    for (int i = 0; i < 3; ++i) {
+        dec.gdt[i] = load_gdt("decoder.gdt_convs_" + std::to_string(4 - i), GDT[i]);
+        dec.gdt[i].attn_w = conv_w("decoder.gdt_convs_attn_" + std::to_string(4 - i) + ".0.weight", 1, 16, 1);
+        dec.gdt[i].attn_b = V1("decoder.gdt_convs_attn_" + std::to_string(4 - i) + ".0.bias", 1);
+    }
+    dec.convout1_w = conv_w("decoder.conv_out1.0.weight", 1, 240, 1);
+    dec.convout1_b = V1("decoder.conv_out1.0.bias", 1);
+
     loaded = true;
 }
 
@@ -219,6 +347,27 @@ void BiRefNet::Impl::to(Device d) {
         mv(ly.dn_norm_w); mv(ly.dn_norm_b); mv(ly.dn_red);
         mv(ly.norm_w); mv(ly.norm_b);
     }
+
+    auto mvbn = [&](BN& b) { mv(b.w); mv(b.b); mv(b.m); mv(b.v); };
+    auto mvdc = [&](DeformConv& dc) {
+        mv(dc.off_w); mv(dc.off_b); mv(dc.mod_w); mv(dc.mod_b); mv(dc.reg_w);
+    };
+    auto mvaspp = [&](ASPP& a) {
+        mvdc(a.aspp1.dc); mvbn(a.aspp1.bn);
+        for (auto& m : a.deforms) { mvdc(m.dc); mvbn(m.bn); }
+        mv(a.gap_conv_w); mvbn(a.gap_bn); mv(a.conv1_w); mvbn(a.bn1);
+    };
+    auto mvdecblk = [&](DecBlk& db) {
+        mv(db.cin_w); mv(db.cin_b); mvbn(db.bin);
+        mvaspp(db.att);
+        mv(db.cout_w); mv(db.cout_b); mvbn(db.bout);
+    };
+    mvdecblk(dec.squeeze);
+    for (auto& s : dec.ipt) { mv(s.c1_w); mv(s.c1_b); mv(s.co_w); mv(s.co_b); }
+    for (auto& b : dec.block) mvdecblk(b);
+    for (auto& l : dec.lat) { mv(l.w); mv(l.b); }
+    for (auto& g : dec.gdt) { mv(g.c_w); mv(g.c_b); mvbn(g.bn); mv(g.attn_w); mv(g.attn_b); }
+    mv(dec.convout1_w); mv(dec.convout1_b);
     dev = d;
 }
 
@@ -402,6 +551,159 @@ std::vector<Tensor> BiRefNet::Impl::backbone(const Tensor& xNCHW, int H, int W) 
     return outs;
 }
 
+// ── decoder forward helpers ─────────────────────────────────────────────────
+
+namespace {
+
+Tensor conv2d(const Tensor& x, const Tensor& w, const Tensor* b,
+              int Cin, int Cout, int H, int W, int k, int pad) {
+    Tensor y;
+    bt::conv2d_forward(x, w, b, 1, Cin, H, W, Cout, k, k, 1, 1, pad, pad, 1, 1, y);
+    return y;
+}
+Tensor bnorm(const Tensor& x, const BN& bn, int C, int H, int W) {
+    Tensor y; bt::batch_norm_inference(x, bn.w, bn.b, bn.m, bn.v, 1, C, H, W, 1e-5f, y);
+    return y;
+}
+Tensor relu_(const Tensor& x) { Tensor y; bt::relu_forward(x, y); return y; }
+Tensor interpAC(const Tensor& x, int C, int Hin, int Win, int Hout, int Wout) {
+    if (Hin == Hout && Win == Wout) return x;
+    Tensor y; bt::interp2d_align_corners_forward(x, 1, C, Hin, Win, Hout, Wout, 1, y);
+    return y;
+}
+
+// Modulated deformable conv (offset + 2*sigmoid modulator) -> (256, H, W).
+Tensor deformConv(const Tensor& x, const DeformConv& dc, int Cin, int H, int W) {
+    Tensor off = conv2d(x, dc.off_w, &dc.off_b, Cin, 2 * dc.k * dc.k, H, W, dc.k, dc.pad);
+    Tensor modr = conv2d(x, dc.mod_w, &dc.mod_b, Cin, dc.k * dc.k, H, W, dc.k, dc.pad);
+    Tensor mod; bt::sigmoid_forward(modr, mod); bt::scale_inplace(mod, 2.0f);
+    Tensor y;
+    bt::deform_conv2d_forward(x, off, &mod, dc.reg_w, /*bias=*/nullptr,
+                              1, Cin, H, W, 256, dc.k, dc.k, 1, 1,
+                              dc.pad, dc.pad, 1, 1, /*groups=*/1, /*deform_groups=*/1, y);
+    return y;
+}
+Tensor asppMod(const Tensor& x, const ASPPMod& m, int Cin, int H, int W) {
+    return relu_(bnorm(deformConv(x, m.dc, Cin, H, W), m.bn, 256, H, W));
+}
+// ASPP-deformable: in=out=64.
+Tensor aspp(const Tensor& x, const ASPP& a, int H, int W) {
+    Tensor x1 = asppMod(x, a.aspp1, 64, H, W);
+    Tensor d0 = asppMod(x, a.deforms[0], 64, H, W);
+    Tensor d1 = asppMod(x, a.deforms[1], 64, H, W);
+    Tensor d2 = asppMod(x, a.deforms[2], 64, H, W);
+    Tensor gp; bt::adaptive_avg_pool2d_forward(x, 1, 64, H, W, 1, 1, gp);  // (64,1,1)
+    gp = relu_(bnorm(conv2d(gp, a.gap_conv_w, nullptr, 64, 256, 1, 1, 1, 0), a.gap_bn, 256, 1, 1));
+    gp = interpAC(gp, 256, 1, 1, H, W);
+    Tensor cat;
+    bt::concat_nchw_channels({&x1, &d0, &d1, &d2, &gp}, 1, H, W,
+                             {256, 256, 256, 256, 256}, cat);  // (1280,H,W)
+    return relu_(bnorm(conv2d(cat, a.conv1_w, nullptr, 1280, 64, H, W, 1, 0), a.bn1, 64, H, W));
+}
+// _BasicDecBlk: conv_in+bn+relu -> aspp -> conv_out+bn (no final relu).
+Tensor basicDecBlk(const Tensor& x, const DecBlk& d, int H, int W) {
+    Tensor y = relu_(bnorm(conv2d(x, d.cin_w, &d.cin_b, d.in_ch, 64, H, W, 3, 1), d.bin, 64, H, W));
+    y = aspp(y, d.att, H, W);
+    return bnorm(conv2d(y, d.cout_w, &d.cout_b, 64, d.out_ch, H, W, 3, 1), d.bout, d.out_ch, H, W);
+}
+Tensor simpleConvs(const Tensor& x, const SimpleConvs& s, int in, int out, int H, int W) {
+    Tensor y = conv2d(x, s.c1_w, &s.c1_b, in, 64, H, W, 3, 1);
+    return conv2d(y, s.co_w, &s.co_b, 64, out, H, W, 3, 1);
+}
+
+// einops 'b c (hg h) (wg w) -> b (c hg wg) h w' on the input image.
+Tensor image2patches(const Tensor& img, int Hin, int Win, int refH, int refW, Device dev) {
+    const int hg = Hin / refH, wg = Win / refW;
+    const int h = Hin / hg, w = Win / wg;          // == refH, refW
+    const int Cout = 3 * hg * wg;
+    std::vector<int32_t> idx(static_cast<size_t>(Cout) * h * w);
+    size_t k = 0;
+    for (int c = 0; c < 3; ++c)
+        for (int ph = 0; ph < hg; ++ph)
+            for (int pw = 0; pw < wg; ++pw)
+                for (int y = 0; y < h; ++y)
+                    for (int x = 0; x < w; ++x)
+                        idx[k++] = (c * Hin + (ph * h + y)) * Win + (pw * w + x);
+    Tensor img_col = reshape_view(img, 3 * Hin * Win, 1);
+    Tensor g; bt::gather_rows(img_col, int32_index(idx, dev), g);   // (M,1) owning
+    return g;   // flat NCHW (1, Cout*h*w); downstream ops carry explicit dims
+}
+
+// p = p * sigmoid(attn(relu(bn(conv(p))))), attn broadcast across channels.
+Tensor gdtGate(const Tensor& p, const GdtBranch& g, int C, int H, int W) {
+    Tensor t = relu_(bnorm(conv2d(p, g.c_w, &g.c_b, C, 16, H, W, 3, 1), g.bn, 16, H, W));
+    Tensor a = conv2d(t, g.attn_w, &g.attn_b, 16, 1, H, W, 1, 0);  // (1, H*W)
+    Tensor s; bt::sigmoid_forward(a, s);
+    Tensor pflat = reshape_view(p, C, H * W);                      // (C, H*W) view
+    Tensor gated; bt::broadcast_mul(pflat, s, gated);              // (C,H*W) owning
+    return gated;   // flat NCHW (1, C*H*W); downstream ops carry explicit dims
+}
+
+}  // namespace
+
+void BiRefNet::Impl::forwardEnc(const Tensor& img, int H, int W,
+                                Tensor& x1, Tensor& x2, Tensor& x3, Tensor& x4sq) const {
+    std::vector<Tensor> f = backbone(img, H, W);                       // 192,384,768,1536
+    Tensor imgHalf = interpAC(img, 3, H, W, H / 2, W / 2);
+    std::vector<Tensor> fh = backbone(imgHalf, H / 2, W / 2);
+    const int CH[4] = {192, 384, 768, 1536};
+    Tensor xs[4];
+    for (int i = 0; i < 4; ++i) {
+        const int fH = (H / 4) >> i, fW = (W / 4) >> i;     // full-res stage grid
+        const int hH = (H / 8) >> i, hW = (W / 8) >> i;     // half-res stage grid
+        Tensor up = interpAC(fh[i], CH[i], hH, hW, fH, fW);
+        bt::concat_nchw_channels({&f[i], &up}, 1, fH, fW, {CH[i], CH[i]}, xs[i]);
+    }
+    x1 = xs[0]; x2 = xs[1]; x3 = xs[2];                     // 384,768,1536
+    const int x4H = H / 32, x4W = W / 32;
+    Tensor u1 = interpAC(x1, 384,  H / 4,  W / 4,  x4H, x4W);
+    Tensor u2 = interpAC(x2, 768,  H / 8,  W / 8,  x4H, x4W);
+    Tensor u3 = interpAC(x3, 1536, H / 16, W / 16, x4H, x4W);
+    Tensor x4cat;
+    bt::concat_nchw_channels({&u1, &u2, &u3, &xs[3]}, 1, x4H, x4W,
+                             {384, 768, 1536, 3072}, x4cat);   // 5760
+    x4sq = basicDecBlk(x4cat, dec.squeeze, x4H, x4W);          // 3072
+}
+
+Tensor BiRefNet::Impl::forwardLogits(const Tensor& img, int H, int W) const {
+    Tensor x1, x2, x3, x4;
+    forwardEnc(img, H, W, x1, x2, x3, x4);   // 384@H/4, 768@H/8, 1536@H/16, 3072@H/32
+    const int x4H = H / 32, x4W = W / 32, x3H = H / 16, x3W = W / 16;
+    const int x2H = H / 8, x2W = W / 8, x1H = H / 4, x1W = W / 4;
+
+    auto inject = [&](const Tensor& p, int pc, int pH, int pW, int ipt_i,
+                      int ipt_out) {
+        Tensor ip = image2patches(img, H, W, pH, pW, dev);
+        ip = simpleConvs(ip, dec.ipt[ipt_i], 3 * (H / pH) * (W / pW), ipt_out, pH, pW);
+        Tensor out; bt::concat_nchw_channels({&p, &ip}, 1, pH, pW, {pc, ipt_out}, out);
+        return out;
+    };
+
+    Tensor x4i = inject(x4, 3072, x4H, x4W, 0, 384);          // 3456
+    Tensor p4 = basicDecBlk(x4i, dec.block[0], x4H, x4W);     // 1536
+    p4 = gdtGate(p4, dec.gdt[0], 1536, x4H, x4W);
+    Tensor _p4 = interpAC(p4, 1536, x4H, x4W, x3H, x3W);
+    Tensor lat4 = conv2d(x3, dec.lat[0].w, &dec.lat[0].b, 1536, 1536, x3H, x3W, 1, 0);
+    bt::add_inplace(_p4, lat4);
+    Tensor _p3i = inject(_p4, 1536, x3H, x3W, 1, 384);        // 1920
+    Tensor p3 = basicDecBlk(_p3i, dec.block[1], x3H, x3W);    // 768
+    p3 = gdtGate(p3, dec.gdt[1], 768, x3H, x3W);
+    Tensor _p3 = interpAC(p3, 768, x3H, x3W, x2H, x2W);
+    Tensor lat3 = conv2d(x2, dec.lat[1].w, &dec.lat[1].b, 768, 768, x2H, x2W, 1, 0);
+    bt::add_inplace(_p3, lat3);
+    Tensor _p2i = inject(_p3, 768, x2H, x2W, 2, 192);         // 960
+    Tensor p2 = basicDecBlk(_p2i, dec.block[2], x2H, x2W);    // 384
+    p2 = gdtGate(p2, dec.gdt[2], 384, x2H, x2W);
+    Tensor _p2 = interpAC(p2, 384, x2H, x2W, x1H, x1W);
+    Tensor lat2 = conv2d(x1, dec.lat[2].w, &dec.lat[2].b, 384, 384, x1H, x1W, 1, 0);
+    bt::add_inplace(_p2, lat2);
+    Tensor _p1i = inject(_p2, 384, x1H, x1W, 3, 96);          // 480
+    Tensor _p1 = basicDecBlk(_p1i, dec.block[3], x1H, x1W);   // 192
+    _p1 = interpAC(_p1, 192, x1H, x1W, H, W);                 // full res
+    Tensor _p1f = inject(_p1, 192, H, W, 4, 48);             // 240
+    return conv2d(_p1f, dec.convout1_w, &dec.convout1_b, 240, 1, H, W, 1, 0);  // (1, H*W)
+}
+
 // ─── public BiRefNet ─────────────────────────────────────────────────────────
 
 BiRefNet::BiRefNet() : impl_(std::make_unique<Impl>()) {}
@@ -418,11 +720,43 @@ std::vector<Tensor> BiRefNet::debugBackbone(const Tensor& xNCHW, int H, int W) c
     return impl_->backbone(xNCHW.to(impl_->dev), H, W);
 }
 
-Tensor BiRefNet::forwardLogits(const Tensor&, int, int) const {
-    throw std::runtime_error("birefnet: forwardLogits (decoder) not yet wired");
+Tensor BiRefNet::forwardLogits(const Tensor& imgNCHW, int H, int W) const {
+    if (!impl_->loaded) throw std::runtime_error("birefnet: forwardLogits before load()");
+    return impl_->forwardLogits(imgNCHW.to(impl_->dev), H, W);
 }
-Matte BiRefNet::removeBackground(const float*, int, int, bool, int) const {
-    throw std::runtime_error("birefnet: removeBackground not yet wired");
+
+Matte BiRefNet::removeBackground(const float* rgb, int origW, int origH,
+                                 bool rgbIs255, int modelSize) const {
+    if (!impl_->loaded) throw std::runtime_error("birefnet: removeBackground before load()");
+    // Interleaved RGB (origH*origW*3) -> NCHW (1, 3*origH*origW), [0,1].
+    const float inv = rgbIs255 ? 1.0f / 255.0f : 1.0f;
+    Tensor src = Tensor::mat(1, 3 * origH * origW);
+    float* sp = src.host_f32_mut();
+    for (int c = 0; c < 3; ++c)
+        for (int y = 0; y < origH; ++y)
+            for (int x = 0; x < origW; ++x)
+                sp[(static_cast<size_t>(c) * origH + y) * origW + x] =
+                    rgb[(static_cast<size_t>(y) * origW + x) * 3 + c] * inv;
+    // Resize to modelSize² (align_corners) + ImageNet normalize.
+    Tensor rs;
+    bt::interp2d_align_corners_forward(src, 1, 3, origH, origW, modelSize, modelSize, 1, rs);
+    const float mean[3] = {0.485f, 0.456f, 0.406f}, sd[3] = {0.229f, 0.224f, 0.225f};
+    float* rp = rs.host_f32_mut();
+    const int sp2 = modelSize * modelSize;
+    for (int c = 0; c < 3; ++c)
+        for (int i = 0; i < sp2; ++i)
+            rp[c * sp2 + i] = (rp[c * sp2 + i] - mean[c]) / sd[c];
+
+    Tensor logits = impl_->forwardLogits(rs.to(impl_->dev), modelSize, modelSize);
+    Tensor lh = (logits.device == Device::CPU) ? logits : logits.to(Device::CPU);
+    Tensor alpha; bt::sigmoid_forward(lh, alpha);
+    Tensor back;
+    bt::interp2d_align_corners_forward(alpha, 1, 1, modelSize, modelSize, origH, origW, 1, back);
+
+    Matte mt; mt.width = origW; mt.height = origH;
+    const float* bp = back.host_f32();
+    mt.alpha.assign(bp, bp + static_cast<size_t>(origW) * origH);
+    return mt;
 }
 
 }  // namespace brovisionml::birefnet

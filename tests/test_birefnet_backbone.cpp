@@ -142,6 +142,47 @@ int main() {
         std::printf("  (CUDA not available — GPU backbone check skipped)\n");
     }
 
+    // ── full pipeline (decoder) golden: input -> sigmoid(forwardLogits) ──
+    const std::string fpath = gdir + "/birefnet_full_golden.bin";
+    if (!file_exists(fpath)) {
+        std::printf("  (no full golden at '%s' — decoder parity skipped)\n", fpath.c_str());
+    } else {
+        std::vector<GTensor> gf;
+        check(load_golden(fpath, "BRFF", gf), "load full golden");
+        check(gf.size() == 2, "full golden = input + alpha");
+        if (!failures) {
+            const int fH = gf[0].shape[2], fW = gf[0].shape[3];
+            std::printf("full golden: input %dx%d -> alpha\n", fH, fW);
+            net.to(brotensor::Device::CPU);
+            Tensor fin = Tensor::mat(1, 3 * fH * fW);
+            std::copy(gf[0].data.begin(), gf[0].data.end(), fin.host_f32_mut());
+            Tensor logits = net.forwardLogits(fin, fH, fW);
+            Tensor lh = (logits.device == brotensor::Device::CPU)
+                            ? logits : logits.to(brotensor::Device::CPU);
+            const std::size_t n = gf[1].data.size();
+            check(std::size_t(lh.rows) * lh.cols == n, "logits size matches alpha");
+            std::vector<float> a(n);
+            const float* lp = lh.host_f32();
+            for (std::size_t i = 0; i < n; ++i) a[i] = 1.0f / (1.0f + std::exp(-lp[i]));
+            Diff d = diff(a.data(), gf[1].data.data(), n);
+            std::printf("  [cpu] alpha: max=%.3e mean=%.3e\n", d.max_abs, d.mean_abs);
+            check(d.mean_abs < 3e-3, "full-pipeline alpha mean error within tolerance");
+
+            if (brotensor::is_available(brotensor::Device::CUDA)) {
+                net.to(brotensor::Device::CUDA);
+                Tensor gl = net.forwardLogits(fin.to(brotensor::Device::CUDA), fH, fW);
+                Tensor glh = gl.to(brotensor::Device::CPU);
+                std::vector<float> ga(n);
+                const float* glp = glh.host_f32();
+                for (std::size_t i = 0; i < n; ++i) ga[i] = 1.0f / (1.0f + std::exp(-glp[i]));
+                Diff dg = diff(ga.data(), gf[1].data.data(), n);
+                std::printf("  [cuda] alpha: max=%.3e mean=%.3e\n", dg.max_abs, dg.mean_abs);
+                check(dg.mean_abs < 3e-3, "full-pipeline alpha (CUDA) within tolerance");
+                net.to(brotensor::Device::CPU);
+            }
+        }
+    }
+
     if (failures == 0) { std::printf("test_birefnet_backbone: OK\n"); return 0; }
     std::printf("test_birefnet_backbone: %d failure(s)\n", failures);
     return 1;
