@@ -146,6 +146,7 @@ target_sources(brovisionml PRIVATE
     src/segformer.cpp
     src/dinov2.cpp
     src/dinov3.cpp
+    src/dinov3_preprocess.cpp
     src/dpt_head.cpp
     src/depth_anything.cpp
     src/sam_preprocess.cpp
