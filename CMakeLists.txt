@@ -154,6 +154,7 @@ target_sources(brovisionml PRIVATE
     src/sam_mask_decoder.cpp
     src/sam.cpp
     src/sam_amg.cpp
+    src/birefnet.cpp
 )
 
 # brovisionml's own CUDA kernels (DSINE RayReLU + AngMF propagate). Compiled into
