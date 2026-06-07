@@ -207,4 +207,77 @@ private:
     brotensor::Device device_ = brotensor::Device::CPU;
 };
 
+// ─── SynthesisLayer ──────────────────────────────────────────────────────────
+//
+// One alias-free synthesis layer: affine(w) -> per-channel styles, a modulated
+// 1x1 (config-R) convolution, then the filtered leaky-ReLU (bias -> upsample ->
+// lrelu -> downsample) whose low-pass filters are designed from the layer's
+// sampling-rate schedule. The ToRGB layer is the same class with demodulation
+// off, a 1/sqrt(fan-in) style gain, and a linear (slope=1) filtered_lrelu.
+// Mirrors networks_stylegan3.py SynthesisLayer. FP32.
+
+// The per-layer schedule the SynthesisNetwork hands each layer (the reference's
+// SynthesisLayer constructor arguments).
+struct SynthesisLayerParams {
+    int    w_dim                 = 512;
+    bool   is_torgb              = false;
+    bool   is_critically_sampled = false;
+    bool   use_fp16              = false;
+    int    in_channels           = 0;
+    int    out_channels          = 0;
+    int    in_size               = 0;   // square
+    int    out_size              = 0;   // square
+    double in_sampling_rate      = 0.0;
+    double out_sampling_rate     = 0.0;
+    double in_cutoff             = 0.0;
+    double out_cutoff            = 0.0;
+    double in_half_width         = 0.0;
+    double out_half_width        = 0.0;
+    int    conv_kernel           = 1;
+    int    filter_size           = 6;
+    int    lrelu_upsampling      = 2;
+    bool   use_radial_filters    = true;
+    double conv_clamp            = 256.0;
+};
+
+class SynthesisLayer {
+public:
+    SynthesisLayer() = default;
+    explicit SynthesisLayer(const SynthesisLayerParams& p);
+
+    void load(const void* file, const std::string& prefix);
+    void to(brotensor::Device dev);
+
+    // x: (1, in_channels*in_size*in_size) NCHW -> (1, out_channels*out*out).
+    brotensor::Tensor forward(const brotensor::Tensor& w,
+                              const brotensor::Tensor& x) const;
+
+    int out_size() const { return out_size_; }
+    int out_channels() const { return out_channels_; }
+    // Derived sampling parameters (exposed for tests / inspection).
+    int up_factor() const { return up_factor_; }
+    int down_factor() const { return down_factor_; }
+    int up_taps() const { return up_taps_; }
+    int down_taps() const { return down_taps_; }
+    int pad_lo() const { return pad_lo_; }
+    int pad_hi() const { return pad_hi_; }
+
+    // Parameters (public for the lab's adapter / inspection surface).
+    FullyConnectedLayer affine;   // w_dim -> in_channels
+    brotensor::Tensor   weight;   // (out_channels, in_channels*k*k)
+    brotensor::Tensor   bias;     // (out_channels, 1)
+    brotensor::Tensor   up_filter;
+    brotensor::Tensor   down_filter;
+
+private:
+    int  w_dim_ = 0, in_channels_ = 0, out_channels_ = 0;
+    int  in_size_ = 0, out_size_ = 0, conv_kernel_ = 1;
+    bool is_torgb_ = false;
+    double conv_clamp_ = 256.0;
+    int  up_factor_ = 1, down_factor_ = 1, up_taps_ = 1, down_taps_ = 1;
+    int  pad_lo_ = 0, pad_hi_ = 0;
+    float input_gain_ = 1.0f;     // 1/sqrt(magnitude_ema), baked at load
+    brotensor::Device device_ = brotensor::Device::CPU;
+};
+
 }  // namespace brovisionml::stylegan3

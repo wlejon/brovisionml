@@ -5,6 +5,7 @@
 #include "brotensor/ops.h"
 #include "brotensor/safetensors.h"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
@@ -16,6 +17,14 @@ using brotensor::Tensor;
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
+
+// Python-style floor division (rounds toward -inf), for the symmetric padding
+// split that mirrors the reference's `(pad_total + up_factor) // 2`.
+long floordiv(long a, long b) {
+    long q = a / b, r = a % b;
+    if (r != 0 && ((r < 0) != (b < 0))) --q;
+    return q;
+}
 }  // namespace
 
 // ─── SynthesisInput ──────────────────────────────────────────────────────────
@@ -143,6 +152,105 @@ Tensor SynthesisInput::forward(const Tensor& w) const {
     Y.rows = 1;
     Y.cols = C * HW;
     return Y;
+}
+
+// ─── SynthesisLayer ──────────────────────────────────────────────────────────
+
+SynthesisLayer::SynthesisLayer(const SynthesisLayerParams& p) {
+    w_dim_        = p.w_dim;
+    in_channels_  = p.in_channels;
+    out_channels_ = p.out_channels;
+    in_size_      = p.in_size;
+    out_size_     = p.out_size;
+    conv_kernel_  = p.conv_kernel;
+    is_torgb_     = p.is_torgb;
+    conv_clamp_   = p.conv_clamp;
+
+    // Temporary sampling rate around the leaky-ReLU (no internal up for ToRGB).
+    const double tmp_sr = std::max(p.in_sampling_rate, p.out_sampling_rate) *
+                          (p.is_torgb ? 1.0 : static_cast<double>(p.lrelu_upsampling));
+
+    // Upsampling filter.
+    up_factor_ = static_cast<int>(std::lround(tmp_sr / p.in_sampling_rate));
+    up_taps_   = (up_factor_ > 1 && !p.is_torgb) ? p.filter_size * up_factor_ : 1;
+    up_filter  = detail::design_lowpass_filter(up_taps_, p.in_cutoff,
+                                               p.in_half_width * 2.0, tmp_sr,
+                                               /*radial=*/false);
+
+    // Downsampling filter (radial for non-critical config-R layers).
+    down_factor_ = static_cast<int>(std::lround(tmp_sr / p.out_sampling_rate));
+    down_taps_   = (down_factor_ > 1 && !p.is_torgb) ? p.filter_size * down_factor_ : 1;
+    const bool down_radial = p.use_radial_filters && !p.is_critically_sampled;
+    down_filter  = detail::design_lowpass_filter(down_taps_, p.out_cutoff,
+                                                 p.out_half_width * 2.0, tmp_sr,
+                                                 down_radial);
+
+    // Padding so the up -> conv -> down chain lands exactly on out_size.
+    long pad_total = static_cast<long>(out_size_ - 1) * down_factor_ + 1;
+    pad_total -= static_cast<long>(in_size_ + conv_kernel_ - 1) * up_factor_;
+    pad_total += up_taps_ + down_taps_ - 2;
+    const long lo = floordiv(pad_total + up_factor_, 2);
+    pad_lo_ = static_cast<int>(lo);
+    pad_hi_ = static_cast<int>(pad_total - lo);
+}
+
+void SynthesisLayer::load(const void* file, const std::string& prefix) {
+    const char* who = "stylegan3::SynthesisLayer: ";
+    const st::File& f = *reinterpret_cast<const st::File*>(file);
+
+    affine.load(file, who, prefix + ".affine", w_dim_, in_channels_, /*lr=*/1.0f,
+                /*with_bias=*/true, FullyConnectedLayer::Act::Linear);
+
+    weight = brovisionml::detail::load_whole(
+        f, who, prefix + ".weight", out_channels_,
+        in_channels_ * conv_kernel_ * conv_kernel_);
+    bias = brovisionml::detail::load_whole(f, who, prefix + ".bias", out_channels_, 1);
+
+    // magnitude_ema (scalar) -> input_gain = 1/sqrt(magnitude_ema).
+    Tensor mema = brovisionml::detail::load_whole(f, who, prefix + ".magnitude_ema", 1, 1);
+    input_gain_ = 1.0f / std::sqrt(mema.host_f32()[0]);
+}
+
+void SynthesisLayer::to(brotensor::Device dev) {
+    affine.to(dev);
+    weight      = weight.to(dev);
+    bias        = bias.to(dev);
+    up_filter   = up_filter.to(dev);
+    down_filter = down_filter.to(dev);
+    device_     = dev;
+}
+
+Tensor SynthesisLayer::forward(const Tensor& w, const Tensor& x) const {
+    // Per-channel styles from w.
+    Tensor styles;
+    affine.forward(w, styles);                 // (1, in_channels)
+    if (is_torgb_) {
+        const float wg = 1.0f / std::sqrt(static_cast<float>(in_channels_) *
+                                          conv_kernel_ * conv_kernel_);
+        brotensor::scale_inplace(styles, wg);
+    }
+
+    // Modulated convolution (demodulate off for ToRGB).
+    const int pad = conv_kernel_ - 1;
+    Tensor dcoef, yconv;
+    brotensor::modulated_conv2d_forward(
+        x, weight, styles, /*N=*/1, in_channels_, in_size_, in_size_,
+        out_channels_, conv_kernel_, conv_kernel_, pad, pad,
+        /*demodulate=*/!is_torgb_, /*eps=*/1e-8f, dcoef, yconv);
+
+    // magnitude_ema input gain (a uniform scalar => post-scale the conv output).
+    if (input_gain_ != 1.0f) brotensor::scale_inplace(yconv, input_gain_);
+
+    // Filtered leaky-ReLU: bias -> upsample -> lrelu -> downsample.
+    const int Hconv = in_size_ + (conv_kernel_ - 1);
+    const float gain  = is_torgb_ ? 1.0f : std::sqrt(2.0f);
+    const float slope = is_torgb_ ? 1.0f : 0.2f;
+    Tensor up_buf, act_buf, out;
+    brotensor::filtered_lrelu_forward(
+        yconv, up_filter, down_filter, &bias, /*N=*/1, out_channels_,
+        Hconv, Hconv, up_factor_, down_factor_, pad_lo_, pad_hi_, pad_lo_, pad_hi_,
+        gain, slope, static_cast<float>(conv_clamp_), up_buf, act_buf, out);
+    return out;  // (1, out_channels * out_size * out_size)
 }
 
 }  // namespace brovisionml::stylegan3
