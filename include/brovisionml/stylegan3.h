@@ -29,6 +29,8 @@
 
 #include "brotensor/tensor.h"
 
+#include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -155,6 +157,9 @@ public:
 
     int num_ws() const { return cfg_.num_ws(); }
 
+    // The stored average latent (truncation target / projector init). (1, w_dim).
+    const brotensor::Tensor& w_avg() const { return w_avg_; }
+
 private:
     Config cfg_;
     brotensor::Device device_ = brotensor::Device::CPU;
@@ -186,6 +191,21 @@ public:
 
     // w: (1, w_dim) -> (1, channels*H*W) FP32 NCHW.
     brotensor::Tensor forward(const brotensor::Tensor& w) const;
+
+    // Forward intermediates the backward needs. The per-channel transformed
+    // frequencies/phases/amplitudes and the grid are cheap to recompute from
+    // `t_raw`, so only the pre-normalization affine output and the sin-feature
+    // map (needed by the channel-mix matmul backward) are cached.
+    struct Cache {
+        std::vector<float> t_raw;     // (4) affine(w) before rotation-norm
+        brotensor::Tensor  Xs_T;      // (channels, H*W) device — sin features
+    };
+    brotensor::Tensor forward_cached(const brotensor::Tensor& w, Cache& cache) const;
+
+    // dY: (1, channels*H*W) NCHW -> dw0: (1, w_dim). The host-side Fourier/affine
+    // math is differentiated by hand, mirroring forward().
+    void backward(const brotensor::Tensor& w, const Cache& cache,
+                  const brotensor::Tensor& dY, brotensor::Tensor& dw0) const;
 
     int channels() const { return channels_; }
     int out_h() const { return size_; }
@@ -254,6 +274,25 @@ public:
     brotensor::Tensor forward(const brotensor::Tensor& w,
                               const brotensor::Tensor& x) const;
 
+    // Forward intermediates the backward needs (the styles fed to the modulated
+    // conv, its demod coefficients, the conv output post input-gain that feeds
+    // the filtered-lrelu, and that op's up-stage cache).
+    struct Cache {
+        brotensor::Tensor styles;        // (1, in_channels) post-(ToRGB) scale
+        brotensor::Tensor dcoef;         // (1, out_channels) demod coeffs
+        brotensor::Tensor yconv_scaled;  // (1, out_channels*Hconv*Hconv)
+        brotensor::Tensor up_buf;        // filtered_lrelu up-stage cache
+    };
+    brotensor::Tensor forward_cached(const brotensor::Tensor& w,
+                                     const brotensor::Tensor& x, Cache& cache) const;
+
+    // dY: (1, out_channels*out*out) -> dx: (1, in_channels*in*in) (grad to the
+    // previous activation) and dw_row: (1, w_dim) (grad to this layer's W+ row).
+    // Weights/bias are frozen — no parameter gradients are produced.
+    void backward(const brotensor::Tensor& w, const brotensor::Tensor& x,
+                  const Cache& cache, const brotensor::Tensor& dY,
+                  brotensor::Tensor& dx, brotensor::Tensor& dw_row) const;
+
     int out_size() const { return out_size_; }
     int out_channels() const { return out_channels_; }
     // Derived sampling parameters (exposed for tests / inspection).
@@ -302,6 +341,21 @@ public:
 
     // ws: (num_ws, w_dim) FP32 -> img: (1, img_channels*res*res) NCHW.
     brotensor::Tensor forward(const brotensor::Tensor& ws) const;
+
+    // Forward saving every intermediate the backward pass consumes: the input
+    // layer's cache, each synthesis layer's cache, and the activation fed into
+    // each layer (the modulated conv's input).
+    struct Cache {
+        SynthesisInput::Cache              input;
+        std::vector<SynthesisLayer::Cache> layers;     // one per layer
+        std::vector<brotensor::Tensor>     layer_in;   // input to each layer
+    };
+    brotensor::Tensor forward_cached(const brotensor::Tensor& ws, Cache& cache) const;
+
+    // dimg: (1, img_channels*res*res) -> dws: (num_ws, w_dim). Backprop to the
+    // W+ rows only (weights frozen). `cache` must come from forward_cached(ws).
+    void backward(const brotensor::Tensor& ws, const Cache& cache,
+                  const brotensor::Tensor& dimg, brotensor::Tensor& dws) const;
 
     int num_ws() const { return cfg_.num_ws(); }
     int img_resolution() const { return cfg_.img_resolution; }
@@ -366,9 +420,32 @@ public:
                    float truncation_psi = 1.0f,
                    int truncation_cutoff = -1) const;
 
+    // ─── Inversion (image -> W+) ──────────────────────────────────────────────
+    //
+    // Optimization-based GAN inversion: starting from the average latent, run
+    // Adam on the W+ rows to minimize an image-space loss against `target`,
+    // backpropagating through the (frozen) synthesis network. The recovered W+
+    // can be fed straight back to synthesize()/render() or edited like any other
+    // latent. Runs on the generator's current device (GPU when loaded there).
+    struct InvertOptions {
+        int      num_steps = 350;     // Adam iterations
+        float    lr        = 0.05f;   // Adam learning rate
+        float    reg_w     = 0.0f;    // L2 pull of W+ toward w_avg (0 = off)
+        float    init_noise = 0.0f;   // stddev of gaussian added to the init
+        uint64_t seed      = 0;       // rng for init_noise (splitmix64)
+        // Optional per-step progress (1-based step, current image-space MSE).
+        std::function<void(int, float)> on_step;
+    };
+    struct InvertResult {
+        brotensor::Tensor w;          // (num_ws, w_dim) recovered W+
+        float             loss = 0.0f; // final image-space MSE
+    };
+    InvertResult invert(const Image& target, const InvertOptions& opt = {}) const;
+
     int num_ws() const { return cfg_.num_ws(); }
     MappingNetwork& mapping() { return mapping_; }
     SynthesisNetwork& synthesis() { return synthesis_; }
+    const SynthesisNetwork& synthesis() const { return synthesis_; }
 
 private:
     Config cfg_;

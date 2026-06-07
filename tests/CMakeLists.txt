@@ -53,6 +53,12 @@ target_compile_definitions(brovisionml_test_stylegan3_generate PRIVATE
 brovisionml_add_test(brovisionml_test_stylegan3_parity test_stylegan3_parity.cpp)
 target_compile_definitions(brovisionml_test_stylegan3_parity PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+# StyleGAN3-R inversion test: a finite-difference gradient check of the synthesis
+# backward (no golden needed) plus a generate->invert->render round trip. Gated
+# on the converted checkpoint; skips cleanly when absent.
+brovisionml_add_test(brovisionml_test_stylegan3_invert test_stylegan3_invert.cpp)
+target_compile_definitions(brovisionml_test_stylegan3_invert PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
 
 # Real-checkpoint end-to-end test: loads actual facebook/sam-vit-* weights from
 # weights/ (downloaded via scripts/download-weights.sh) and skips cleanly when
