@@ -38,6 +38,7 @@ brovisionml_add_test(brovisionml_test_stylegan3_mapping test_stylegan3_mapping.c
 target_compile_definitions(brovisionml_test_stylegan3_mapping PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
 brovisionml_add_test(brovisionml_test_stylegan3_filter  test_stylegan3_filter.cpp)
+brovisionml_add_test(brovisionml_test_stylegan3_input   test_stylegan3_input.cpp)
 
 # Real-checkpoint end-to-end test: loads actual facebook/sam-vit-* weights from
 # weights/ (downloaded via scripts/download-weights.sh) and skips cleanly when

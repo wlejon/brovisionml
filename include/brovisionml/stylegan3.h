@@ -160,4 +160,51 @@ private:
     brotensor::Tensor w_avg_;   // (1, w_dim) FP32
 };
 
+// ─── SynthesisInput ──────────────────────────────────────────────────────────
+//
+// The Fourier-feature input layer: maps w[0] to the first feature map via a
+// learned affine that produces a per-sample rotation+translation, applied to a
+// set of fixed random frequencies/phases, sampled on a grid as sin() features
+// and projected by a learned channel mixing matrix. Mirrors
+// networks_stylegan3.py SynthesisInput, run in FP32 (single sample, N=1).
+//
+// The small per-channel/grid math (transform, frequencies, amplitudes, the
+// affine_grid, the sin features) is done on the host — the input map is always
+// low resolution (~36x36) regardless of the output resolution — and only the
+// final channel-mixing matmul (C_in x HW) runs on the device, producing an
+// NCHW feature map directly.
+class SynthesisInput {
+public:
+    SynthesisInput() = default;
+    SynthesisInput(int w_dim, int channels, int size,
+                   double sampling_rate, double bandwidth);
+
+    void load(const void* file, const std::string& prefix);
+    void to(brotensor::Device dev);
+
+    // w: (1, w_dim) -> (1, channels*H*W) FP32 NCHW.
+    brotensor::Tensor forward(const brotensor::Tensor& w) const;
+
+    int channels() const { return channels_; }
+    int out_h() const { return size_; }
+    int out_w() const { return size_; }
+
+    // Parameters (public for the lab's adapter/inspection surface). freqs,
+    // phases, transform stay on the host (used in the host-side math); weight
+    // and the affine layer migrate with to().
+    FullyConnectedLayer affine;      // w_dim -> 4 (rotation cos/sin + translate)
+    brotensor::Tensor   weight;      // (channels, channels), 1/sqrt(channels) baked
+    brotensor::Tensor   freqs;       // (channels, 2) host
+    brotensor::Tensor   phases;      // (channels, 1) host
+    brotensor::Tensor   transform;   // (3, 3) host base transform
+
+private:
+    int    w_dim_         = 0;
+    int    channels_      = 0;
+    int    size_          = 0;
+    double sampling_rate_ = 0.0;
+    double bandwidth_     = 0.0;
+    brotensor::Device device_ = brotensor::Device::CPU;
+};
+
 }  // namespace brovisionml::stylegan3

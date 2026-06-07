@@ -158,6 +158,7 @@ target_sources(brovisionml PRIVATE
     src/birefnet.cpp
     src/stylegan3_mapping.cpp
     src/stylegan3_filter.cpp
+    src/stylegan3_synthesis.cpp
 )
 
 # brovisionml's own CUDA kernels (DSINE RayReLU + AngMF propagate). Compiled into
