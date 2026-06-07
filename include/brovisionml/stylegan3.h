@@ -433,6 +433,11 @@ public:
         float    reg_w     = 0.0f;    // L2 pull of W+ toward w_avg (0 = off)
         float    init_noise = 0.0f;   // stddev of gaussian added to the init
         uint64_t seed      = 0;       // rng for init_noise (splitmix64)
+        // Optional starting latent: (num_ws, w_dim) to resume/refine from instead
+        // of w_avg (empty = w_avg). Lets a caller run inversion in chunks (feed
+        // back the previous result) for progressive refinement, or seed it from a
+        // known latent. The L2 reg, if on, still pulls toward w_avg, not this.
+        brotensor::Tensor init_w;
         // Optional per-step progress (1-based step, current image-space MSE).
         std::function<void(int, float)> on_step;
     };

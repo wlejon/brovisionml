@@ -74,11 +74,24 @@ Generator::InvertResult Generator::invert(const Image& target,
             }
     Tensor target_dev = Tensor::from_host_on(device_, traw.data(), 1, C * HW);
 
-    // Init W+ = w_avg broadcast over the rows (+ optional gaussian jitter).
+    // Init W+ = w_avg broadcast over the rows (+ optional gaussian jitter), or a
+    // caller-supplied starting latent (resume/refine). The L2 reg always pulls
+    // toward w_avg regardless.
     const int n_ws = cfg_.num_ws();
     const int w_dim = cfg_.w_dim;
     Tensor wavg_host = mapping_.w_avg().to(brotensor::Device::CPU);
     const float* wa = wavg_host.host_f32();
+
+    const bool have_init = opt.init_w.data != nullptr;
+    if (have_init && (opt.init_w.rows != n_ws || opt.init_w.cols != w_dim))
+        throw std::runtime_error(
+            "stylegan3::Generator::invert: init_w must be (num_ws, w_dim)");
+    Tensor initw_host;
+    const float* iw = nullptr;
+    if (have_init) {
+        initw_host = opt.init_w.to(brotensor::Device::CPU);
+        iw = initw_host.host_f32();
+    }
 
     uint64_t rng = opt.seed ? opt.seed : 0x9E3779B97F4A7C15ull;
     auto next_unit = [&]() -> double {           // splitmix64 → uniform (0,1)
@@ -92,7 +105,7 @@ Generator::InvertResult Generator::invert(const Image& target,
     std::vector<float> w0(static_cast<std::size_t>(n_ws) * w_dim);
     for (int r = 0; r < n_ws; ++r)
         for (int j = 0; j < w_dim; ++j) {
-            float v = wa[j];
+            float v = have_init ? iw[static_cast<std::size_t>(r) * w_dim + j] : wa[j];
             if (opt.init_noise > 0.0f) {
                 const double u1 = next_unit(), u2 = next_unit();
                 const double gn = std::sqrt(-2.0 * std::log(u1 + 1e-12)) *
