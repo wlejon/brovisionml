@@ -34,6 +34,10 @@ brovisionml_add_test(brovisionml_test_sam_prompt_encoder test_sam_prompt_encoder
 brovisionml_add_test(brovisionml_test_sam_mask_decoder   test_sam_mask_decoder.cpp)
 brovisionml_add_test(brovisionml_test_sam               test_sam.cpp)
 brovisionml_add_test(brovisionml_test_sam_amg           test_sam_amg.cpp)
+brovisionml_add_test(brovisionml_test_stylegan3_mapping test_stylegan3_mapping.cpp)
+target_compile_definitions(brovisionml_test_stylegan3_mapping PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+brovisionml_add_test(brovisionml_test_stylegan3_filter  test_stylegan3_filter.cpp)
 
 # Real-checkpoint end-to-end test: loads actual facebook/sam-vit-* weights from
 # weights/ (downloaded via scripts/download-weights.sh) and skips cleanly when
