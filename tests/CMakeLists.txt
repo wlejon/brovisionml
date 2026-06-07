@@ -40,6 +40,7 @@ target_compile_definitions(brovisionml_test_stylegan3_mapping PRIVATE
 brovisionml_add_test(brovisionml_test_stylegan3_filter  test_stylegan3_filter.cpp)
 brovisionml_add_test(brovisionml_test_stylegan3_input   test_stylegan3_input.cpp)
 brovisionml_add_test(brovisionml_test_stylegan3_layer   test_stylegan3_layer.cpp)
+brovisionml_add_test(brovisionml_test_stylegan3_synthesis test_stylegan3_synthesis.cpp)
 
 # Real-checkpoint end-to-end test: loads actual facebook/sam-vit-* weights from
 # weights/ (downloaded via scripts/download-weights.sh) and skips cleanly when

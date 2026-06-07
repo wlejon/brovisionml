@@ -253,4 +253,100 @@ Tensor SynthesisLayer::forward(const Tensor& w, const Tensor& x) const {
     return out;  // (1, out_channels * out_size * out_size)
 }
 
+// ─── SynthesisNetwork ────────────────────────────────────────────────────────
+
+SynthesisNetwork::SynthesisNetwork(const Config& cfg) : cfg_(cfg) {
+    const int L = cfg_.num_layers;           // hidden synthesis layers
+    const int N = L + 1;                      // including ToRGB
+    const double last_cutoff   = cfg_.img_resolution / 2.0;
+    const double last_stopband = last_cutoff * cfg_.last_stopband_rel;
+
+    std::vector<double> cutoffs(N), stopbands(N), sampling_rates(N), half_widths(N);
+    std::vector<int>    sizes(N), channels(N);
+    for (int i = 0; i < N; ++i) {
+        const double e = std::min(static_cast<double>(i) / (L - cfg_.num_critical), 1.0);
+        cutoffs[i]   = cfg_.first_cutoff   * std::pow(last_cutoff   / cfg_.first_cutoff,   e);
+        stopbands[i] = cfg_.first_stopband * std::pow(last_stopband / cfg_.first_stopband, e);
+        sampling_rates[i] = std::exp2(std::ceil(std::log2(
+            std::min(stopbands[i] * 2.0, static_cast<double>(cfg_.img_resolution)))));
+        half_widths[i] = std::max(stopbands[i], sampling_rates[i] / 2.0) - cutoffs[i];
+        sizes[i]    = static_cast<int>(sampling_rates[i]) + cfg_.margin_size * 2;
+        channels[i] = static_cast<int>(std::nearbyint(  // np.rint: half-to-even
+            std::min((cfg_.channel_base / 2.0) / cutoffs[i],
+                     static_cast<double>(cfg_.channel_max))));
+    }
+    sizes[N - 1] = cfg_.img_resolution;          // sizes[-2:] = img_resolution
+    if (N >= 2) sizes[N - 2] = cfg_.img_resolution;
+    channels[N - 1] = cfg_.img_channels;         // channels[-1] = img_channels
+
+    // Fourier-feature input (index 0).
+    input_ = SynthesisInput(cfg_.w_dim, channels[0], sizes[0],
+                            sampling_rates[0], cutoffs[0]);
+
+    layers_.clear();
+    layer_names_.clear();
+    for (int idx = 0; idx < N; ++idx) {
+        const int prev = std::max(idx - 1, 0);
+        SynthesisLayerParams p;
+        p.w_dim                 = cfg_.w_dim;
+        p.is_torgb              = (idx == L);
+        p.is_critically_sampled = (idx >= L - cfg_.num_critical);
+        p.use_fp16              = (sampling_rates[idx] * std::pow(2.0, cfg_.num_fp16_res)
+                                   > cfg_.img_resolution);
+        p.in_channels           = channels[prev];
+        p.out_channels          = channels[idx];
+        p.in_size               = sizes[prev];
+        p.out_size              = sizes[idx];
+        p.in_sampling_rate      = sampling_rates[prev];
+        p.out_sampling_rate     = sampling_rates[idx];
+        p.in_cutoff             = cutoffs[prev];
+        p.out_cutoff            = cutoffs[idx];
+        p.in_half_width         = half_widths[prev];
+        p.out_half_width        = half_widths[idx];
+        // ToRGB always uses a 1x1 conv regardless of config (matters for -T).
+        p.conv_kernel           = p.is_torgb ? 1 : cfg_.conv_kernel;
+        p.filter_size           = cfg_.filter_size;
+        p.lrelu_upsampling      = cfg_.lrelu_upsampling;
+        p.use_radial_filters    = cfg_.use_radial_filters;
+        p.conv_clamp            = cfg_.conv_clamp;
+        layers_.emplace_back(p);
+        layer_names_.push_back("L" + std::to_string(idx) + "_" +
+                               std::to_string(sizes[idx]) + "_" +
+                               std::to_string(channels[idx]));
+    }
+}
+
+void SynthesisNetwork::load(const void* file, const std::string& prefix) {
+    input_.load(file, prefix + ".input");
+    for (std::size_t i = 0; i < layers_.size(); ++i)
+        layers_[i].load(file, prefix + "." + layer_names_[i]);
+}
+
+void SynthesisNetwork::to(brotensor::Device dev) {
+    input_.to(dev);
+    for (auto& l : layers_) l.to(dev);
+    device_ = dev;
+}
+
+Tensor SynthesisNetwork::forward(const Tensor& ws) const {
+    if (ws.rows != cfg_.num_ws() || ws.cols != cfg_.w_dim)
+        throw std::runtime_error("stylegan3::SynthesisNetwork::forward: ws must be (num_ws, w_dim)");
+
+    // Non-owning (1, w_dim) view onto row k of ws.
+    auto row = [&](int k) {
+        return Tensor::view(
+            ws.device,
+            static_cast<char*>(ws.data) +
+                static_cast<std::size_t>(k) * cfg_.w_dim * sizeof(float),
+            1, cfg_.w_dim, brotensor::Dtype::FP32);
+    };
+
+    Tensor x = input_.forward(row(0));
+    for (std::size_t i = 0; i < layers_.size(); ++i)
+        x = layers_[i].forward(row(static_cast<int>(i) + 1), x);
+
+    if (cfg_.output_scale != 1.0f) brotensor::scale_inplace(x, cfg_.output_scale);
+    return x;  // (1, img_channels * res * res)
+}
+
 }  // namespace brovisionml::stylegan3

@@ -280,4 +280,42 @@ private:
     brotensor::Device device_ = brotensor::Device::CPU;
 };
 
+// ─── SynthesisNetwork ────────────────────────────────────────────────────────
+//
+// Assembles the SynthesisInput and the num_layers+1 SynthesisLayers (the last
+// being ToRGB) from the band-limit schedule (cutoffs, stopbands, sampling
+// rates, half-widths, sizes, channels) computed exactly as
+// networks_stylegan3.py SynthesisNetwork does. forward consumes the W+ rows in
+// order: ws[0] -> input, ws[1..] -> the layers, then scales by output_scale.
+class SynthesisNetwork {
+public:
+    explicit SynthesisNetwork(const Config& cfg);
+
+    // Load the input layer and every synthesis layer. The reference names layers
+    // f"L{idx}_{out_size}_{out_channels}"; the same schedule reproduces the
+    // names, so loading is keyed off them. prefix is e.g. "synthesis".
+    void load(const void* file, const std::string& prefix);
+    void to(brotensor::Device dev);
+    brotensor::Device device() const { return device_; }
+
+    // ws: (num_ws, w_dim) FP32 -> img: (1, img_channels*res*res) NCHW.
+    brotensor::Tensor forward(const brotensor::Tensor& ws) const;
+
+    int num_ws() const { return cfg_.num_ws(); }
+    int img_resolution() const { return cfg_.img_resolution; }
+    int img_channels() const { return cfg_.img_channels; }
+
+    // Inspection (tests, the lab).
+    const SynthesisInput& input() const { return input_; }
+    const std::vector<SynthesisLayer>& layers() const { return layers_; }
+    const std::vector<std::string>& layer_names() const { return layer_names_; }
+
+private:
+    Config cfg_;
+    brotensor::Device device_ = brotensor::Device::CPU;
+    SynthesisInput input_;
+    std::vector<SynthesisLayer>  layers_;       // num_layers + 1 (last = ToRGB)
+    std::vector<std::string>     layer_names_;
+};
+
 }  // namespace brovisionml::stylegan3
