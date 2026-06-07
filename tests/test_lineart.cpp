@@ -21,6 +21,8 @@
 
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -144,24 +146,26 @@ void run_case(const std::string& dir, const std::string& path) {
     CHECK(fr < 0.01);        // <1% of pixels diverge past 1e-2
     CHECK(mx < 0.10);        // gross-breakage tripwire
 
-    // On-device: FP32-on-CUDA should track both the golden and the CPU result.
+    // On-device: FP32-on-GPU should track both the golden and the CPU result.
     brotensor::init();
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
-        det.to(brotensor::Device::CUDA);
-        CHECK(det.device() == brotensor::Device::CUDA);
+    const brotensor::Device gpu_dev = brovisionml_test::preferred_gpu();
+    if (gpu_dev != brotensor::Device::CPU) {
+        const char* dev = brovisionml_test::device_name(gpu_dev);
+        det.to(gpu_dev);
+        CHECK(det.device() == gpu_dev);
         LineMap gpu = det.detect(g.input.data(), g.W, g.H, 3);
         CHECK(gpu.line.size() == n);
         if (gpu.line.size() == n) {
             double mxg = 0.0, mng = 0.0, frg = 0.0, mxc = 0.0, mnc = 0.0, frc = 0.0;
             diff_stats(gpu.line.data(), g.line.data(), n, mxg, mng, frg);
             diff_stats(gpu.line.data(), cpu.line.data(), n, mxc, mnc, frc);
-            std::printf("    CUDA vs golden: mean-abs=%.3e  vs CPU: max-abs=%.3e\n",
-                        mng, mxc);
-            CHECK(mng < 5e-4);      // CUDA tracks the golden like the CPU path
-            CHECK(mxc < 1e-2);      // CUDA and CPU agree (FP32, same math)
+            std::printf("    %s vs golden: mean-abs=%.3e  vs CPU: max-abs=%.3e\n",
+                        dev, mng, mxc);
+            CHECK(mng < 5e-4);      // GPU tracks the golden like the CPU path
+            CHECK(mxc < 1e-2);      // GPU and CPU agree (FP32, same math)
         }
     } else {
-        std::printf("    (no CUDA device available — on-device check skipped)\n");
+        std::printf("    (no GPU device available — on-device check skipped)\n");
     }
 }
 

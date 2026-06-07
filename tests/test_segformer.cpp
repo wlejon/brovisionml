@@ -26,6 +26,8 @@
 #include "brotensor/runtime.h"
 #include "brotensor/tensor.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -181,22 +183,24 @@ void run_case(const std::string& dir, const std::string& path) {
     }
     CHECK(palette_ok);
 
-    // ── CUDA ──
+    // ── GPU ──
     brotensor::init();
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
-        det.to(brotensor::Device::CUDA);
-        CHECK(det.device() == brotensor::Device::CUDA);
+    const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+    if (gpu != brotensor::Device::CPU) {
+        const char* dev = brovisionml_test::device_name(gpu);
+        det.to(gpu);
+        CHECK(det.device() == gpu);
 
-        brotensor::Tensor pxd = px.to(brotensor::Device::CUDA);
+        brotensor::Tensor pxd = px.to(gpu);
         Logits glg = det.infer_logits_from_tensor(pxd);
         double gmx = 0, gmn = 0, cmx = 0, cmn = 0;
         if (glg.data.size() == g.logits.size()) {
             diff(glg.data, g.logits, gmx, gmn);
             diff(glg.data, lg.data, cmx, cmn);
-            std::printf("    CUDA Gate1 vs golden: mean-abs=%.3e  vs CPU: max-abs=%.3e mean-abs=%.3e\n",
-                        gmn, cmx, cmn);
-            CHECK(gmn < 5e-3);     // CUDA tracks the golden like the CPU path
-            CHECK(cmx < 5e-2);     // CPU vs CUDA worst-logit tripwire
+            std::printf("    %s Gate1 vs golden: mean-abs=%.3e  vs CPU: max-abs=%.3e mean-abs=%.3e\n",
+                        dev, gmn, cmx, cmn);
+            CHECK(gmn < 5e-3);     // GPU tracks the golden like the CPU path
+            CHECK(cmx < 5e-2);     // CPU vs GPU worst-logit tripwire
         } else {
             CHECK(false);
         }
@@ -204,11 +208,11 @@ void run_case(const std::string& dir, const std::string& path) {
         SegMap gsm = det.detect(g.resized.data(), g.W, g.H, 3);
         double gagree = agreement(gsm.classes, g.classmap);
         double cagree = agreement(gsm.classes, sm.classes);
-        std::printf("    CUDA Gate2 vs golden: %.4f  vs CPU: %.4f\n", gagree, cagree);
+        std::printf("    %s Gate2 vs golden: %.4f  vs CPU: %.4f\n", dev, gagree, cagree);
         CHECK(gagree >= 0.98);
-        CHECK(cagree >= 0.999);    // CPU/CUDA class maps near-identical
+        CHECK(cagree >= 0.999);    // CPU/GPU class maps near-identical
     } else {
-        std::printf("    (no CUDA device available — on-device check skipped)\n");
+        std::printf("    (no GPU device available — on-device check skipped)\n");
     }
 }
 

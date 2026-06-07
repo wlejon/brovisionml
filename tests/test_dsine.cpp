@@ -19,6 +19,8 @@
 
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -208,28 +210,30 @@ int main() {
         CHECK(mx < 1e-2);
         CHECK(mn < 1e-3);
 
-        // (c) on-device run: if a CUDA device is present, migrate the estimator
+        // (c) on-device run: if a GPU device is present, migrate the estimator
         // and re-run end to end on the GPU (encoder/decoder via brotensor ops,
         // the refinement via brovisionml's RayReLU + AngMF-propagate kernels).
-        // FP32-on-CUDA, so it should track both the golden and the CPU result to
+        // FP32-on-GPU, so it should track both the golden and the CPU result to
         // the ballpark bar.
         brotensor::init();
-        if (brotensor::is_available(brotensor::Device::CUDA)) {
-            est.to(brotensor::Device::CUDA);
-            CHECK(est.device() == brotensor::Device::CUDA);
+        const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+        if (gpu != brotensor::Device::CPU) {
+            const char* dev = brovisionml_test::device_name(gpu);
+            est.to(gpu);
+            CHECK(est.device() == gpu);
             NormalMap gm = est.estimate(g.input.data(), g.W, g.H, 3);
             CHECK(gm.normals.size() == n);
             if (gm.normals.size() == n) {
                 double mxg = 0.0, mng = 0.0, mxc = 0.0, mnc = 0.0;
                 diff_stats(gm.normals.data(), g.final.data(), n, mxg, mng);
                 diff_stats(gm.normals.data(), nm.normals.data(), n, mxc, mnc);
-                std::printf("    CUDA vs golden: max-abs=%.3e  vs CPU: max-abs=%.3e\n",
-                            mxg, mxc);
+                std::printf("    %s vs golden: max-abs=%.3e  vs CPU: max-abs=%.3e\n",
+                            dev, mxg, mxc);
                 CHECK(mxg < 1e-2);
                 CHECK(mxc < 1e-2);
             }
         } else {
-            std::printf("    (no CUDA device available — on-device check skipped)\n");
+            std::printf("    (no GPU device available — on-device check skipped)\n");
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "  error: %s\n", e.what());

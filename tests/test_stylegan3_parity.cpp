@@ -21,6 +21,8 @@
 
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -187,11 +189,13 @@ int main() {
                   /*ws_tol_mean=*/5e-4, /*img_tol_mean=*/5e-3, /*img_tol_max=*/5e-2);
 
         brotensor::init();
-        if (brotensor::is_available(brotensor::Device::CUDA)) {
-            run_gates(dir, cfg, g, brotensor::Device::CUDA, "cuda",
+        const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+        if (gpu != brotensor::Device::CPU) {
+            const char* dev = brovisionml_test::device_name(gpu);
+            run_gates(dir, cfg, g, gpu, dev,
                       /*ws_tol_mean=*/5e-4, /*img_tol_mean=*/5e-3, /*img_tol_max=*/5e-2);
         } else {
-            std::printf("  (CUDA not available — GPU parity skipped)\n");
+            std::printf("  (no GPU available — GPU parity skipped)\n");
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

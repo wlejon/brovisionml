@@ -18,6 +18,8 @@
 
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -178,25 +180,27 @@ void run_case(const std::string& dir, const std::string& path) {
         }
     }
 
-    // On-device: if a CUDA device is present, migrate and re-run; FP32-on-CUDA
+    // On-device: if a GPU device is present, migrate and re-run; FP32-on-GPU
     // should track both the golden and the CPU result tightly.
     brotensor::init();
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
-        det.to(brotensor::Device::CUDA);
-        CHECK(det.device() == brotensor::Device::CUDA);
+    const brotensor::Device gpu_dev = brovisionml_test::preferred_gpu();
+    if (gpu_dev != brotensor::Device::CPU) {
+        const char* dev = brovisionml_test::device_name(gpu_dev);
+        det.to(gpu_dev);
+        CHECK(det.device() == gpu_dev);
         EdgeMap gpu = det.detect(g.input.data(), g.W, g.H, 3);
         CHECK(gpu.edge.size() == n);
         if (gpu.edge.size() == n) {
             double mxg = 0.0, mng = 0.0, frg = 0.0, mxc = 0.0, mnc = 0.0, frc = 0.0;
             diff_stats(gpu.edge.data(), g.edge.data(), n, mxg, mng, frg);
             diff_stats(gpu.edge.data(), cpu.edge.data(), n, mxc, mnc, frc);
-            std::printf("    CUDA vs golden: mean-abs=%.3e  vs CPU: max-abs=%.3e\n",
-                        mng, mxc);
-            CHECK(mng < 1e-3);      // CUDA tracks the golden like the CPU path
-            CHECK(mxc < 1e-2);      // CUDA and CPU agree (FP32, same math)
+            std::printf("    %s vs golden: mean-abs=%.3e  vs CPU: max-abs=%.3e\n",
+                        dev, mng, mxc);
+            CHECK(mng < 1e-3);      // GPU tracks the golden like the CPU path
+            CHECK(mxc < 1e-2);      // GPU and CPU agree (FP32, same math)
         }
     } else {
-        std::printf("    (no CUDA device available — on-device check skipped)\n");
+        std::printf("    (no GPU device available — on-device check skipped)\n");
     }
 }
 

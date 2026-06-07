@@ -28,6 +28,8 @@
 
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -239,20 +241,22 @@ int main() {
         run_gates(det, g, "CPU", cpu_maps);
 
         brotensor::init();
-        if (brotensor::is_available(brotensor::Device::CUDA)) {
-            det.to(brotensor::Device::CUDA);
-            CHECK(det.device() == brotensor::Device::CUDA);
-            PafHeatmap cuda_maps;
-            run_gates(det, g, "CUDA", cuda_maps);
-            // CUDA-vs-CPU agreement on the raw maps.
+        const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+        if (gpu != brotensor::Device::CPU) {
+            const char* dev = brovisionml_test::device_name(gpu);
+            det.to(gpu);
+            CHECK(det.device() == gpu);
+            PafHeatmap gpu_maps;
+            run_gates(det, g, dev, gpu_maps);
+            // GPU-vs-CPU agreement on the raw maps.
             double pmx = 0, pmn = 0, hmx = 0, hmn = 0;
-            map_diff(cuda_maps.paf, cpu_maps.paf, pmx, pmn);
-            map_diff(cuda_maps.heatmap, cpu_maps.heatmap, hmx, hmn);
-            std::printf("    CUDA vs CPU: PAF max-abs=%.3e mean-abs=%.3e  "
-                        "HM max-abs=%.3e mean-abs=%.3e\n", pmx, pmn, hmx, hmn);
+            map_diff(gpu_maps.paf, cpu_maps.paf, pmx, pmn);
+            map_diff(gpu_maps.heatmap, cpu_maps.heatmap, hmx, hmn);
+            std::printf("    %s vs CPU: PAF max-abs=%.3e mean-abs=%.3e  "
+                        "HM max-abs=%.3e mean-abs=%.3e\n", dev, pmx, pmn, hmx, hmn);
             CHECK(pmn < 1e-3); CHECK(hmn < 1e-3);
         } else {
-            std::printf("  (no CUDA device available — on-device check skipped)\n");
+            std::printf("  (no GPU device available — on-device check skipped)\n");
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "  error: %s\n", e.what());

@@ -18,6 +18,8 @@
 
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -101,26 +103,28 @@ int main() {
         check(hi > lo, "image varies (not constant)");
         std::printf("CPU image range [%d, %d]\n", lo, hi);
 
-        // ── CPU/CUDA parity (both FP32 today) ──
+        // ── CPU/GPU parity (both FP32 today) ──
         brotensor::init();
-        if (brotensor::is_available(brotensor::Device::CUDA)) {
+        const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+        if (gpu != brotensor::Device::CPU) {
+            const char* dev = brovisionml_test::device_name(gpu);
             Generator gg(cfg);
             gg.load(dir);
-            gg.to(brotensor::Device::CUDA);
-            Tensor zc = z.to(brotensor::Device::CUDA);
-            Image gpu = gg.generate(zc, 0.7f);
+            gg.to(gpu);
+            Tensor zc = z.to(gpu);
+            Image gpu_img = gg.generate(zc, 0.7f);
             long long worst = 0, nbig = 0;
             for (std::size_t i = 0; i < cpu.rgb.size(); ++i) {
-                long long d = std::llabs((long long)cpu.rgb[i] - (long long)gpu.rgb[i]);
+                long long d = std::llabs((long long)cpu.rgb[i] - (long long)gpu_img.rgb[i]);
                 worst = std::max(worst, d);
                 if (d > 4) ++nbig;
             }
             const double frac = (double)nbig / (double)cpu.rgb.size();
-            std::printf("CPU/CUDA worst uint8 diff %lld; %.4f%% of pixels differ by >4\n",
-                        worst, frac * 100.0);
-            check(frac < 0.01, "CPU/CUDA image parity (>99% within 4 levels)");
+            std::printf("CPU/%s worst uint8 diff %lld; %.4f%% of pixels differ by >4\n",
+                        dev, worst, frac * 100.0);
+            check(frac < 0.01, "CPU/GPU image parity (>99% within 4 levels)");
         } else {
-            std::printf("(CUDA not available — parity check skipped)\n");
+            std::printf("(no GPU available — parity check skipped)\n");
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

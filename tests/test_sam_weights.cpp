@@ -26,6 +26,8 @@
 
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -169,25 +171,27 @@ void exercise(brovisionml::sam::Sam& cpu, const std::string& path,
         check(biou >= kMinIoU, "box: mask recovers the disk (IoU)");
     }
 
-    // CPU/CUDA parity on the real weights.
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
-        Sam gpu(make_cfg());
-        gpu.load_file(path);
-        gpu.to(brotensor::Device::CUDA);
-        check(gpu.device() == brotensor::Device::CUDA, "migrated to CUDA");
-        gpu.set_image(img.data(), W, H, 3);
-        Segmentation g = gpu.segment(pt, pt_labels, {}, /*multimask=*/true);
+    // CPU/GPU parity on the real weights.
+    const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+    if (gpu != brotensor::Device::CPU) {
+        const char* dev = brovisionml_test::device_name(gpu);
+        Sam gpu_sam(make_cfg());
+        gpu_sam.load_file(path);
+        gpu_sam.to(gpu);
+        check(gpu_sam.device() == gpu, "migrated to GPU");
+        gpu_sam.set_image(img.data(), W, H, 3);
+        Segmentation g = gpu_sam.segment(pt, pt_labels, {}, /*multimask=*/true);
         check(g.num == seg.num && g.height == H && g.width == W,
               "GPU segmentation shape matches CPU");
         float worst = 0.0f;
         for (std::size_t i = 0; i < seg.logits.size() && i < g.logits.size(); ++i)
             worst = std::max(worst, std::fabs(seg.logits[i] - g.logits[i]));
         if (worst > kMaxLogitDiff) {
-            std::fprintf(stderr, "FAIL: %s CPU/CUDA logit diff %g > %g\n",
-                         label, worst, kMaxLogitDiff);
+            std::fprintf(stderr, "FAIL: %s CPU/%s logit diff %g > %g\n",
+                         label, dev, worst, kMaxLogitDiff);
             ++failures;
         }
-        std::printf("  %s: CUDA parity max abs diff %g\n", label, worst);
+        std::printf("  %s: %s parity max abs diff %g\n", label, dev, worst);
     }
 }
 

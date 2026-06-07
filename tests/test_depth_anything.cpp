@@ -21,6 +21,8 @@
 
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -117,21 +119,23 @@ int main() {
         check(hi - lo > 1e-3f, "depth map varies spatially");
         std::printf("CPU depth range [%.4f, %.4f]\n", lo, hi);
 
-        // ── CPU/CUDA parity ──
+        // ── CPU/GPU parity ──
         brotensor::init();
-        if (brotensor::is_available(brotensor::Device::CUDA)) {
+        const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+        if (gpu != brotensor::Device::CPU) {
+            const char* dev = brovisionml_test::device_name(gpu);
             DepthEstimator gest(DepthAnythingConfig::v2_small());
             gest.load(dir);
-            gest.to(brotensor::Device::CUDA);
+            gest.to(gpu);
             DepthMap gd = gest.estimate(img.data(), W, H, 3);
             float worst = 0.0f, scale = std::max(1e-3f, hi - lo);
             for (std::size_t i = 0; i < dm.depth.size(); ++i)
                 worst = std::max(worst, std::fabs(dm.depth[i] - gd.depth[i]));
-            std::printf("CPU/CUDA worst depth diff %.5f (range scale %.4f)\n", worst, scale);
+            std::printf("CPU/%s worst depth diff %.5f (range scale %.4f)\n", dev, worst, scale);
             // FP16 GPU vs FP32 CPU over a deep ViT + DPT; relative tolerance.
-            check(worst < 0.05f * scale + 1e-2f, "CPU/CUDA depth parity within tolerance");
+            check(worst < 0.05f * scale + 1e-2f, "CPU/GPU depth parity within tolerance");
         } else {
-            std::printf("(CUDA not available — parity check skipped)\n");
+            std::printf("(GPU not available — parity check skipped)\n");
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

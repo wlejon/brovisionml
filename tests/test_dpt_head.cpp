@@ -12,6 +12,8 @@
 #include "brotensor/tensor.h"
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -153,13 +155,15 @@ int main() {
         check(d2.cols == (3 * 14) * (2 * 14), "non-square depth map shape");
     }
 
-    // ── CUDA parity ──
+    // ── GPU parity (CUDA or Metal, whichever this build registered) ──
     brotensor::init();
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
-        head.to(brotensor::Device::CUDA);
-        check(head.device() == brotensor::Device::CUDA, "to(CUDA) moved weights");
+    const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+    if (gpu != brotensor::Device::CPU) {
+        const char* dev = brovisionml_test::device_name(gpu);
+        head.to(gpu);
+        check(head.device() == gpu, "to(gpu) moved weights");
         std::vector<brotensor::Tensor> gmaps;
-        for (auto& m : maps) gmaps.push_back(m.to(brotensor::Device::CUDA));
+        for (auto& m : maps) gmaps.push_back(m.to(gpu));
         brotensor::Tensor gd = head.forward(gmaps, gh, gw);
         brotensor::Tensor back = gd.to(brotensor::Device::CPU);
         float worst = 0.0f;
@@ -168,13 +172,13 @@ int main() {
         for (int i = 0; i < depth.cols; ++i)
             worst = std::max(worst, std::fabs(a[i] - b[i]));
         if (worst > 1e-3f) {
-            std::fprintf(stderr, "FAIL: CPU/CUDA dpt_head diff %g > 1e-3\n", worst);
+            std::fprintf(stderr, "FAIL: CPU/%s dpt_head diff %g > 1e-3\n", dev, worst);
             ++failures;
         } else {
-            std::printf("  CUDA parity OK (worst diff %g)\n", worst);
+            std::printf("  %s parity OK (worst diff %g)\n", dev, worst);
         }
     } else {
-        std::printf("  (CUDA not available — parity check skipped)\n");
+        std::printf("  (no GPU backend — parity check skipped)\n");
     }
 
     if (failures == 0) { std::printf("test_dpt_head: OK\n"); return 0; }

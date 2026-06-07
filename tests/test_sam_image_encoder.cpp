@@ -10,6 +10,8 @@
 #include "brotensor/tensor.h"
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -178,13 +180,15 @@ int main() {
     //    windowed decomposed-rel-pos attention op on CUDA. Skipped cleanly when
     //    no GPU is present. ──
     brotensor::init();
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
-        enc.to(brotensor::Device::CUDA);
-        check(enc.device() == brotensor::Device::CUDA, "to(CUDA) moved weights");
+    const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+    if (gpu != brotensor::Device::CPU) {
+        const char* dev = brovisionml_test::device_name(gpu);
+        enc.to(gpu);
+        check(enc.device() == gpu, "to(gpu) moved weights");
 
-        brotensor::Tensor pixels_gpu = pixels.to(brotensor::Device::CUDA);
+        brotensor::Tensor pixels_gpu = pixels.to(gpu);
         brotensor::Tensor emb_gpu = enc.encode(pixels_gpu);
-        check(emb_gpu.device == brotensor::Device::CUDA,
+        check(emb_gpu.device == gpu,
               "GPU embedding stays on the GPU");
 
         brotensor::Tensor emb_back = emb_gpu.to(brotensor::Device::CPU);
@@ -196,12 +200,12 @@ int main() {
         for (int i = 0; i < emb.cols; ++i)
             worst = std::max(worst, std::fabs(a[i] - b[i]));
         if (worst > 1e-3f) {
-            std::fprintf(stderr, "FAIL: CPU/CUDA embedding diff %g > 1e-3\n", worst);
+            std::fprintf(stderr, "FAIL: CPU/%s embedding diff %g > 1e-3\n", dev, worst);
             ++failures;
         }
-        std::printf("sam_image_encoder: CUDA parity max abs diff %g\n", worst);
+        std::printf("sam_image_encoder: %s parity max abs diff %g\n", dev, worst);
     } else {
-        std::printf("sam_image_encoder: no CUDA device, GPU parity skipped\n");
+        std::printf("sam_image_encoder: no GPU device, GPU parity skipped\n");
     }
 
     std::remove(path.c_str());

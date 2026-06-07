@@ -15,6 +15,8 @@
 #include "brotensor/runtime.h"
 #include "brotensor/tensor.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -135,11 +137,12 @@ int main() {
 
     run_and_check(brotensor::Device::CPU, "cpu");
 
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
-        run_and_check(brotensor::Device::CUDA, "cuda");
+    const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+    if (gpu != brotensor::Device::CPU) {
+        run_and_check(gpu, brovisionml_test::device_name(gpu));
         net.to(brotensor::Device::CPU);
     } else {
-        std::printf("  (CUDA not available — GPU backbone check skipped)\n");
+        std::printf("  (no GPU available — GPU backbone check skipped)\n");
     }
 
     // ── full pipeline (decoder) golden: input -> sigmoid(forwardLogits) ──
@@ -168,16 +171,17 @@ int main() {
             std::printf("  [cpu] alpha: max=%.3e mean=%.3e\n", d.max_abs, d.mean_abs);
             check(d.mean_abs < 3e-3, "full-pipeline alpha mean error within tolerance");
 
-            if (brotensor::is_available(brotensor::Device::CUDA)) {
-                net.to(brotensor::Device::CUDA);
-                Tensor gl = net.forwardLogits(fin.to(brotensor::Device::CUDA), fH, fW);
+            if (gpu != brotensor::Device::CPU) {
+                const char* dev = brovisionml_test::device_name(gpu);
+                net.to(gpu);
+                Tensor gl = net.forwardLogits(fin.to(gpu), fH, fW);
                 Tensor glh = gl.to(brotensor::Device::CPU);
                 std::vector<float> ga(n);
                 const float* glp = glh.host_f32();
                 for (std::size_t i = 0; i < n; ++i) ga[i] = 1.0f / (1.0f + std::exp(-glp[i]));
                 Diff dg = diff(ga.data(), gf[1].data.data(), n);
-                std::printf("  [cuda] alpha: max=%.3e mean=%.3e\n", dg.max_abs, dg.mean_abs);
-                check(dg.mean_abs < 3e-3, "full-pipeline alpha (CUDA) within tolerance");
+                std::printf("  [%s] alpha: max=%.3e mean=%.3e\n", dev, dg.max_abs, dg.mean_abs);
+                check(dg.mean_abs < 3e-3, "full-pipeline alpha (gpu) within tolerance");
                 net.to(brotensor::Device::CPU);
             }
         }

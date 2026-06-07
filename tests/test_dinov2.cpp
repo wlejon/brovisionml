@@ -12,6 +12,8 @@
 #include "brotensor/tensor.h"
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -158,10 +160,12 @@ int main() {
 
     // ── CUDA parity on the 42x28 (interpolated) case ──
     brotensor::init();
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
-        bb.to(brotensor::Device::CUDA);
-        check(bb.device() == brotensor::Device::CUDA, "to(CUDA) moved weights");
-        brotensor::Tensor px_gpu = px.to(brotensor::Device::CUDA);
+    const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+    if (gpu != brotensor::Device::CPU) {
+        const char* dev = brovisionml_test::device_name(gpu);
+        bb.to(gpu);
+        check(bb.device() == gpu, "to(gpu) moved weights");
+        brotensor::Tensor px_gpu = px.to(gpu);
         BackboneOutput o_gpu = bb.encode(px_gpu, 42, 28);
         float worst = 0.0f;
         for (size_t s = 0; s < o_cpu.feature_maps.size(); ++s) {
@@ -172,13 +176,13 @@ int main() {
             for (int i = 0; i < n; ++i) worst = std::max(worst, std::fabs(a[i] - b[i]));
         }
         if (worst > 1e-3f) {
-            std::fprintf(stderr, "FAIL: CPU/CUDA dinov2 diff %g > 1e-3\n", worst);
+            std::fprintf(stderr, "FAIL: CPU/%s dinov2 diff %g > 1e-3\n", dev, worst);
             ++failures;
         } else {
-            std::printf("  CUDA parity OK (worst diff %g)\n", worst);
+            std::printf("  %s parity OK (worst diff %g)\n", dev, worst);
         }
     } else {
-        std::printf("  (CUDA not available — parity check skipped)\n");
+        std::printf("  (no GPU available — parity check skipped)\n");
     }
 
     if (failures == 0) { std::printf("test_dinov2: OK\n"); return 0; }

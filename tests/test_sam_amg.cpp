@@ -20,6 +20,8 @@
 #include "brotensor/safetensors.h"
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -405,8 +407,9 @@ int main() {
         } else {
             Sam sam(SamConfig::vit_b());
             sam.load_file(path);
-            if (brotensor::is_available(brotensor::Device::CUDA))
-                sam.to(brotensor::Device::CUDA);
+            const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+            if (gpu != brotensor::Device::CPU)
+                sam.to(gpu);
 
             const int W = 320, H = 256, cx = 160, cy = 128, r = 80;
             std::vector<uint8_t> gt;

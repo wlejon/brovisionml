@@ -14,6 +14,8 @@
 #include "brotensor/tensor.h"
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -193,13 +195,15 @@ int main() {
 
     // ── CUDA parity (skipped cleanly when no GPU). ──
     brotensor::init();
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
-        dec.to(brotensor::Device::CUDA);
-        check(dec.device() == brotensor::Device::CUDA, "to(CUDA) moved weights");
-        brotensor::Tensor img_g = img.to(brotensor::Device::CUDA);
-        brotensor::Tensor pe_g  = pe.to(brotensor::Device::CUDA);
-        brotensor::Tensor den_g = den.to(brotensor::Device::CUDA);
-        brotensor::Tensor sp_g  = sparse.to(brotensor::Device::CUDA);
+    const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+    if (gpu != brotensor::Device::CPU) {
+        const char* dev = brovisionml_test::device_name(gpu);
+        dec.to(gpu);
+        check(dec.device() == gpu, "to(gpu) moved weights");
+        brotensor::Tensor img_g = img.to(gpu);
+        brotensor::Tensor pe_g  = pe.to(gpu);
+        brotensor::Tensor den_g = den.to(gpu);
+        brotensor::Tensor sp_g  = sparse.to(gpu);
         DecodedMasks gm = dec.decode(img_g, pe_g, sp_g, den_g, /*multimask=*/true);
         brotensor::Tensor gm_cpu = gm.masks.to(brotensor::Device::CPU);
         float worst = 0.0f;
@@ -208,12 +212,12 @@ int main() {
         for (int i = 0; i < mm.masks.rows * mm.masks.cols; ++i)
             worst = std::max(worst, std::fabs(a[i] - b[i]));
         if (worst > 1e-2f) {
-            std::fprintf(stderr, "FAIL: CPU/CUDA mask diff %g > 1e-2\n", worst);
+            std::fprintf(stderr, "FAIL: CPU/%s mask diff %g > 1e-2\n", dev, worst);
             ++failures;
         }
-        std::printf("sam_mask_decoder: CUDA parity max abs diff %g\n", worst);
+        std::printf("sam_mask_decoder: %s parity max abs diff %g\n", dev, worst);
     } else {
-        std::printf("sam_mask_decoder: no CUDA device, GPU parity skipped\n");
+        std::printf("sam_mask_decoder: no GPU device, GPU parity skipped\n");
     }
 
     std::remove(path.c_str());

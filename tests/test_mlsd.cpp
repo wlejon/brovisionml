@@ -22,6 +22,8 @@
 
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -170,19 +172,21 @@ void run_case(const std::string& dir, const std::string& path) {
 
     // On-device: TP map should track CPU + golden tightly (FP32, same math).
     brotensor::init();
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
-        det.to(brotensor::Device::CUDA);
-        CHECK(det.device() == brotensor::Device::CUDA);
+    const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+    if (gpu != brotensor::Device::CPU) {
+        const char* dev = brovisionml_test::device_name(gpu);
+        det.to(gpu);
+        CHECK(det.device() == gpu);
         TpMap gtp = det.infer_tpmap(g.input.data(), g.W, g.H, 3);
         if (gtp.data.size() == g.tp.size()) {
             double mxg = 0, mng = 0, mxc = 0, mnc = 0;
             tp_diff(gtp.data, g.tp, mxg, mng);
             tp_diff(gtp.data, tp.data, mxc, mnc);
-            std::printf("    CUDA TP vs golden: mean-abs=%.3e  vs CPU: max-abs=%.3e\n",
-                        mng, mxc);
-            CHECK(mng < 1e-3);      // CUDA tracks the golden like the CPU path
+            std::printf("    %s TP vs golden: mean-abs=%.3e  vs CPU: max-abs=%.3e\n",
+                        dev, mng, mxc);
+            CHECK(mng < 1e-3);      // GPU tracks the golden like the CPU path
             // The TP logits span tens (center ~[-35,3.5], displacements are large
-            // pixel offsets), so the worst-single-logit CPU/CUDA gap from FP
+            // pixel offsets), so the worst-single-logit CPU/GPU gap from FP
             // accumulation order across the deep depthwise/dilated trunk is ~1.5e-2
             // — the SAME order as the CPU-vs-golden max, i.e. both backends differ
             // from torch by that much, not from each other specifically. mean-abs
@@ -192,11 +196,11 @@ void run_case(const std::string& dir, const std::string& path) {
         }
         LineMap glm = det.detect(g.input.data(), g.W, g.H, 3);
         const double grecall = seg_recall(g.seg, glm.segments, /*tol=*/2.0f);
-        std::printf("    CUDA segments: %zu  recall@2px=%.3f\n",
-                    glm.segments.size(), grecall);
+        std::printf("    %s segments: %zu  recall@2px=%.3f\n",
+                    dev, glm.segments.size(), grecall);
         CHECK(grecall > 0.90);
     } else {
-        std::printf("    (no CUDA device available — on-device check skipped)\n");
+        std::printf("    (no GPU device available — on-device check skipped)\n");
     }
 }
 

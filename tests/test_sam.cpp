@@ -10,6 +10,8 @@
 #include "brotensor/safetensors.h"
 #include "brotensor/runtime.h"
 
+#include "test_device.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -258,11 +260,13 @@ int main() {
     //    decodes on-device; mask postprocess is host either way). Skipped
     //    cleanly when no GPU is present. ──
     brotensor::init();
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
+    const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+    if (gpu != brotensor::Device::CPU) {
+        const char* dev = brovisionml_test::device_name(gpu);
         Sam sam_gpu(cfg);
         sam_gpu.load_file(path);
-        sam_gpu.to(brotensor::Device::CUDA);
-        check(sam_gpu.device() == brotensor::Device::CUDA, "Sam migrated to CUDA");
+        sam_gpu.to(gpu);
+        check(sam_gpu.device() == gpu, "Sam migrated to gpu");
         sam_gpu.set_image(img.data(), W, H, 3);
         Segmentation gseg = sam_gpu.segment(pt, pt_labels, {}, /*multimask=*/true);
         check(gseg.num == seg.num && gseg.height == H && gseg.width == W,
@@ -272,12 +276,12 @@ int main() {
              i < seg.logits.size() && i < gseg.logits.size(); ++i)
             worst = std::max(worst, std::fabs(seg.logits[i] - gseg.logits[i]));
         if (worst > 1e-2f) {
-            std::fprintf(stderr, "FAIL: CPU/CUDA SAM logit diff %g > 1e-2\n", worst);
+            std::fprintf(stderr, "FAIL: CPU/%s SAM logit diff %g > 1e-2\n", dev, worst);
             ++failures;
         }
-        std::printf("sam (end-to-end): CUDA parity max abs diff %g\n", worst);
+        std::printf("sam (end-to-end): %s parity max abs diff %g\n", dev, worst);
     } else {
-        std::printf("sam (end-to-end): no CUDA device, GPU parity skipped\n");
+        std::printf("sam (end-to-end): no GPU device, GPU parity skipped\n");
     }
 
     std::remove(path.c_str());
