@@ -165,6 +165,7 @@ SynthesisLayer::SynthesisLayer(const SynthesisLayerParams& p) {
     conv_kernel_  = p.conv_kernel;
     is_torgb_     = p.is_torgb;
     conv_clamp_   = p.conv_clamp;
+    use_fp16_     = p.use_fp16;
 
     // Temporary sampling rate around the leaky-ReLU (no internal up for ToRGB).
     const double tmp_sr = std::max(p.in_sampling_rate, p.out_sampling_rate) *
@@ -218,10 +219,25 @@ void SynthesisLayer::to(brotensor::Device dev) {
     up_filter   = up_filter.to(dev);
     down_filter = down_filter.to(dev);
     device_     = dev;
+
+    // Pre-cast the frozen params for the FP16 forward fast path (GPU only) so
+    // forward() casts only the per-call activation + styles, never the weights.
+    if (fp16_active()) {
+        const auto h = brotensor::Dtype::FP16;
+        brotensor::cast(weight, weight_h_, h);
+        brotensor::cast(bias, bias_h_, h);
+        brotensor::cast(up_filter, up_filter_h_, h);
+        brotensor::cast(down_filter, down_filter_h_, h);
+    } else {
+        weight_h_ = bias_h_ = up_filter_h_ = down_filter_h_ = {};
+    }
 }
 
 Tensor SynthesisLayer::forward(const Tensor& w, const Tensor& x) const {
-    // Per-channel styles from w.
+    const bool fp16 = fp16_active();
+
+    // Per-channel styles from w (the affine + ToRGB gain stay FP32; styles are
+    // tiny and the demod is sensitive — only the conv/activation tensors go FP16).
     Tensor styles;
     affine.forward(w, styles);                 // (1, in_channels)
     if (is_torgb_) {
@@ -230,11 +246,32 @@ Tensor SynthesisLayer::forward(const Tensor& w, const Tensor& x) const {
         brotensor::scale_inplace(styles, wg);
     }
 
+    // FP16 fast path: route the modulated 1×1 conv to brotensor's WMMA
+    // implicit-GEMM by feeding half activations/styles + the pre-cast half
+    // weights. x arrives FP16 from a prior FP16 layer, or FP32 at the band edge
+    // (cast once here). The frozen weight/bias/filters are the cached half copies.
+    Tensor x_h, styles_h;
+    const Tensor* xp = &x;
+    const Tensor* sp = &styles;
+    const Tensor* wp = &weight;
+    const Tensor* bp = &bias;
+    const Tensor* fup = &up_filter;
+    const Tensor* fdp = &down_filter;
+    if (fp16) {
+        if (x.dtype != brotensor::Dtype::FP16) {
+            brotensor::cast(x, x_h, brotensor::Dtype::FP16);
+            xp = &x_h;
+        }
+        brotensor::cast(styles, styles_h, brotensor::Dtype::FP16);
+        sp = &styles_h;
+        wp = &weight_h_;  bp = &bias_h_;  fup = &up_filter_h_;  fdp = &down_filter_h_;
+    }
+
     // Modulated convolution (demodulate off for ToRGB).
     const int pad = conv_kernel_ - 1;
     Tensor dcoef, yconv;
     brotensor::modulated_conv2d_forward(
-        x, weight, styles, /*N=*/1, in_channels_, in_size_, in_size_,
+        *xp, *wp, *sp, /*N=*/1, in_channels_, in_size_, in_size_,
         out_channels_, conv_kernel_, conv_kernel_, pad, pad,
         /*demodulate=*/!is_torgb_, /*eps=*/1e-8f, dcoef, yconv);
 
@@ -247,10 +284,10 @@ Tensor SynthesisLayer::forward(const Tensor& w, const Tensor& x) const {
     const float slope = is_torgb_ ? 1.0f : 0.2f;
     Tensor up_buf, act_buf, out;
     brotensor::filtered_lrelu_forward(
-        yconv, up_filter, down_filter, &bias, /*N=*/1, out_channels_,
+        yconv, *fup, *fdp, bp, /*N=*/1, out_channels_,
         Hconv, Hconv, up_factor_, down_factor_, pad_lo_, pad_hi_, pad_lo_, pad_hi_,
         gain, slope, static_cast<float>(conv_clamp_), up_buf, act_buf, out);
-    return out;  // (1, out_channels * out_size * out_size)
+    return out;  // (1, out_channels * out_size * out_size); FP16 when fp16_active
 }
 
 // ─── SynthesisNetwork ────────────────────────────────────────────────────────
@@ -291,7 +328,8 @@ SynthesisNetwork::SynthesisNetwork(const Config& cfg) : cfg_(cfg) {
         p.w_dim                 = cfg_.w_dim;
         p.is_torgb              = (idx == L);
         p.is_critically_sampled = (idx >= L - cfg_.num_critical);
-        p.use_fp16              = (sampling_rates[idx] * std::pow(2.0, cfg_.num_fp16_res)
+        p.use_fp16              = !cfg_.force_fp32 &&
+                                  (sampling_rates[idx] * std::pow(2.0, cfg_.num_fp16_res)
                                    > cfg_.img_resolution);
         p.in_channels           = channels[prev];
         p.out_channels          = channels[idx];
@@ -345,6 +383,13 @@ Tensor SynthesisNetwork::forward(const Tensor& ws) const {
     for (std::size_t i = 0; i < layers_.size(); ++i)
         x = layers_[i].forward(row(static_cast<int>(i) + 1), x);
 
+    // The FP16 fast path leaves the final (ToRGB) output in FP16 — bring it back
+    // to FP32 before the output scale so callers (to_image, parity) see FP32.
+    if (x.dtype != brotensor::Dtype::FP32) {
+        Tensor xf;
+        brotensor::cast(x, xf, brotensor::Dtype::FP32);
+        x = std::move(xf);
+    }
     if (cfg_.output_scale != 1.0f) brotensor::scale_inplace(x, cfg_.output_scale);
     return x;  // (1, img_channels * res * res)
 }

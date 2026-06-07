@@ -67,6 +67,7 @@ struct Config {
     int   margin_size        = 10;      // extra pixels outside the image on each side
     float output_scale       = 0.25f;
     int   num_fp16_res       = 4;       // top-N resolutions that run in FP16 on GPU
+    bool  force_fp32         = false;   // disable the FP16 synthesis fast path (debug/parity)
 
     // config-R vs config-T knobs.
     int   conv_kernel        = 1;       // R: 1, T: 3
@@ -319,6 +320,17 @@ private:
     int  pad_lo_ = 0, pad_hi_ = 0;
     float input_gain_ = 1.0f;     // 1/sqrt(magnitude_ema), baked at load
     brotensor::Device device_ = brotensor::Device::CPU;
+
+    // FP16 fast path (GPU only). The reference runs the top num_fp16_res
+    // resolutions in FP16; here it accelerates only forward() (pure synthesis) —
+    // forward_cached()/backward() (inversion) stay FP32 to keep the gradient
+    // path's op contract intact. The modulated 1×1 conv routes to brotensor's
+    // WMMA implicit-GEMM in FP16 (the dominant win); the filtered leaky-ReLU runs
+    // FP16 I/O with FP32 FIR math. Weight/bias/filter FP16 copies are built once
+    // in to() so forward() casts only the (small) activation + styles.
+    bool use_fp16_ = false;       // this layer's resolution is in the FP16 band
+    brotensor::Tensor weight_h_, bias_h_, up_filter_h_, down_filter_h_;
+    bool fp16_active() const { return use_fp16_ && device_ != brotensor::Device::CPU; }
 };
 
 // ─── SynthesisNetwork ────────────────────────────────────────────────────────

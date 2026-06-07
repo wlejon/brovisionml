@@ -317,7 +317,16 @@ int main() {
                                           ? brotensor::Device::CUDA
                                           : brotensor::Device::CPU;
         const char* tag = dev == brotensor::Device::CUDA ? "cuda" : "cpu";
-        Generator gen(Config::r256());
+        // The gradient checks below verify the analytic FP32 backward against
+        // finite differences of the forward — so the forward used as the FD
+        // reference must also be FP32. Disable the FP16 synthesis fast path here
+        // (it's covered by test_stylegan3_parity); otherwise the full-chain FD
+        // would probe an FP16 forward while comparing to an FP32 analytic grad.
+        // invert()/forward_cached() are FP32 regardless, so the round trip is
+        // unaffected.
+        Config cfg = Config::r256();
+        cfg.force_fp32 = true;
+        Generator gen(cfg);
         gen.load(dir);
         gen.to(dev);
 
