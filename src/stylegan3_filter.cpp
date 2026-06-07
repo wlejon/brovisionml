@@ -12,11 +12,35 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
-// Modified Bessel I0 and Bessel J1 via the C++17 special-math functions. These
-// match scipy.special.i0 / j1 (hence numpy.kaiser's window) to ~1e-12, which is
-// what the reference filter design relies on.
+// Modified Bessel I0 and Bessel J1. These match scipy.special.i0 / j1 (hence
+// numpy.kaiser's window) to ~1e-12, which is what the reference filter design
+// relies on.
+//
+// The C++17 special-math functions (P0226) are the natural fit, but libc++
+// (Apple clang / macOS) does not implement them — only libstdc++ and MSVC do.
+// Use them where available and fall back to portable equivalents otherwise:
+// I0 from its defining series (exact to full double precision over the small
+// Kaiser-beta arguments used here) and J1 from the C math library, which both
+// macOS and glibc provide (it is the same fdlibm/Cephes routine scipy.j1 is
+// derived from).
+#if defined(__cpp_lib_math_special_functions) && \
+    __cpp_lib_math_special_functions >= 201603L
 inline double i0(double x)  { return std::cyl_bessel_i(0.0, x); }
 inline double j1(double x)  { return std::cyl_bessel_j(1.0, x); }
+#else
+inline double i0(double x) {
+    // I0(x) = sum_{k>=0} (x^2/4)^k / (k!)^2
+    const double y = 0.25 * x * x;
+    double term = 1.0, sum = 1.0;
+    for (int k = 1; k < 256; ++k) {
+        term *= y / (static_cast<double>(k) * static_cast<double>(k));
+        sum += term;
+        if (term <= sum * 1e-18) break;
+    }
+    return sum;
+}
+inline double j1(double x)  { return ::j1(x); }
+#endif
 
 // numpy sinc: sin(pi x)/(pi x), with sinc(0) = 1.
 inline double sinc(double x) {
