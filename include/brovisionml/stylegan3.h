@@ -318,4 +318,51 @@ private:
     std::vector<std::string>     layer_names_;
 };
 
+// ─── Generator ───────────────────────────────────────────────────────────────
+//
+// The StyleGAN3-R generator facade: mapping + synthesis loaded from one
+// converted safetensors checkpoint (scripts/convert-stylegan3.py). Exposes the
+// pieces a lab needs — z -> W+ (map), W+ -> raw image (synthesize), and the
+// one-shot z -> 8-bit RGB (generate) — so latent-space editing and (later)
+// inversion / adapter training can be driven a step at a time.
+
+struct Image {
+    int width = 0, height = 0, channels = 0;
+    std::vector<unsigned char> rgb;   // HWC, row-major, interleaved channels
+};
+
+class Generator {
+public:
+    explicit Generator(Config cfg);
+
+    void load(const std::string& dir);          // dir + "/model.safetensors"
+    void load_file(const std::string& path);    // single converted checkpoint
+    void to(brotensor::Device dev);
+    brotensor::Device device() const { return device_; }
+    const Config& config() const { return cfg_; }
+
+    // z: (1, z_dim) FP32 -> W+: (num_ws, w_dim) FP32.
+    brotensor::Tensor map(const brotensor::Tensor& z,
+                          float truncation_psi = 1.0f,
+                          int truncation_cutoff = -1) const;
+
+    // W+: (num_ws, w_dim) -> raw FP32 image (1, img_channels*res*res) NCHW.
+    brotensor::Tensor synthesize(const brotensor::Tensor& ws) const;
+
+    // z -> 8-bit RGB image: map -> synthesize -> (x*127.5+128).clamp(0,255).
+    Image generate(const brotensor::Tensor& z,
+                   float truncation_psi = 1.0f,
+                   int truncation_cutoff = -1) const;
+
+    int num_ws() const { return cfg_.num_ws(); }
+    MappingNetwork& mapping() { return mapping_; }
+    SynthesisNetwork& synthesis() { return synthesis_; }
+
+private:
+    Config cfg_;
+    brotensor::Device device_ = brotensor::Device::CPU;
+    MappingNetwork   mapping_;
+    SynthesisNetwork synthesis_;
+};
+
 }  // namespace brovisionml::stylegan3

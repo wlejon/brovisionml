@@ -56,6 +56,13 @@ Models implemented:
   Mix-Transformer (MiT) encoder + all-MLP decode head producing an ADE20K class
   map, tied together by a `SegformerDetector` orchestrator and a `segformer_seg`
   CLI driver. See below.
+- **StyleGAN3-R** — alias-free image *generation* (NVlabs "Alias-Free GAN",
+  the rotation-equivariant config-R), **runnable end to end** on CPU or CUDA:
+  a mapping network (z → w+) and an alias-free synthesis network (Fourier-feature
+  input + modulated 1×1 convs + filtered-leaky-ReLU resampling with designed
+  Kaiser/radial low-pass filters), tied together by a `Generator` facade and a
+  `stylegan3_generate` CLI driver. The repo's first *generative* model — it runs
+  the data flow the other models reverse (latent → image). See below.
 
 The DINOv2 backbone and DPT head are a reusable substrate shared by the
 DPT-style tasks here (Depth-Anything, DSINE).
@@ -667,6 +674,68 @@ preprocess → encoder → head → upsample → argmax and compares the per-pix
 map: **99.99 %** pixel agreement on both backends (the handful of disagreements
 are sub-pixel-boundary class flips under interpolation rounding). CPU and CUDA
 agree on the logits to ~3.8e-6 mean-abs and produce **identical** class maps.
+
+## StyleGAN3-R (image generation)
+
+The first *generative* model in brovisionml: NVlabs StyleGAN3 in its
+rotation-equivariant **config-R** form. It runs the data flow every other model
+here reverses — a latent **z → w+ → RGB image** — and composes the StyleGAN3 op
+primitives that live in `brotensor` (`modulated_conv2d`, `upfirdn2d`,
+`bias_act`, `filtered_lrelu`, the sin/cos Fourier elementwise, `pixel_norm`)
+rather than shipping its own kernels.
+
+Two sub-networks, mirroring `networks_stylegan3.py`:
+
+- **`MappingNetwork`** — `z → w+`. Normalizes `z` to unit second moment
+  (`pixel_norm`), runs two leaky-ReLU fully-connected layers (with the 0.01
+  learning-rate-multiplier gains baked in at load), broadcasts to `num_ws =
+  num_layers + 2` rows, and applies truncation toward the stored `w_avg`. Runs
+  in FP32 on every device, as the reference does.
+- **`SynthesisNetwork`** — `w+ → image`. A `SynthesisInput` Fourier-feature map
+  (a learned affine turns `w[0]` into a per-sample rotation+translation applied
+  to fixed random frequencies, sampled on a grid as `sin` features and mixed by
+  a learned matrix), followed by `num_layers + 1` `SynthesisLayer`s (the last
+  being ToRGB). Each layer is `affine → modulated 1×1 conv → filtered
+  leaky-ReLU`, with per-layer up/down factors, padding, and **designed**
+  low-pass filters (separable Kaiser/firwin for upsampling, radially-symmetric
+  jinc for the non-critical config-R downsampling) derived from the band-limit
+  schedule — the filters are computed here, not read from the checkpoint.
+
+The `Generator` facade ties them together and exposes the lab-facing surface:
+`map(z) → w+`, `synthesize(w+) → raw FP32 image`, and the one-shot
+`generate(z) → 8-bit RGB`. Because the underlying brotensor ops carry their
+backward passes, this same forward is the basis for latent-space editing and
+(future) GAN-inversion / adapter training driven from the broworkshop lab.
+
+### Weights
+
+StyleGAN3 ships as NVlabs Python *pickles*, not safetensors, so there is a
+one-time conversion step (the only model here that needs one):
+
+```bash
+python scripts/convert-stylegan3.py stylegan3-r-afhqv2-512x512.pkl \
+    weights/stylegan3-r-afhqv2-512/model.safetensors \
+    --repo /path/to/NVlabs/stylegan3
+```
+
+The converter flattens the EMA generator's `state_dict` into FP32 safetensors
+with the exact tensor names the loader reads (`mapping.fc{i}.*`, `mapping.w_avg`,
+`synthesis.input.*`, `synthesis.L{idx}_{size}_{channels}.*`); the per-layer
+`up_filter`/`down_filter` buffers are dropped since brovisionml designs them.
+
+Generate an image with the CLI driver:
+
+```bash
+stylegan3_generate weights/stylegan3-r-afhqv2-512 --res 512 --seed 42 \
+    --trunc 0.7 --out out.png --cuda
+```
+
+The end-to-end test (`test_stylegan3_generate`) runs structural checks always;
+when a converted checkpoint is present under `weights/` it runs the full
+pipeline and asserts the image shape, finiteness, spatial variation, and
+CPU/CUDA parity. The synthesis path is FP32 on both backends today; the
+reference's FP16 fast path for the high-resolution layers is a later
+optimization.
 
 ## License
 

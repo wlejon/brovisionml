@@ -159,6 +159,7 @@ target_sources(brovisionml PRIVATE
     src/stylegan3_mapping.cpp
     src/stylegan3_filter.cpp
     src/stylegan3_synthesis.cpp
+    src/stylegan3.cpp
 )
 
 # brovisionml's own CUDA kernels (DSINE RayReLU + AngMF propagate). Compiled into
@@ -201,7 +202,7 @@ endif()
 # --- Tools ---
 option(BROVISIONML_TOOLS "Build brovisionml CLI tools" ON)
 if(BROVISIONML_TOOLS AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    foreach(tool sam_segment sam_amg depth_estimate normal_estimate hed_edges lineart mlsd_lines openpose_pose segformer_seg)
+    foreach(tool sam_segment sam_amg depth_estimate normal_estimate hed_edges lineart mlsd_lines openpose_pose segformer_seg stylegan3_generate)
         add_executable(${tool} tools/${tool}.cpp)
         target_link_libraries(${tool} PRIVATE brovisionml)
         if(MSVC)
