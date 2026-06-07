@@ -52,8 +52,10 @@ using brotensor::Tensor;
 void config_checks() {
     Config c = Config::r256();
     check(c.img_resolution == 256, "r256 resolution");
-    check(c.channel_base == 65536, "config-R channel_base doubled");
-    check(c.channel_max == 1024, "config-R channel_max doubled");
+    // Config-R shares channel_base=32768 with config-T; it differs by raising
+    // channel_max to 1024 (the released pickles' init_kwargs confirm 32768/1024).
+    check(c.channel_base == 32768, "config-R channel_base 32768");
+    check(c.channel_max == 1024, "config-R channel_max raised to 1024");
     check(c.conv_kernel == 1, "config-R 1x1 conv");
     check(c.use_radial_filters, "config-R radial filters");
     check(c.num_ws() == c.num_layers + 2, "num_ws = num_layers + 2");

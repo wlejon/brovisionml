@@ -19,7 +19,7 @@ using brotensor::Tensor;
 static Config config_r(int resolution) {
     Config c;
     c.img_resolution    = resolution;
-    c.channel_base      = 65536;
+    c.channel_base      = 32768;
     c.channel_max       = 1024;
     c.conv_kernel       = 1;
     c.use_radial_filters = true;

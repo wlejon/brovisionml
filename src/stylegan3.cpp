@@ -44,9 +44,10 @@ Tensor Generator::synthesize(const Tensor& ws) const {
 
 Image Generator::generate(const Tensor& z, float truncation_psi,
                           int truncation_cutoff) const {
-    Tensor ws  = map(z, truncation_psi, truncation_cutoff);
-    Tensor img = synthesize(ws);              // (1, C*H*W) NCHW on device
+    return render(map(z, truncation_psi, truncation_cutoff));
+}
 
+Image Generator::to_image(const Tensor& img) const {
     const int C = cfg_.img_channels;
     const int H = cfg_.img_resolution;
     const int W = cfg_.img_resolution;

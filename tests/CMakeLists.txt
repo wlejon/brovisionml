@@ -44,6 +44,15 @@ brovisionml_add_test(brovisionml_test_stylegan3_synthesis test_stylegan3_synthes
 brovisionml_add_test(brovisionml_test_stylegan3_generate test_stylegan3_generate.cpp)
 target_compile_definitions(brovisionml_test_stylegan3_generate PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+# StyleGAN3-R NVlabs numeric-parity test: the config-R channel schedule always
+# runs; the golden parity part is gated on the converted checkpoint
+# (weights/stylegan3-r-ffhqu-256/model.safetensors, via
+# scripts/convert-stylegan3.py) and the golden_stylegan3.bin dump under
+# weights/stylegan3-r-ffhqu-256/golden (scripts/dump-stylegan3-golden.py,
+# generated out-of-repo, never committed); skips cleanly when either is absent.
+brovisionml_add_test(brovisionml_test_stylegan3_parity test_stylegan3_parity.cpp)
+target_compile_definitions(brovisionml_test_stylegan3_parity PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
 
 # Real-checkpoint end-to-end test: loads actual facebook/sam-vit-* weights from
 # weights/ (downloaded via scripts/download-weights.sh) and skips cleanly when

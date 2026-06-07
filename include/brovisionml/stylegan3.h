@@ -14,10 +14,12 @@
 // read from the checkpoint, exactly as the reference designs them at __init__.
 //
 // Config-R is the default and only preset family exposed: conv_kernel = 1,
-// channel_base = 65536, channel_max = 1024, radially-symmetric down filters.
+// channel_base = 32768, channel_max = 1024, radially-symmetric down filters.
 // (The config-T translation-equivariant variant is a parameter change away —
 // conv_kernel = 3, channel_base = 32768, channel_max = 512, separable filters —
-// but the released-weight target here is the -r models.)
+// but the released-weight target here is the -r models.) Both share
+// channel_base = 32768; config-R differs by raising channel_max to 1024, not by
+// doubling channel_base (the released pickles' init_kwargs confirm 32768/1024).
 //
 // Pieces are split across translation units the way the reference splits
 // classes: stylegan3_mapping.cpp (FullyConnectedLayer + MappingNetwork),
@@ -53,7 +55,7 @@ struct Config {
     float w_avg_beta     = 0.998f;  // EMA decay (training only; inference reads the w_avg buffer)
 
     // Synthesis network.
-    int   channel_base       = 65536;   // config-R: 32768 * 2
+    int   channel_base       = 32768;   // config-R/-T share 32768; R bumps channel_max
     int   channel_max        = 1024;    // config-R: 512 * 2
     int   num_layers         = 14;      // synthesis layers excluding Fourier input and ToRGB
     int   num_critical       = 2;       // critically-sampled layers at the end
@@ -348,6 +350,16 @@ public:
 
     // W+: (num_ws, w_dim) -> raw FP32 image (1, img_channels*res*res) NCHW.
     brotensor::Tensor synthesize(const brotensor::Tensor& ws) const;
+
+    // A raw FP32 synthesis image (1, img_channels*res*res) NCHW -> 8-bit RGB,
+    // (x*127.5+128).clamp(0,255). The reference's uint8 post-process, factored
+    // out so a caller holding a W+ (latent editing, interpolation) can render
+    // without re-deriving it.
+    Image to_image(const brotensor::Tensor& img) const;
+
+    // W+: (num_ws, w_dim) -> 8-bit RGB image. synthesize + to_image; the entry
+    // point for a lab that edits W+ directly.
+    Image render(const brotensor::Tensor& ws) const { return to_image(synthesize(ws)); }
 
     // z -> 8-bit RGB image: map -> synthesize -> (x*127.5+128).clamp(0,255).
     Image generate(const brotensor::Tensor& z,
