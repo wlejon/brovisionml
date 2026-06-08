@@ -60,76 +60,83 @@ Tensor seeded_z(int z_dim, unsigned long long seed) {
 
 }  // namespace
 
+// End-to-end generate for one checkpoint: CPU render varies + (when a GPU is
+// present) CPU/GPU image parity. Both backends are FP32 today.
+static void run_checkpoint(const std::string& dir, const Config& cfg, int res,
+                           brotensor::Device gpu) {
+    Generator g(cfg);
+    g.load(dir);
+    Tensor z = seeded_z(cfg.z_dim, /*seed=*/42);
+
+    Image cpu = g.generate(z, /*truncation_psi=*/0.7f);
+    check(cpu.width == res && cpu.height == res && cpu.channels == 3,
+          "image shape res x res x 3");
+    int lo = 255, hi = 0;
+    for (unsigned char v : cpu.rgb) { lo = std::min(lo, (int)v); hi = std::max(hi, (int)v); }
+    check(hi > lo, "image varies (not constant)");
+    std::printf("  CPU image range [%d, %d]\n", lo, hi);
+
+    if (gpu != brotensor::Device::CPU) {
+        const char* dev = brovisionml_test::device_name(gpu);
+        Generator gg(cfg);
+        gg.load(dir);
+        gg.to(gpu);
+        Image gpu_img = gg.generate(z.to(gpu), 0.7f);
+        long long worst = 0, nbig = 0;
+        for (std::size_t i = 0; i < cpu.rgb.size(); ++i) {
+            long long d = std::llabs((long long)cpu.rgb[i] - (long long)gpu_img.rgb[i]);
+            worst = std::max(worst, d);
+            if (d > 4) ++nbig;
+        }
+        const double frac = (double)nbig / (double)cpu.rgb.size();
+        std::printf("  CPU/%s worst uint8 diff %lld; %.4f%% of pixels differ by >4\n",
+                    dev, worst, frac * 100.0);
+        check(frac < 0.01, "CPU/GPU image parity (>99% within 4 levels)");
+    } else {
+        std::printf("  (no GPU available — parity check skipped)\n");
+    }
+}
+
 int main() {
-    // ── Always-on structural checks ──
+    // ── Always-on structural checks (config-R and config-T both 16 W+ rows) ──
     check(Generator(Config::r256()).num_ws() == 16, "r256 num_ws");
     check(Generator(Config::r1024()).num_ws() == 16, "r1024 num_ws");
+    check(Generator(Config::t256()).num_ws() == 16, "t256 num_ws");
 
-    // ── Locate a converted checkpoint (clean skip if absent) ──
+    // ── Run every converted checkpoint present (clean skip if none) ──
     std::string base = BROVISIONML_WEIGHTS_DIR;
     if (const char* env = std::getenv("BROVISIONML_WEIGHTS_DIR")) base = env;
     struct Cand { const char* dir; int res; Config (*cfg)(); };
     const Cand cands[] = {
-        {"stylegan3-r-afhqv2-256",  256,  &Config::r256},
         {"stylegan3-r-ffhqu-256",   256,  &Config::r256},
+        {"stylegan3-t-ffhqu-256",   256,  &Config::t256},
         {"stylegan3-r-afhqv2-512",  512,  &Config::r512},
+        {"stylegan3-t-afhqv2-512",  512,  &Config::t512},
         {"stylegan3-r-ffhq-1024",   1024, &Config::r1024},
+        {"stylegan3-t-ffhq-1024",   1024, &Config::t1024},
     };
-    std::string dir, ckpt;
-    Config cfg = Config::r256();
-    int res = 0;
-    for (const Cand& c : cands) {
-        std::string d = base + "/" + c.dir;
-        std::string f = d + "/model.safetensors";
-        if (file_exists(f)) { dir = d; ckpt = f; cfg = c.cfg(); res = c.res; break; }
-    }
-    if (ckpt.empty()) {
-        std::printf("test_stylegan3_generate: no converted checkpoint under %s — "
-                    "skipping the weights-gated run (structural checks passed).\n",
-                    base.c_str());
-        return failures == 0 ? 0 : 1;
-    }
 
+    brotensor::init();
+    const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+
+    int ran = 0;
     try {
-        Generator g(cfg);
-        g.load(dir);
-        Tensor z = seeded_z(cfg.z_dim, /*seed=*/42);
-
-        Image cpu = g.generate(z, /*truncation_psi=*/0.7f);
-        check(cpu.width == res && cpu.height == res && cpu.channels == 3,
-              "image shape res x res x 3");
-        int lo = 255, hi = 0;
-        for (unsigned char v : cpu.rgb) { lo = std::min(lo, (int)v); hi = std::max(hi, (int)v); }
-        check(hi > lo, "image varies (not constant)");
-        std::printf("CPU image range [%d, %d]\n", lo, hi);
-
-        // ── CPU/GPU parity (both FP32 today) ──
-        brotensor::init();
-        const brotensor::Device gpu = brovisionml_test::preferred_gpu();
-        if (gpu != brotensor::Device::CPU) {
-            const char* dev = brovisionml_test::device_name(gpu);
-            Generator gg(cfg);
-            gg.load(dir);
-            gg.to(gpu);
-            Tensor zc = z.to(gpu);
-            Image gpu_img = gg.generate(zc, 0.7f);
-            long long worst = 0, nbig = 0;
-            for (std::size_t i = 0; i < cpu.rgb.size(); ++i) {
-                long long d = std::llabs((long long)cpu.rgb[i] - (long long)gpu_img.rgb[i]);
-                worst = std::max(worst, d);
-                if (d > 4) ++nbig;
-            }
-            const double frac = (double)nbig / (double)cpu.rgb.size();
-            std::printf("CPU/%s worst uint8 diff %lld; %.4f%% of pixels differ by >4\n",
-                        dev, worst, frac * 100.0);
-            check(frac < 0.01, "CPU/GPU image parity (>99% within 4 levels)");
-        } else {
-            std::printf("(no GPU available — parity check skipped)\n");
+        for (const Cand& c : cands) {
+            std::string d = base + "/" + c.dir;
+            if (!file_exists(d + "/model.safetensors")) continue;
+            std::printf("test_stylegan3_generate: %s\n", c.dir);
+            run_checkpoint(d, c.cfg(), c.res, gpu);
+            ++ran;
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
+
+    if (ran == 0)
+        std::printf("test_stylegan3_generate: no converted checkpoint under %s — "
+                    "skipping the weights-gated run (structural checks passed).\n",
+                    base.c_str());
 
     if (failures == 0) { std::printf("test_stylegan3_generate: OK\n"); return 0; }
     std::printf("test_stylegan3_generate: %d failure(s)\n", failures);

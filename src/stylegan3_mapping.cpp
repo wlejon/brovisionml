@@ -26,9 +26,26 @@ static Config config_r(int resolution) {
     return c;
 }
 
+// config-T: translation-equivariant. The released pickles' init_kwargs state
+// channel_base/max = 16384/512 (half config-R's 32768/1024), a 3x3 conv, and
+// separable (non-radial) low-pass filters. Everything else matches config-R.
+static Config config_t(int resolution) {
+    Config c;
+    c.img_resolution    = resolution;
+    c.channel_base      = 16384;
+    c.channel_max       = 512;
+    c.conv_kernel       = 3;
+    c.use_radial_filters = false;
+    return c;
+}
+
 Config Config::r256()  { return config_r(256); }
 Config Config::r512()  { return config_r(512); }
 Config Config::r1024() { return config_r(1024); }
+
+Config Config::t256()  { return config_t(256); }
+Config Config::t512()  { return config_t(512); }
+Config Config::t1024() { return config_t(1024); }
 
 // ─── FullyConnectedLayer ─────────────────────────────────────────────────────
 

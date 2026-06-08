@@ -136,71 +136,83 @@ void run_gates(const std::string& dir, const Config& cfg, const Golden& g,
 
 }  // namespace
 
-int main() {
-    // ── Always-on structural check: the corrected config-R channel schedule ──
-    {
-        Generator g(Config::r256());
-        check(g.num_ws() == 16, "r256 num_ws == 16");
-        // The tapering channel counts are encoded in the synthesis layer names.
-        const auto& names = g.synthesis().layer_names();
-        const char* expect[] = {
-            "L0_36_1024", "L1_36_1024", "L2_36_1024", "L3_52_1024", "L4_52_1024",
-            "L5_84_1024", "L6_84_1024", "L7_148_724", "L8_148_512", "L9_148_362",
-            "L10_276_256", "L11_276_181", "L12_276_128", "L13_256_128", "L14_256_3",
-        };
-        check(names.size() == 15, "r256 has 15 synthesis layers");
-        if (names.size() == 15) {
-            for (int i = 0; i < 15; ++i)
-                check(names[i] == expect[i], expect[i]);
-        }
-    }
+// Verify a generator's synthesis channel schedule (the tapering channel counts
+// are encoded in the layer names) against the reference for that config.
+static void check_schedule(const char* tag, const Config& cfg,
+                           const std::vector<std::string>& expect) {
+    Generator g(cfg);
+    check(g.num_ws() == 16, "num_ws == 16");
+    const auto& names = g.synthesis().layer_names();
+    check(names.size() == expect.size(), "synthesis layer count");
+    if (names.size() == expect.size())
+        for (std::size_t i = 0; i < expect.size(); ++i)
+            check(names[i] == expect[i], expect[i].c_str());
+    (void)tag;
+}
 
-    // ── Locate the converted checkpoint + golden (clean skip if absent) ──
+int main() {
+    // ── Always-on structural check: the config-R and config-T channel schedules.
+    // config-R caps channels at 1024, config-T at 512 (16384/512 base/max), and
+    // config-T's 3x3 conv leaves the schedule otherwise identically shaped. ──
+    check_schedule("r256", Config::r256(), {
+        "L0_36_1024", "L1_36_1024", "L2_36_1024", "L3_52_1024", "L4_52_1024",
+        "L5_84_1024", "L6_84_1024", "L7_148_724", "L8_148_512", "L9_148_362",
+        "L10_276_256", "L11_276_181", "L12_276_128", "L13_256_128", "L14_256_3",
+    });
+    check_schedule("t256", Config::t256(), {
+        "L0_36_512", "L1_36_512", "L2_36_512", "L3_52_512", "L4_52_512",
+        "L5_84_512", "L6_84_512", "L7_148_362", "L8_148_256", "L9_148_181",
+        "L10_276_128", "L11_276_91", "L12_276_64", "L13_256_64", "L14_256_3",
+    });
+
     std::string base = BROVISIONML_WEIGHTS_DIR;
     if (const char* env = std::getenv("BROVISIONML_WEIGHTS_DIR")) base = env;
-    const std::string dir   = base + "/stylegan3-r-ffhqu-256";
-    const std::string ckpt  = dir + "/model.safetensors";
-    const std::string gpath = dir + "/golden/golden_stylegan3.bin";
 
-    Golden g;
-    const bool have_ckpt = file_exists(ckpt);
-    const bool have_gold = read_golden(gpath, g);
-    if (!have_ckpt || !have_gold) {
-        std::printf("test_stylegan3_parity: structural OK; parity SKIPPED "
-                    "(ckpt=%d golden=%d under %s)\n",
-                    have_ckpt ? 1 : 0, have_gold ? 1 : 0, base.c_str());
-        return failures == 0 ? 0 : 1;
-    }
+    brotensor::init();
+    const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+    int ran = 0;
 
-    check(g.z_dim == 512 && g.num_ws == 16 && g.w_dim == 512, "golden dims (z/ws)");
-    check(g.channels == 3 && g.height == 256 && g.width == 256, "golden dims (img)");
-
-    try {
-        const Config cfg = Config::r256();
-        // FP32 on both backends. Mapping is a couple of matmuls + a lerp, so it's
-        // tight; synthesis threads many upfirdn/filtered-lrelu stages, so it
-        // accumulates more — but still far under the image's ~[-1,1] range.
-        // Observed FP32 errors are mapping ~2e-7 / synthesis ~2e-4 max on both
-        // backends; these bounds keep >100x headroom (cross-GPU FP32 variance,
-        // and the future FP16 synthesis fast path) while still failing hard on a
-        // schedule/weight regression, which lands errors of order 0.1-1.0.
-        std::printf("test_stylegan3_parity: ffhqu-256 (seed-replayed golden)\n");
+    // Run both gates for one (subdir, cfg) checkpoint on CPU + GPU; clean-skip if
+    // the converted checkpoint / golden aren't present. FP32 on both backends:
+    // mapping is a couple of matmuls + a lerp (tight); synthesis threads many
+    // upfirdn/filtered-lrelu stages (accumulates more) — but still far under the
+    // image's ~[-1,1] range. Tolerances keep >100x headroom over observed FP32
+    // error (cross-GPU variance + the FP16 fast path) yet fail hard on a
+    // schedule/weight regression, which lands errors of order 0.1-1.0.
+    auto run_parity = [&](const char* subdir, const Config& cfg) {
+        const std::string dir   = base + "/" + subdir;
+        const std::string ckpt  = dir + "/model.safetensors";
+        const std::string gpath = dir + "/golden/golden_stylegan3.bin";
+        Golden g;
+        if (!file_exists(ckpt) || !read_golden(gpath, g)) {
+            std::printf("test_stylegan3_parity: %s parity SKIPPED (no ckpt/golden)\n",
+                        subdir);
+            return;
+        }
+        check(g.z_dim == 512 && g.num_ws == 16 && g.w_dim == 512, "golden dims (z/ws)");
+        check(g.channels == 3, "golden dims (img channels)");
+        std::printf("test_stylegan3_parity: %s (seed-replayed golden)\n", subdir);
         run_gates(dir, cfg, g, brotensor::Device::CPU, "cpu",
                   /*ws_tol_mean=*/5e-4, /*img_tol_mean=*/5e-3, /*img_tol_max=*/5e-2);
-
-        brotensor::init();
-        const brotensor::Device gpu = brovisionml_test::preferred_gpu();
-        if (gpu != brotensor::Device::CPU) {
-            const char* dev = brovisionml_test::device_name(gpu);
-            run_gates(dir, cfg, g, gpu, dev,
+        if (gpu != brotensor::Device::CPU)
+            run_gates(dir, cfg, g, gpu, brovisionml_test::device_name(gpu),
                       /*ws_tol_mean=*/5e-4, /*img_tol_mean=*/5e-3, /*img_tol_max=*/5e-2);
-        } else {
+        else
             std::printf("  (no GPU available — GPU parity skipped)\n");
-        }
+        ++ran;
+    };
+
+    try {
+        run_parity("stylegan3-r-ffhqu-256", Config::r256());
+        run_parity("stylegan3-t-ffhqu-256", Config::t256());
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
+
+    if (ran == 0)
+        std::printf("test_stylegan3_parity: structural OK; parity SKIPPED "
+                    "(no checkpoints under %s)\n", base.c_str());
 
     if (failures == 0) { std::printf("test_stylegan3_parity: OK\n"); return 0; }
     std::printf("test_stylegan3_parity: %d failure(s)\n", failures);

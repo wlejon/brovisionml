@@ -40,7 +40,8 @@ namespace brovisionml::stylegan3 {
 //
 // One struct carries the whole generator's hyperparameters — the mapping and
 // synthesis sub-networks read the fields they need. `r256/r512/r1024` are the
-// released config-R presets; `num_ws()` is derived, not stored.
+// released config-R presets and `t256/t512/t1024` the config-T presets;
+// `num_ws()` is derived, not stored.
 struct Config {
     // Latent dimensionalities.
     int z_dim = 512;   // input latent Z
@@ -83,6 +84,12 @@ struct Config {
     static Config r256();
     static Config r512();
     static Config r1024();
+
+    // config-T presets (translation-equivariant): channel_base/max = 16384/512,
+    // 3x3 conv, separable filters. Same resolutions as the config-R presets.
+    static Config t256();
+    static Config t512();
+    static Config t1024();
 };
 
 namespace detail {
