@@ -64,17 +64,24 @@ Tensor seeded_z(int z_dim, unsigned long long seed) {
 // present) CPU/GPU image parity. Both backends are FP32 today.
 static void run_checkpoint(const std::string& dir, const Config& cfg, int res,
                            brotensor::Device gpu) {
-    Generator g(cfg);
-    g.load(dir);
+    // The CPU forward is single-threaded FP32; fine at 256², far too slow at 512²+.
+    // At higher resolutions run GPU-only (generate + sanity); CPU/GPU parity is
+    // established at 256².
+    const bool run_cpu = res <= 256;
     Tensor z = seeded_z(cfg.z_dim, /*seed=*/42);
 
-    Image cpu = g.generate(z, /*truncation_psi=*/0.7f);
-    check(cpu.width == res && cpu.height == res && cpu.channels == 3,
-          "image shape res x res x 3");
-    int lo = 255, hi = 0;
-    for (unsigned char v : cpu.rgb) { lo = std::min(lo, (int)v); hi = std::max(hi, (int)v); }
-    check(hi > lo, "image varies (not constant)");
-    std::printf("  CPU image range [%d, %d]\n", lo, hi);
+    Image cpu;
+    if (run_cpu) {
+        Generator g(cfg);
+        g.load(dir);
+        cpu = g.generate(z, /*truncation_psi=*/0.7f);
+        check(cpu.width == res && cpu.height == res && cpu.channels == 3,
+              "image shape res x res x 3");
+        int lo = 255, hi = 0;
+        for (unsigned char v : cpu.rgb) { lo = std::min(lo, (int)v); hi = std::max(hi, (int)v); }
+        check(hi > lo, "image varies (not constant)");
+        std::printf("  CPU image range [%d, %d]\n", lo, hi);
+    }
 
     if (gpu != brotensor::Device::CPU) {
         const char* dev = brovisionml_test::device_name(gpu);
@@ -82,16 +89,27 @@ static void run_checkpoint(const std::string& dir, const Config& cfg, int res,
         gg.load(dir);
         gg.to(gpu);
         Image gpu_img = gg.generate(z.to(gpu), 0.7f);
-        long long worst = 0, nbig = 0;
-        for (std::size_t i = 0; i < cpu.rgb.size(); ++i) {
-            long long d = std::llabs((long long)cpu.rgb[i] - (long long)gpu_img.rgb[i]);
-            worst = std::max(worst, d);
-            if (d > 4) ++nbig;
+        check(gpu_img.width == res && gpu_img.height == res && gpu_img.channels == 3,
+              "image shape res x res x 3");
+        if (run_cpu) {
+            long long worst = 0, nbig = 0;
+            for (std::size_t i = 0; i < cpu.rgb.size(); ++i) {
+                long long d = std::llabs((long long)cpu.rgb[i] - (long long)gpu_img.rgb[i]);
+                worst = std::max(worst, d);
+                if (d > 4) ++nbig;
+            }
+            const double frac = (double)nbig / (double)cpu.rgb.size();
+            std::printf("  CPU/%s worst uint8 diff %lld; %.4f%% of pixels differ by >4\n",
+                        dev, worst, frac * 100.0);
+            check(frac < 0.01, "CPU/GPU image parity (>99% within 4 levels)");
+        } else {
+            int lo = 255, hi = 0;
+            for (unsigned char v : gpu_img.rgb) { lo = std::min(lo, (int)v); hi = std::max(hi, (int)v); }
+            check(hi > lo, "image varies (not constant)");
+            std::printf("  %s image range [%d, %d] (CPU skipped at %d²)\n", dev, lo, hi, res);
         }
-        const double frac = (double)nbig / (double)cpu.rgb.size();
-        std::printf("  CPU/%s worst uint8 diff %lld; %.4f%% of pixels differ by >4\n",
-                    dev, worst, frac * 100.0);
-        check(frac < 0.01, "CPU/GPU image parity (>99% within 4 levels)");
+    } else if (!run_cpu) {
+        std::printf("  (no GPU and %d² — nothing run)\n", res);
     } else {
         std::printf("  (no GPU available — parity check skipped)\n");
     }

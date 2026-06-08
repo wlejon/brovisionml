@@ -58,8 +58,8 @@ struct Config {
     float w_avg_beta     = 0.998f;  // EMA decay (training only; inference reads the w_avg buffer)
 
     // Synthesis network.
-    int   channel_base       = 32768;   // config-R/-T share 32768; R bumps channel_max
-    int   channel_max        = 1024;    // config-R: 512 * 2
+    int   channel_base       = 32768;   // resolution-dependent (see presets): R 256→32768, 512/1024→65536
+    int   channel_max        = 1024;    // per variant: config-R 1024, config-T 512
     int   num_layers         = 14;      // synthesis layers excluding Fourier input and ToRGB
     int   num_critical       = 2;       // critically-sampled layers at the end
     float first_cutoff       = 2.0f;    // f_{c,0}

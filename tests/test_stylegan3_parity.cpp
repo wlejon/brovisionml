@@ -164,6 +164,13 @@ int main() {
         "L5_84_512", "L6_84_512", "L7_148_362", "L8_148_256", "L9_148_181",
         "L10_276_128", "L11_276_91", "L12_276_64", "L13_256_64", "L14_256_3",
     });
+    // 512² uses the larger channel_base (65536 for config-R): more channels stay
+    // clamped at channel_max before the taper, and the size schedule ramps faster.
+    check_schedule("r512", Config::r512(), {
+        "L0_36_1024", "L1_36_1024", "L2_52_1024", "L3_52_1024", "L4_84_1024",
+        "L5_84_1024", "L6_148_1024", "L7_148_967", "L8_276_645", "L9_276_431",
+        "L10_532_287", "L11_532_192", "L12_532_128", "L13_512_128", "L14_512_3",
+    });
 
     std::string base = BROVISIONML_WEIGHTS_DIR;
     if (const char* env = std::getenv("BROVISIONML_WEIGHTS_DIR")) base = env;
@@ -192,11 +199,20 @@ int main() {
         check(g.z_dim == 512 && g.num_ws == 16 && g.w_dim == 512, "golden dims (z/ws)");
         check(g.channels == 3, "golden dims (img channels)");
         std::printf("test_stylegan3_parity: %s (seed-replayed golden)\n", subdir);
-        run_gates(dir, cfg, g, brotensor::Device::CPU, "cpu",
-                  /*ws_tol_mean=*/5e-4, /*img_tol_mean=*/5e-3, /*img_tol_max=*/5e-2);
+        // The CPU synthesis forward is a single-threaded FP32 full-generator pass;
+        // at 256² that's seconds, but at 512²+ (with the larger channel_base) it's
+        // many minutes. Run the CPU gate only at <=256; at higher resolutions the
+        // GPU gate vs. the same NVlabs CPU golden is the numeric check.
+        if (g.height <= 256)
+            run_gates(dir, cfg, g, brotensor::Device::CPU, "cpu",
+                      /*ws_tol_mean=*/5e-4, /*img_tol_mean=*/5e-3, /*img_tol_max=*/5e-2);
+        else
+            std::printf("  (%d² — CPU gate skipped (too slow); GPU only)\n", g.height);
         if (gpu != brotensor::Device::CPU)
             run_gates(dir, cfg, g, gpu, brovisionml_test::device_name(gpu),
                       /*ws_tol_mean=*/5e-4, /*img_tol_mean=*/5e-3, /*img_tol_max=*/5e-2);
+        else if (g.height > 256)
+            std::printf("  (no GPU — %d² parity not verified this run)\n", g.height);
         else
             std::printf("  (no GPU available — GPU parity skipped)\n");
         ++ran;
@@ -205,6 +221,7 @@ int main() {
     try {
         run_parity("stylegan3-r-ffhqu-256", Config::r256());
         run_parity("stylegan3-t-ffhqu-256", Config::t256());
+        run_parity("stylegan3-r-afhqv2-512", Config::r512());
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;

@@ -16,23 +16,34 @@ using brotensor::Tensor;
 
 // ─── Config presets ──────────────────────────────────────────────────────────
 
+// channel_base is resolution-dependent in the released zoo, not constant per
+// config family: the 256² FFHQ-U checkpoints are the "cheap" config trained with
+// --cbase=16384, while 512/1024 use the default --cbase=32768 (NVlabs
+// docs/configs.md). Config-R then internally doubles channel_base, config-T does
+// not — so the *pickle* init_kwargs read: R 256→32768, 512/1024→65536; T
+// 256→16384, 512/1024→32768. channel_max stays constant per variant (R 1024,
+// T 512). Getting this wrong yields the right layer sizes but wrong channel
+// counts, so the by-name weight load fails loudly (missing 'L*_*_<count>').
+static int base_for(int resolution, int base256) {
+    return resolution <= 256 ? base256 : base256 * 2;
+}
+
 static Config config_r(int resolution) {
     Config c;
     c.img_resolution    = resolution;
-    c.channel_base      = 32768;
+    c.channel_base      = base_for(resolution, 32768);
     c.channel_max       = 1024;
     c.conv_kernel       = 1;
     c.use_radial_filters = true;
     return c;
 }
 
-// config-T: translation-equivariant. The released pickles' init_kwargs state
-// channel_base/max = 16384/512 (half config-R's 32768/1024), a 3x3 conv, and
-// separable (non-radial) low-pass filters. Everything else matches config-R.
+// config-T: translation-equivariant — 3x3 conv, separable (non-radial) filters,
+// and half config-R's channel budget (channel_max 512, channel_base 16384/32768).
 static Config config_t(int resolution) {
     Config c;
     c.img_resolution    = resolution;
-    c.channel_base      = 16384;
+    c.channel_base      = base_for(resolution, 16384);
     c.channel_max       = 512;
     c.conv_kernel       = 3;
     c.use_radial_filters = false;
