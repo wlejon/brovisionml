@@ -464,7 +464,13 @@ public:
         brotensor::Tensor w;          // (num_ws, w_dim) recovered W+
         float             loss = 0.0f; // final image-space MSE
     };
-    InvertResult invert(const Image& target, const InvertOptions& opt = {}) const;
+    InvertResult invert(const Image& target, const InvertOptions& opt) const;
+    // Overload rather than a `= {}` default arg: a default-constructed nested
+    // InvertOptions in the declarator needs Generator's default member
+    // initializers, which Apple clang refuses while Generator is still
+    // incomplete. Inside a member-function body the class is complete, so this
+    // is well-formed and keeps the `invert(target)` call site working.
+    InvertResult invert(const Image& target) const { return invert(target, InvertOptions{}); }
 
     int num_ws() const { return cfg_.num_ws(); }
     MappingNetwork& mapping() { return mapping_; }
