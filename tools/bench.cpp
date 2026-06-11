@@ -244,6 +244,7 @@ int main(int argc, char** argv) {
             load_any(det, ckpt);
             det.to(dev);
             bench_stages(dev, warmup, reps, {
+                {"infer",  [&] { (void)det.infer_maps(px.data(), w, h, channels); }},
                 {"detect", [&] { (void)det.detect(px.data(), w, h, channels); }},
             });
         } else if (family == "segformer") {

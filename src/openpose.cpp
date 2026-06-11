@@ -1,6 +1,7 @@
 #include "brovisionml/openpose.h"
 
 #include "brotensor/ops.h"
+#include "brotensor/runtime.h"
 #include "brotensor/safetensors.h"
 
 #include "broimage/geometric.h"
@@ -182,6 +183,7 @@ struct Connection {
 
 struct OpenposeDetector::Impl {
     bool loaded = false;
+    bool fp16 = false;
     brotensor::Device device = brotensor::Device::CPU;
 
     std::vector<Conv> model0;    // VGG trunk convs (in order); maxpools implicit
@@ -267,13 +269,27 @@ void OpenposeDetector::to(brotensor::Device dev) {
     Impl& m = *impl_;
     if (!m.loaded) fail("to() called before load()");
     if (dev == m.device) return;
-    auto mv      = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
+    // Mixed precision on a GPU backend: every conv is a WMMA-covered shape
+    // (3x3 p1 VGG trunk + stage 1, 7x7 p3 refinement stages, 1x1 projections)
+    // and max_pool / concat / relu all have FP16 paths, so the whole network
+    // runs FP16 and only the final l1/l2 maps are widened before the host
+    // postprocess. CPU stays all-FP32; to(CPU) widens back.
+    const bool fp16 = dev != brotensor::Device::CPU &&
+                      brotensor::compute_dtype() == brotensor::Dtype::FP16;
+    const brotensor::Dtype want = fp16 ? brotensor::Dtype::FP16
+                                       : brotensor::Dtype::FP32;
+    auto mv = [&](Tensor& t) {
+        if (!t.data) return;
+        t = t.to(dev);
+        if (t.dtype != want) { Tensor c; brotensor::cast(t, c, want); t = std::move(c); }
+    };
     auto mv_conv = [&](Conv& c) { mv(c.weight); mv(c.bias); };
     auto mv_br   = [&](Branch& b) { for (Conv& c : b.convs) mv_conv(c); };
     for (Conv& c : m.model0) mv_conv(c);
     mv_br(m.s1_l1); mv_br(m.s1_l2);
     for (int s = 0; s < 5; ++s) { mv_br(m.sN_l1[s]); mv_br(m.sN_l2[s]); }
     m.device = dev;
+    m.fp16 = fp16;
 }
 
 brotensor::Device OpenposeDetector::device() const { return impl_->device; }
@@ -287,6 +303,11 @@ PafHeatmap OpenposeDetector::run(const PreprocessedImage& pp) const {
     int H = pp.transform.pad_h, W = pp.transform.pad_w;
     Tensor x = (m.device == brotensor::Device::CPU) ? pp.pixels
                                                      : pp.pixels.to(m.device);
+    if (m.fp16) {
+        Tensor h;
+        brotensor::cast(x, h, brotensor::Dtype::FP16);
+        x = std::move(h);
+    }
 
     // model0 trunk.
     int cur_c = 3;
@@ -323,12 +344,18 @@ PafHeatmap OpenposeDetector::run(const PreprocessedImage& pp) const {
         l2 = std::move(nl2);
     }
 
-    // Pull to host.
-    auto to_host = [](const Tensor& t) -> Tensor {
+    // Widen the final maps back to FP32 and pull to host; the gaussian-blur /
+    // peak-NMS postprocess stays FP32 on the host.
+    auto to_host = [](Tensor t) -> Tensor {
+        if (t.dtype != brotensor::Dtype::FP32) {
+            Tensor f;
+            brotensor::cast(t, f, brotensor::Dtype::FP32);
+            t = std::move(f);
+        }
         return (t.device == brotensor::Device::CPU) ? t
                                                      : t.to(brotensor::Device::CPU);
     };
-    Tensor h1 = to_host(l1), h2 = to_host(l2);
+    Tensor h1 = to_host(std::move(l1)), h2 = to_host(std::move(l2));
 
     PafHeatmap out;
     out.paf_c = 38;
