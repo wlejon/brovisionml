@@ -178,11 +178,16 @@ int main() {
     // ── CUDA parity: the same encoder on the GPU must match the CPU result.
     //    Exercises the device-neutral path end to end, including the new
     //    windowed decomposed-rel-pos attention op on CUDA. Skipped cleanly when
-    //    no GPU is present. ──
+    //    no GPU is present. On a GPU whose compute dtype is FP16, to() takes
+    //    the mixed-precision path, so the bound covers half round-off rather
+    //    than FP32 noise (a transcription bug moves the diff by orders of
+    //    magnitude past either bound). ──
     brotensor::init();
     const brotensor::Device gpu = brovisionml_test::preferred_gpu();
     if (gpu != brotensor::Device::CPU) {
         const char* dev = brovisionml_test::device_name(gpu);
+        const float tol =
+            brotensor::compute_dtype() == brotensor::Dtype::FP16 ? 5e-2f : 1e-3f;
         enc.to(gpu);
         check(enc.device() == gpu, "to(gpu) moved weights");
 
@@ -199,8 +204,9 @@ int main() {
         const float* b = emb_back.host_f32();
         for (int i = 0; i < emb.cols; ++i)
             worst = std::max(worst, std::fabs(a[i] - b[i]));
-        if (worst > 1e-3f) {
-            std::fprintf(stderr, "FAIL: CPU/%s embedding diff %g > 1e-3\n", dev, worst);
+        if (worst > tol) {
+            std::fprintf(stderr, "FAIL: CPU/%s embedding diff %g > %g\n",
+                         dev, worst, tol);
             ++failures;
         }
         std::printf("sam_image_encoder: %s parity max abs diff %g\n", dev, worst);

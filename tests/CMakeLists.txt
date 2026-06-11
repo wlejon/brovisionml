@@ -33,6 +33,8 @@ brovisionml_add_test(brovisionml_test_sam_image_encoder test_sam_image_encoder.c
 brovisionml_add_test(brovisionml_test_sam_prompt_encoder test_sam_prompt_encoder.cpp)
 brovisionml_add_test(brovisionml_test_sam_mask_decoder   test_sam_mask_decoder.cpp)
 brovisionml_add_test(brovisionml_test_sam               test_sam.cpp)
+target_compile_definitions(brovisionml_test_sam PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
 brovisionml_add_test(brovisionml_test_sam_amg           test_sam_amg.cpp)
 brovisionml_add_test(brovisionml_test_stylegan3_mapping test_stylegan3_mapping.cpp)
 target_compile_definitions(brovisionml_test_stylegan3_mapping PRIVATE

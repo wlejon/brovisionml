@@ -12,11 +12,14 @@
 
 #include "test_device.h"
 
+#define _CRT_SECURE_NO_WARNINGS  // std::getenv for the weights-dir override
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -285,6 +288,74 @@ int main() {
     }
 
     std::remove(path.c_str());
+
+    // ── Real-checkpoint mixed-precision parity (weights-gated, GPU only). ──
+    // to(GPU) under a CPU DeviceScope pins compute_dtype() to FP32, so the
+    // weights migrate without the FP16 cast — the exact GPU path. A plain
+    // to(GPU) takes the production mixed-precision path. The two encoders
+    // drift by FP16 round-off; what must survive is the thresholded mask, so
+    // the gate is IoU of the binarized best masks.
+    if (gpu != brotensor::Device::CPU) {
+        std::string base = BROVISIONML_WEIGHTS_DIR;
+        if (const char* env = std::getenv("BROVISIONML_WEIGHTS_DIR")) base = env;
+        const std::string rckpt = base + "/sam-vit-base/model.safetensors";
+        if (std::ifstream(rckpt, std::ios::binary).good()) {
+            const int RW = 320, RH = 240;
+            std::vector<uint8_t> rimg(static_cast<std::size_t>(RW) * RH * 3);
+            for (int y = 0; y < RH; ++y)
+                for (int x = 0; x < RW; ++x) {
+                    const std::size_t o = (static_cast<std::size_t>(y) * RW + x) * 3;
+                    // A bright disc on a dark gradient — a real, segmentable blob.
+                    const float dx = (x - RW * 0.5f) / (RW * 0.25f);
+                    const float dy = (y - RH * 0.5f) / (RH * 0.25f);
+                    const bool inside = dx * dx + dy * dy < 1.0f;
+                    rimg[o + 0] = inside ? 230 : static_cast<uint8_t>(x / 4);
+                    rimg[o + 1] = inside ? 200 : static_cast<uint8_t>(y / 4);
+                    rimg[o + 2] = inside ? 40  : 60;
+                }
+            const std::vector<std::array<float, 2>> rpt = {{RW * 0.5f, RH * 0.5f}};
+            const std::vector<int> rlbl = {1};
+
+            SamConfig rcfg = SamConfig::vit_b();
+            Sam exact(rcfg);
+            exact.load_file(rckpt);
+            {
+                brotensor::DeviceScope sc(brotensor::Device::CPU);
+                exact.to(gpu);                        // FP32 weights on the GPU
+            }
+            exact.set_image(rimg.data(), RW, RH, 3);
+            Segmentation s32 = exact.segment(rpt, rlbl, {}, /*multimask=*/true);
+
+            Sam mixed(rcfg);
+            mixed.load_file(rckpt);
+            mixed.to(gpu);                            // production FP16 path
+            mixed.set_image(rimg.data(), RW, RH, 3);
+            Segmentation s16 = mixed.segment(rpt, rlbl, {}, /*multimask=*/true);
+
+            check(s16.num == s32.num, "real ckpt: mask count matches");
+            const int b32 = s32.best(), b16 = s16.best();
+            const std::size_t plane = static_cast<std::size_t>(RH) * RW;
+            const float* m32 = s32.logits.data() + b32 * plane;
+            const float* m16 = s16.logits.data() + b16 * plane;
+            std::size_t inter = 0, uni = 0;
+            for (std::size_t i = 0; i < plane; ++i) {
+                const bool a = m32[i] > 0.0f, b = m16[i] > 0.0f;
+                inter += (a && b);
+                uni   += (a || b);
+            }
+            const double iou = uni ? static_cast<double>(inter) / uni : 1.0;
+            std::printf("sam (end-to-end): real-ckpt FP32/FP16 best-mask IoU %.4f "
+                        "(union %zu px)\n", iou, uni);
+            if (uni == 0 || iou < 0.98) {
+                std::fprintf(stderr,
+                             "FAIL: real ckpt FP32/FP16 mask IoU %.4f < 0.98\n", iou);
+                ++failures;
+            }
+        } else {
+            std::printf("sam (end-to-end): no real checkpoint at %s — "
+                        "mixed-precision parity skipped\n", rckpt.c_str());
+        }
+    }
 
     if (failures) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);

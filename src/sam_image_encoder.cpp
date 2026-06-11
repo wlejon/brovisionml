@@ -3,6 +3,8 @@
 #include "brotensor/ops.h"
 #include "brotensor/safetensors.h"
 
+#include "profile.h"
+
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -251,19 +253,38 @@ void layer_norm_2d(Tensor& X, const Tensor& gamma, const Tensor& beta,
 void ImageEncoder::to(brotensor::Device dev) {
     if (!w_->loaded) fail("to() called before load()");
     if (dev == device_) return;
-    auto mv = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
-    mv(w_->patch_w); mv(w_->patch_b); mv(w_->pos_embed);
+    // Mixed precision on a GPU backend (the DINOv3 pattern): everything that
+    // reads the bounded LayerNorm'd stream — patch embed, q/k/v + output
+    // projection + rel-pos tables (the decomposed rel-pos op requires one
+    // dtype across all of them), and both MLP linears — runs FP16; the
+    // residual stream, LayerNorms, pos_embed and the neck stay FP32. SAM has
+    // no LayerScale and its ViT activations stay well inside FP16 range, so
+    // unlike DINOv3 the residual-writing projections can run FP16 too. CPU
+    // stays all-FP32 (the exact parity path); to(CPU) widens back.
+    const bool fp16 = dev != brotensor::Device::CPU &&
+                      brotensor::compute_dtype() == brotensor::Dtype::FP16;
+    auto to_dt = [&](Tensor& t, brotensor::Dtype want) {
+        if (!t.data) return;
+        t = t.to(dev);
+        if (t.dtype != want) { Tensor c; brotensor::cast(t, c, want); t = std::move(c); }
+    };
+    const brotensor::Dtype half = fp16 ? brotensor::Dtype::FP16
+                                       : brotensor::Dtype::FP32;
+    auto mv   = [&](Tensor& t) { to_dt(t, brotensor::Dtype::FP32); };
+    auto mv16 = [&](Tensor& t) { to_dt(t, half); };
+    mv16(w_->patch_w); mv16(w_->patch_b); mv(w_->pos_embed);
     for (BlockWeights& b : w_->blocks) {
         mv(b.ln1_w); mv(b.ln1_b);
-        mv(b.q_w); mv(b.q_b); mv(b.k_w); mv(b.k_b); mv(b.v_w); mv(b.v_b);
-        mv(b.proj_w); mv(b.proj_b);
-        mv(b.rel_pos_h); mv(b.rel_pos_w);
+        mv16(b.q_w); mv16(b.q_b); mv16(b.k_w); mv16(b.k_b); mv16(b.v_w); mv16(b.v_b);
+        mv16(b.proj_w); mv16(b.proj_b);
+        mv16(b.rel_pos_h); mv16(b.rel_pos_w);
         mv(b.ln2_w); mv(b.ln2_b);
-        mv(b.mlp1_w); mv(b.mlp1_b); mv(b.mlp2_w); mv(b.mlp2_b);
+        mv16(b.mlp1_w); mv16(b.mlp1_b); mv16(b.mlp2_w); mv16(b.mlp2_b);
     }
     mv(w_->neck_c1_w); mv(w_->neck_ln1_w); mv(w_->neck_ln1_b);
     mv(w_->neck_c2_w); mv(w_->neck_ln2_w); mv(w_->neck_ln2_b);
     device_ = dev;
+    fp16_ = fp16;
 }
 
 brotensor::Tensor ImageEncoder::encode(const brotensor::Tensor& pixels) const {
@@ -283,47 +304,74 @@ brotensor::Tensor ImageEncoder::encode(const brotensor::Tensor& pixels) const {
     const float scale = 1.0f / std::sqrt(static_cast<float>(cfg_.head_dim()));
     const float eps   = cfg_.layer_norm_eps;
 
+    // Mixed precision (fp16_, GPU only): the residual stream x and every
+    // LayerNorm stay FP32; inputs drop to FP16 just to feed the FP16-weight
+    // GEMM/attention ops, and each result widens back as it re-enters the
+    // residual. No-op pass-throughs when fp16_ is off.
+    auto to16 = [&](const Tensor& t) {
+        if (!fp16_) return t;
+        Tensor c; brotensor::cast(t, c, brotensor::Dtype::FP16); return c;
+    };
+    auto to32 = [&](const Tensor& t) {
+        if (!fp16_) return t;
+        Tensor c; brotensor::cast(t, c, brotensor::Dtype::FP32); return c;
+    };
+    auto linear = [&](const Tensor& W, const Tensor& bias, const Tensor& X,
+                      Tensor& Y) {
+        if (fp16_) brotensor::linear_forward_batched_fp16(W, &bias, X, Y);
+        else       brotensor::linear_forward_batched(W, bias, X, Y);
+    };
+
     // 1. Patch embed: conv 3->D, kernel=stride=patch, no padding -> (1, D*g*g).
+    Tensor px = to16(pixels);
     Tensor feat;
-    brotensor::conv2d_forward(pixels, w_->patch_w, &w_->patch_b,
+    brotensor::conv2d_forward(px, w_->patch_w, &w_->patch_b,
                               /*N=*/1, cfg_.in_chans, S, S,
                               /*C_out=*/D, p, p,
                               /*stride=*/p, p, /*pad=*/0, 0, /*dil=*/1, 1, feat);
 
     // 2. NCHW -> token-major (g*g, D), then add absolute position embedding.
-    Tensor x;
-    brotensor::nchw_to_sequence(feat, 1, D, g, g, x);
+    Tensor seq;
+    brotensor::nchw_to_sequence(feat, 1, D, g, g, seq);
+    Tensor x = to32(seq);                      // FP32 residual stream
     brotensor::add_inplace(x, w_->pos_embed);
+    detail::profile_mark(device_, "patch embed");
 
     // 3. Transformer blocks.
     for (const BlockWeights& b : w_->blocks) {
         // Attention sub-block: x = x + attn(LN1(x)).
         Tensor h;
         brotensor::layernorm_forward_inference_batched(x, b.ln1_w, b.ln1_b, h, eps);
+        Tensor hc = to16(h);
         Tensor attn;
         if (b.global) {
             brotensor::self_attention_decomposed_rel_pos_forward(
-                h, b.q_w, &b.q_b, b.k_w, &b.k_b, b.v_w, &b.v_b,
+                hc, b.q_w, &b.q_b, b.k_w, &b.k_b, b.v_w, &b.v_b,
                 b.proj_w, &b.proj_b, b.rel_pos_h, b.rel_pos_w,
                 cfg_.num_heads, g, g, scale, attn);
         } else {
             brotensor::self_attention_decomposed_rel_pos_windowed_forward(
-                h, b.q_w, &b.q_b, b.k_w, &b.k_b, b.v_w, &b.v_b,
+                hc, b.q_w, &b.q_b, b.k_w, &b.k_b, b.v_w, &b.v_b,
                 b.proj_w, &b.proj_b, b.rel_pos_h, b.rel_pos_w,
                 cfg_.num_heads, g, g, cfg_.window_size, scale, attn);
         }
-        brotensor::add_inplace(x, attn);
+        Tensor attn32 = to32(attn);
+        brotensor::add_inplace(x, attn32);
+        detail::profile_mark(device_, b.global ? "blk attn global" : "blk attn win");
 
         // MLP sub-block: x = x + lin2(gelu(lin1(LN2(x)))).
         Tensor h2;
         brotensor::layernorm_forward_inference_batched(x, b.ln2_w, b.ln2_b, h2, eps);
+        Tensor h2c = to16(h2);
         Tensor m1;
-        brotensor::linear_forward_batched(b.mlp1_w, b.mlp1_b, h2, m1);
+        linear(b.mlp1_w, b.mlp1_b, h2c, m1);
         Tensor act;
         brotensor::gelu_exact_forward(m1, act);
         Tensor m2;
-        brotensor::linear_forward_batched(b.mlp2_w, b.mlp2_b, act, m2);
-        brotensor::add_inplace(x, m2);
+        linear(b.mlp2_w, b.mlp2_b, act, m2);
+        Tensor m2f = to32(m2);
+        brotensor::add_inplace(x, m2f);
+        detail::profile_mark(device_, "blk mlp");
     }
 
     // 4. Neck: back to NCHW, conv1 (1x1) -> LN2d -> conv2 (3x3) -> LN2d.
@@ -340,6 +388,7 @@ brotensor::Tensor ImageEncoder::encode(const brotensor::Tensor& pixels) const {
     brotensor::conv2d_forward(c1, w_->neck_c2_w, /*bias=*/nullptr,
                               1, out, g, g, out, 3, 3, 1, 1, 1, 1, 1, 1, c2);
     layer_norm_2d(c2, w_->neck_ln2_w, w_->neck_ln2_b, out, g, g, eps);
+    detail::profile_mark(device_, "neck");
 
     return c2;  // (1, out*g*g) NCHW image embedding
 }

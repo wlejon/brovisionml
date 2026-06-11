@@ -2,6 +2,8 @@
 
 #include "brotensor/ops.h"
 
+#include "profile.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <stdexcept>
@@ -71,11 +73,14 @@ void Sam::to(brotensor::Device dev) {
 // ─── Encode image once ───────────────────────────────────────────────────────
 
 void Sam::set_image(const uint8_t* pixels, int w, int h, int channels) {
+    detail::profile_mark(device_, nullptr);
     PreprocessedImage pp = preprocess(pixels, w, h, channels, cfg_.encoder.img_size);
     transform_ = pp.transform;
+    detail::profile_mark(device_, "preprocess");
     Tensor px = (device_ == brotensor::Device::CPU) ? pp.pixels
                                                      : pp.pixels.to(device_);
     image_embedding_ = enc_.encode(px);   // (1, D*grid*grid) on device_
+    detail::profile_mark(device_, "encode");
     has_image_ = true;
 }
 

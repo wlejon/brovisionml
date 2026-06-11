@@ -86,8 +86,11 @@ public:
     void load(const std::string& dir);
     void load_file(const std::string& path);
 
-    // Migrate the loaded weights onto `dev` (FP32 preserved). encode() then runs
-    // on `dev` and expects a pixel tensor resident there. No-op if already on
+    // Migrate the loaded weights onto `dev`. encode() then runs on `dev` and
+    // expects a pixel tensor resident there. On a GPU backend whose compute
+    // dtype is FP16, GEMM/attention weights migrate to FP16 (mixed precision —
+    // the residual stream, LayerNorms and pos_embed stay FP32); the CPU keeps
+    // its exact all-FP32 path, and to(CPU) widens back. No-op if already on
     // `dev`. Throws if weights aren't loaded yet.
     void to(brotensor::Device dev);
 
@@ -109,6 +112,7 @@ private:
     EncoderConfig                   cfg_;
     std::unique_ptr<EncoderWeights> w_;
     brotensor::Device               device_ = brotensor::Device::CPU;
+    bool fp16_ = false;  // weights migrated to FP16 (set by to() on a GPU backend)
 };
 
 }  // namespace brovisionml::sam
