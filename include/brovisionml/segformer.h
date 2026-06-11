@@ -112,6 +112,12 @@ public:
     static std::vector<uint8_t> colorize(const SegMap& m);
 
 private:
+    // Encoder + decode head on a pre-normalized pixel tensor; returns the
+    // logits NCHW (num_labels, grid_h, grid_w) ON THE COMPUTE DEVICE so
+    // detect() can upsample + argmax there without a logits download.
+    brotensor::Tensor infer_logits_dev_(const brotensor::Tensor& pixels,
+                                        int* grid_h, int* grid_w) const;
+
     SegformerConfig cfg_;
     struct Impl;
     std::unique_ptr<Impl> impl_;

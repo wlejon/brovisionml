@@ -5,11 +5,13 @@
 #include "brotensor/ops.h"
 #include "brotensor/safetensors.h"
 
+#include "profile.h"
 #include "weights_util.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -212,7 +214,6 @@ Tensor attention_biased(const AttnWeights& a, const Tensor& x, int C, int heads,
     const int Nq = x.rows;        // H*W
     const int Nk = ctx.rows;      // reduced grid (or H*W)
     const int hd = C / heads;
-    const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
 
     // q = x @ Wq^T + bq  -> (Nq, C); k,v = ctx @ Wk^T + bk -> (Nk, C).
     Tensor q, k, v;
@@ -220,56 +221,31 @@ Tensor attention_biased(const AttnWeights& a, const Tensor& x, int C, int heads,
     brotensor::linear_forward_batched(a.k_w, a.k_b, ctx, k);
     brotensor::linear_forward_batched(a.v_w, a.v_b, ctx, v);
 
-    // Pull to host for the per-head SDPA; these are small (b0: Nq<=16384,
-    // Nk<=256). Compose on the host then push the (Nq,C) context back. The heavy
-    // ops (conv, linear) ran on-device; this attention math is light.
-    Tensor qh = (q.device == brotensor::Device::CPU) ? q : q.to(brotensor::Device::CPU);
-    Tensor kh = (k.device == brotensor::Device::CPU) ? k : k.to(brotensor::Device::CPU);
-    Tensor vh = (v.device == brotensor::Device::CPU) ? v : v.to(brotensor::Device::CPU);
-    const float* qp = qh.host_f32();
-    const float* kp = kh.host_f32();
-    const float* vp = vh.host_f32();
-
-    Tensor out = Tensor::mat(Nq, C);
-    float* op = out.host_f32_mut();
-
-    std::vector<float> scores(Nk);
-    for (int hh = 0; hh < heads; ++hh) {
-        const int off = hh * hd;
-        for (int i = 0; i < Nq; ++i) {
-            const float* qi = qp + static_cast<std::size_t>(i) * C + off;
-            // scores = scale * q·k
-            float maxv = -1e30f;
-            for (int j = 0; j < Nk; ++j) {
-                const float* kj = kp + static_cast<std::size_t>(j) * C + off;
-                float s = 0.0f;
-                for (int d = 0; d < hd; ++d) s += qi[d] * kj[d];
-                s *= scale;
-                scores[j] = s;
-                if (s > maxv) maxv = s;
-            }
-            float denom = 0.0f;
-            for (int j = 0; j < Nk; ++j) {
-                float e = std::exp(scores[j] - maxv);
-                scores[j] = e;
-                denom += e;
-            }
-            const float inv = 1.0f / denom;
-            float* oi = op + static_cast<std::size_t>(i) * C + off;
-            for (int d = 0; d < hd; ++d) oi[d] = 0.0f;
-            for (int j = 0; j < Nk; ++j) {
-                const float w = scores[j] * inv;
-                const float* vj = vp + static_cast<std::size_t>(j) * C + off;
-                for (int d = 0; d < hd; ++d) oi[d] += w * vj[d];
-            }
-        }
+    // Single-sequence varlen cross-attention, FP32 on either backend: the full
+    // grid's Nq queries attend the (optionally sr-reduced) Nk keys. cu_seqlens
+    // are built host-side (Tensor::zeros would land on the default device) and
+    // migrated alongside q/k/v.
+    Tensor cu_q = Tensor::zeros_on(brotensor::Device::CPU, 2, 1,
+                                   brotensor::Dtype::INT32);
+    static_cast<int32_t*>(cu_q.data)[1] = Nq;
+    Tensor cu_k = Tensor::zeros_on(brotensor::Device::CPU, 2, 1,
+                                   brotensor::Dtype::INT32);
+    static_cast<int32_t*>(cu_k.data)[1] = Nk;
+    if (q.device != brotensor::Device::CPU) {
+        cu_q = cu_q.to(q.device);
+        cu_k = cu_k.to(q.device);
     }
+    Tensor out;
+    brotensor::flash_attention_varlen_forward(
+        q, k, v,
+        static_cast<const int32_t*>(cu_q.data),
+        static_cast<const int32_t*>(cu_k.data),
+        /*batch_size=*/1, /*max_seqlen_q=*/Nq, /*max_seqlen_k=*/Nk,
+        heads, hd, /*causal=*/false, out);
 
-    // Output projection: out @ Wo^T + bo. Push context back to the device first.
-    Tensor ctx_dev = (a.o_w.device == brotensor::Device::CPU)
-                         ? out : out.to(a.o_w.device);
+    // Output projection: out @ Wo^T + bo.
     Tensor proj;
-    brotensor::linear_forward_batched(a.o_w, a.o_b, ctx_dev, proj);
+    brotensor::linear_forward_batched(a.o_w, a.o_b, out, proj);
     return proj;   // (Nq, C)
 }
 
@@ -441,6 +417,7 @@ void run_block(const BlockWeights& b, Tensor& x, int C, int heads,
         brotensor::layernorm_forward_inference_batched(x, b.ln1_w, b.ln1_b, h, ln_eps);
         Tensor attn = attention_biased(b.attn, h, C, heads, H, W, ln_eps);
         brotensor::add_inplace(x, attn);
+        detail::profile_mark(x.device, "blk attn");
     }
     // MixFFN residual: dense1 -> dwconv(3x3) -> gelu -> dense2.
     {
@@ -448,6 +425,7 @@ void run_block(const BlockWeights& b, Tensor& x, int C, int heads,
         brotensor::layernorm_forward_inference_batched(x, b.ln2_w, b.ln2_b, h, ln_eps);
         Tensor f1;
         brotensor::linear_forward_batched(b.fc1_w, b.fc1_b, h, f1);   // (N, mlp_hidden)
+        detail::profile_mark(x.device, "blk fc1");
         // dwconv: reshape (N,mlp_hidden) -> NCHW (mlp_hidden,H,W), depthwise 3x3 pad1.
         Tensor nchw;
         brotensor::sequence_to_nchw(f1, 1, mlp_hidden, H, W, nchw);
@@ -457,17 +435,20 @@ void run_block(const BlockWeights& b, Tensor& x, int C, int heads,
                                   /*groups=*/mlp_hidden, dwc);
         Tensor f1b;
         brotensor::nchw_to_sequence(dwc, 1, mlp_hidden, H, W, f1b);
+        detail::profile_mark(x.device, "blk dwconv");
         Tensor act;
         brotensor::gelu_exact_forward(f1b, act);
         Tensor f2;
         brotensor::linear_forward_batched(b.fc2_w, b.fc2_b, act, f2);  // (N, C)
         brotensor::add_inplace(x, f2);
+        detail::profile_mark(x.device, "blk fc2");
     }
 }
 
 }  // namespace
 
-Logits SegformerDetector::infer_logits_from_tensor(const brotensor::Tensor& pixels) const {
+brotensor::Tensor SegformerDetector::infer_logits_dev_(
+        const brotensor::Tensor& pixels, int* grid_h, int* grid_w) const {
     const Impl& m = *impl_;
     if (!m.loaded) fail("infer_logits called before load()");
     const MiTConfig& mc = m.mc;
@@ -476,6 +457,7 @@ Logits SegformerDetector::infer_logits_from_tensor(const brotensor::Tensor& pixe
         fail("pixels must be (1, 3*model_size*model_size)");
 
     Tensor x = (pixels.device == m.device) ? pixels : pixels.to(m.device);
+    detail::profile_mark(m.device, nullptr);
 
     // ── Encoder: 4 hierarchical stages ──
     std::vector<Tensor> stage_nchw(mc.stages());   // (C_i, H_i, W_i) per stage
@@ -500,6 +482,7 @@ Logits SegformerDetector::infer_logits_from_tensor(const brotensor::Tensor& pixe
         Tensor seq;
         brotensor::layernorm_forward_inference_batched(
             tok, s.pe_ln_w, s.pe_ln_b, seq, mc.layer_norm_eps);
+        detail::profile_mark(m.device, "patch embed");
 
         const int mlp_hidden = mc.mlp_ratios[i] * s.C;
         for (const BlockWeights& b : s.blocks)
@@ -568,15 +551,24 @@ Logits SegformerDetector::infer_logits_from_tensor(const brotensor::Tensor& pixe
     Tensor logits_dev;
     brotensor::conv2d_forward(act, m.cls_w, &m.cls_b, 1, dec, H0, W0,
                               mc.num_labels, 1, 1, 1, 1, 0, 0, 1, 1, logits_dev);
+    detail::profile_mark(m.device, "decode head");
 
+    *grid_h = H0;
+    *grid_w = W0;
+    return logits_dev;
+}
+
+Logits SegformerDetector::infer_logits_from_tensor(const brotensor::Tensor& pixels) const {
+    int H0 = 0, W0 = 0;
+    Tensor logits_dev = infer_logits_dev_(pixels, &H0, &W0);
     Tensor host = (logits_dev.device == brotensor::Device::CPU)
                       ? logits_dev : logits_dev.to(brotensor::Device::CPU);
     const float* d = host.host_f32();
     Logits out;
-    out.channels = mc.num_labels;
+    out.channels = impl_->mc.num_labels;
     out.height = H0;
     out.width = W0;
-    out.data.assign(d, d + static_cast<std::size_t>(mc.num_labels) * H0 * W0);
+    out.data.assign(d, d + static_cast<std::size_t>(out.channels) * H0 * W0);
     return out;
 }
 
@@ -590,61 +582,38 @@ Logits SegformerDetector::infer_logits(const uint8_t* rgb, int w, int h,
 
 SegMap SegformerDetector::detect(const uint8_t* rgb, int w, int h,
                                  int channels) const {
-    const Logits lg = infer_logits(rgb, w, h, channels);
-    // Argmax over channels at the head grid, then resize the class map back to
-    // the original size. HF upsamples the LOGITS (bilinear, align_corners=False)
-    // to the input size and argmaxes there; to match, we upsample the logits on
-    // the host to the original (w,h), then argmax per pixel.
-    const int C = lg.channels, gH = lg.height, gW = lg.width;
-    const int plane = gH * gW;
+    // HF upsamples the LOGITS (bilinear, align_corners=False) to the input size
+    // and argmaxes there; do the same on the compute device — interp2d over the
+    // (C, gH, gW) logits, per-pixel argmax over channels — and download only
+    // the (h*w) INT32 class map.
+    PreprocessedImage pp = preprocess(rgb, w, h, channels, cfg_.model_size);
+    Tensor px = (impl_->device == brotensor::Device::CPU)
+                    ? pp.pixels : pp.pixels.to(impl_->device);
+    int gH = 0, gW = 0;
+    Tensor logits_dev = infer_logits_dev_(px, &gH, &gW);
+    const int C = impl_->mc.num_labels;
 
-    // Upsample logits (C, gH, gW) -> (C, h, w) bilinear align_corners=False on
-    // the host. Match interp2d_forward's half-pixel source mapping with
-    // border-clamped bilinear taps.
-    std::vector<float> up(static_cast<std::size_t>(C) * h * w);
-    const double sy = static_cast<double>(gH) / static_cast<double>(h);
-    const double sx = static_cast<double>(gW) / static_cast<double>(w);
-    for (int oy = 0; oy < h; ++oy) {
-        double fy = (oy + 0.5) * sy - 0.5;
-        int y0 = static_cast<int>(std::floor(fy));
-        double wy = fy - y0;
-        int y1 = y0 + 1;
-        if (y0 < 0) y0 = 0; if (y0 > gH - 1) y0 = gH - 1;
-        if (y1 < 0) y1 = 0; if (y1 > gH - 1) y1 = gH - 1;
-        for (int ox = 0; ox < w; ++ox) {
-            double fx = (ox + 0.5) * sx - 0.5;
-            int x0 = static_cast<int>(std::floor(fx));
-            double wx = fx - x0;
-            int x1 = x0 + 1;
-            if (x0 < 0) x0 = 0; if (x0 > gW - 1) x0 = gW - 1;
-            if (x1 < 0) x1 = 0; if (x1 > gW - 1) x1 = gW - 1;
-            const std::size_t obase = static_cast<std::size_t>(oy) * w + ox;
-            for (int c = 0; c < C; ++c) {
-                const float* cp = lg.data.data() + static_cast<std::size_t>(c) * plane;
-                const double v00 = cp[y0 * gW + x0], v01 = cp[y0 * gW + x1];
-                const double v10 = cp[y1 * gW + x0], v11 = cp[y1 * gW + x1];
-                const double top = v00 + (v01 - v00) * wx;
-                const double bot = v10 + (v11 - v10) * wx;
-                up[static_cast<std::size_t>(c) * h * w + obase] =
-                    static_cast<float>(top + (bot - top) * wy);
-            }
-        }
-    }
+    Tensor up;
+    brotensor::interp2d_forward(logits_dev, 1, C, gH, gW, h, w,
+                                /*bilinear=*/1, up);
+    Tensor seq;   // (h*w, C): one row per pixel, channels across the row
+    brotensor::nchw_to_sequence(up, 1, C, h, w, seq);
+    Tensor idx;   // (h*w, 1) INT32; ties break to the smaller class id, same
+                  // as the previous host argmax
+    brotensor::argmax_rows(seq, idx);
+    detail::profile_mark(impl_->device, "upsample+argmax");
+
+    Tensor idx_host = (idx.device == brotensor::Device::CPU)
+                          ? idx : idx.to(brotensor::Device::CPU);
+    const int32_t* ip = static_cast<const int32_t*>(idx_host.data);
 
     SegMap out;
     out.width = w;
     out.height = h;
-    out.classes.resize(static_cast<std::size_t>(w) * h);
     const std::size_t hw = static_cast<std::size_t>(w) * h;
-    for (std::size_t p = 0; p < hw; ++p) {
-        float best = up[p];
-        int bestc = 0;
-        for (int c = 1; c < C; ++c) {
-            const float v = up[static_cast<std::size_t>(c) * hw + p];
-            if (v > best) { best = v; bestc = c; }
-        }
-        out.classes[p] = static_cast<uint8_t>(bestc);
-    }
+    out.classes.resize(hw);
+    for (std::size_t p = 0; p < hw; ++p)
+        out.classes[p] = static_cast<uint8_t>(ip[p]);
     return out;
 }
 
