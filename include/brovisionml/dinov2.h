@@ -69,7 +69,11 @@ public:
     void load(const std::string& dir);
     void load_file(const std::string& path);
 
-    // Migrate weights to a compute device (CPU/CUDA). No-op if already there.
+    // Migrate weights to a compute device (CPU/CUDA). On a GPU backend whose
+    // compute dtype is FP16, the q/k/v and fc1 projections + patch embed
+    // migrate to FP16 (mixed precision); LayerNorms, the residual-writing
+    // o/fc2 projections (they carry the folded LayerScale) and the embeddings
+    // stay FP32. The CPU keeps its exact all-FP32 path. No-op if already there.
     void to(brotensor::Device dev);
     brotensor::Device device() const { return device_; }
 
@@ -83,6 +87,7 @@ public:
 private:
     Config cfg_;
     brotensor::Device device_ = brotensor::Device::CPU;
+    bool fp16_ = false;  // weights migrated to FP16 (set by to() on a GPU backend)
     struct Weights;
     std::unique_ptr<Weights> w_;
 };

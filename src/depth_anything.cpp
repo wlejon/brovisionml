@@ -4,6 +4,8 @@
 
 #include "brotensor/ops.h"
 
+#include "profile.h"
+
 #include <utility>
 
 namespace brovisionml::depth {
@@ -62,23 +64,28 @@ void DepthEstimator::to(brotensor::Device dev) {
 
 DepthMap DepthEstimator::estimate(const uint8_t* rgb, int w, int h,
                                   int channels) const {
+    detail::profile_mark(device_, nullptr);
     // 1. Preprocess (host) -> upload.
     dpt::PreprocessedImage pp = dpt::preprocess(
         rgb, w, h, channels, cfg_.input_size, cfg_.multiple, cfg_.keep_aspect_ratio);
     const int rh = pp.transform.resized_h, rw = pp.transform.resized_w;
     brotensor::Tensor px = (device_ == brotensor::Device::CPU)
                                ? pp.pixels : pp.pixels.to(device_);
+    detail::profile_mark(device_, "preprocess");
 
     // 2. Backbone -> stage feature maps; 3. DPT head -> depth at model res.
     dinov2::BackboneOutput bo = backbone_.encode(px, rh, rw);
+    detail::profile_mark(device_, "backbone");
     brotensor::Tensor depth_model =
         head_.forward(bo.feature_maps, bo.patch_h, bo.patch_w);  // (1, rh*rw)
+    detail::profile_mark(device_, "dpt head");
 
     // 4. Resize back to the original image size (bilinear, align_corners=False —
     //    HF post_process_depth_estimation).
     brotensor::Tensor depth_full;
     brotensor::interp2d_forward(depth_model, /*N=*/1, /*C=*/1, rh, rw, h, w,
                                 /*bilinear=*/1, depth_full);
+    detail::profile_mark(device_, "resize+download");
 
     brotensor::Tensor host = depth_full.to(brotensor::Device::CPU);
     const float* d = host.host_f32();

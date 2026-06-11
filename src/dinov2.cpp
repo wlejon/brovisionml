@@ -1,12 +1,14 @@
 #include "brovisionml/dinov2.h"
 
 #include "brotensor/ops.h"
+#include "brotensor/runtime.h"
 #include "brotensor/safetensors.h"
 
 #include "weights_util.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -182,18 +184,37 @@ void Backbone::load_file(const std::string& path) {
 void Backbone::to(brotensor::Device dev) {
     if (!w_->loaded) fail("to() called before load()");
     if (dev == device_) return;
-    auto mv = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
-    mv(w_->patch_w); mv(w_->patch_b);
+    // Mixed precision on a GPU backend (the DINOv3 pattern, taken one step
+    // further): every block projection — q/k/v, o_proj, fc1, fc2 — runs FP16;
+    // the residual stream itself, the LayerNorms and the embeddings stay FP32.
+    // Unlike DINOv3 ViT-H there are no massive activations here, and the
+    // folded LayerScale (gamma << 1) shrinks the residual-writing outputs, so
+    // o/fc2 are safe in half (the real-checkpoint depth parity test guards
+    // this). CPU stays all-FP32 (the exact parity path); to(CPU) widens back
+    // via cast.
+    const bool fp16 = dev != brotensor::Device::CPU &&
+                      brotensor::compute_dtype() == brotensor::Dtype::FP16;
+    auto to_dt = [&](Tensor& t, brotensor::Dtype want) {
+        if (!t.data) return;
+        t = t.to(dev);
+        if (t.dtype != want) { Tensor c; brotensor::cast(t, c, want); t = std::move(c); }
+    };
+    const brotensor::Dtype half = fp16 ? brotensor::Dtype::FP16
+                                       : brotensor::Dtype::FP32;
+    auto mv   = [&](Tensor& t) { to_dt(t, brotensor::Dtype::FP32); };
+    auto mv16 = [&](Tensor& t) { to_dt(t, half); };
+    mv16(w_->patch_w); mv16(w_->patch_b);
     mv(w_->cls_token); mv(w_->cls_pos); mv(w_->patch_pos);
     mv(w_->final_ln_w); mv(w_->final_ln_b);
     for (BlockWeights& b : w_->blocks) {
         mv(b.ln1_w); mv(b.ln1_b);
-        mv(b.q_w); mv(b.q_b); mv(b.k_w); mv(b.k_b); mv(b.v_w); mv(b.v_b);
-        mv(b.o_w); mv(b.o_b);
+        mv16(b.q_w); mv16(b.q_b); mv16(b.k_w); mv16(b.k_b); mv16(b.v_w); mv16(b.v_b);
+        mv16(b.o_w); mv16(b.o_b);
         mv(b.ln2_w); mv(b.ln2_b);
-        mv(b.fc1_w); mv(b.fc1_b); mv(b.fc2_w); mv(b.fc2_b);
+        mv16(b.fc1_w); mv16(b.fc1_b); mv16(b.fc2_w); mv16(b.fc2_b);
     }
     device_ = dev;
+    fp16_ = fp16;
 }
 
 // ─── Forward ──────────────────────────────────────────────────────────────────
@@ -243,14 +264,34 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
     const int gh = H / p, gw = W / p;
     const float eps = cfg_.layer_norm_eps;
 
+    // Mixed precision (fp16_, GPU only): the residual stream and LayerNorms
+    // stay FP32; LayerNorm'd inputs drop to FP16 to feed the q/k/v + fc1
+    // GEMMs and the flash attention, then widen as they re-enter the
+    // residual. No-op pass-throughs when fp16_ is off.
+    auto to16 = [&](const Tensor& t) {
+        if (!fp16_) return t;
+        Tensor c; brotensor::cast(t, c, brotensor::Dtype::FP16); return c;
+    };
+    auto to32 = [&](const Tensor& t) {
+        if (!fp16_) return t;
+        Tensor c; brotensor::cast(t, c, brotensor::Dtype::FP32); return c;
+    };
+    auto linear16 = [&](const Tensor& Wt, const Tensor& bias, const Tensor& X,
+                        Tensor& Y) {
+        if (fp16_) brotensor::linear_forward_batched_fp16(Wt, &bias, X, Y);
+        else       brotensor::linear_forward_batched(Wt, bias, X, Y);
+    };
+
     // 1. Patch embed -> (1, D*gh*gw), then token-major (gh*gw, D).
+    Tensor px = to16(pixels);
     Tensor feat;
-    brotensor::conv2d_forward(pixels, w_->patch_w, &w_->patch_b,
+    brotensor::conv2d_forward(px, w_->patch_w, &w_->patch_b,
                               /*N=*/1, cfg_.in_chans, H, W,
                               /*C_out=*/D, p, p, /*stride=*/p, p,
                               /*pad=*/0, 0, /*dil=*/1, 1, feat);
-    Tensor patch_tokens;
-    brotensor::nchw_to_sequence(feat, 1, D, gh, gw, patch_tokens);
+    Tensor patch_seq;
+    brotensor::nchw_to_sequence(feat, 1, D, gh, gw, patch_seq);
+    Tensor patch_tokens = to32(patch_seq);
 
     // 2. Prepend cls token, add the (interpolated) position embedding. concat_rows
     //    yields a flat (K*D,1) buffer whose row-major bytes already ARE the
@@ -277,8 +318,19 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
     out.patch_w = gw;
     out.feature_maps.reserve(cfg_.out_stages.size());
 
-    // Throwaway attention caches (forward-only).
+    // Throwaway attention caches (forward-only, FP32 path).
     Tensor Qh, Kh, Vh, Attnh, Yc;
+
+    // cu_seqlens for the single-sequence varlen flash attention (FP16 path):
+    // [0, K], built host-side then migrated alongside the activations.
+    const int hd = D / cfg_.num_heads;
+    Tensor cu;
+    if (fp16_) {
+        cu = Tensor::zeros_on(brotensor::Device::CPU, 2, 1,
+                              brotensor::Dtype::INT32);
+        static_cast<int32_t*>(cu.data)[1] = K;
+        cu = cu.to(device_);
+    }
 
     for (int i = 0; i < cfg_.depth; ++i) {
         const BlockWeights& b = w_->blocks[i];
@@ -287,22 +339,41 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
         Tensor h;
         brotensor::layernorm_forward_inference_batched(x, b.ln1_w, b.ln1_b, h, eps);
         Tensor attn;
-        brotensor::mha_forward(h, b.q_w, b.k_w, b.v_w, b.o_w,
-                               &b.q_b, &b.k_b, &b.v_b, &b.o_b,
-                               /*d_mask=*/nullptr, cfg_.num_heads,
-                               Qh, Kh, Vh, Attnh, Yc, attn);
+        if (fp16_) {
+            Tensor hc = to16(h);
+            Tensor q, k, v;
+            linear16(b.q_w, b.q_b, hc, q);
+            linear16(b.k_w, b.k_b, hc, k);
+            linear16(b.v_w, b.v_b, hc, v);
+            Tensor ao;
+            brotensor::flash_attention_varlen_forward(
+                q, k, v, static_cast<const int32_t*>(cu.data),
+                static_cast<const int32_t*>(cu.data),
+                /*batch_size=*/1, /*max_seqlen_q=*/K, /*max_seqlen_k=*/K,
+                cfg_.num_heads, hd, /*causal=*/false, ao);
+            Tensor o16;
+            linear16(b.o_w, b.o_b, ao, o16);
+            attn = to32(o16);
+        } else {
+            brotensor::mha_forward(h, b.q_w, b.k_w, b.v_w, b.o_w,
+                                   &b.q_b, &b.k_b, &b.v_b, &b.o_b,
+                                   /*d_mask=*/nullptr, cfg_.num_heads,
+                                   Qh, Kh, Vh, Attnh, Yc, attn);
+        }
         brotensor::add_inplace(x, attn);
 
         // MLP: x = x + LS2·fc2(gelu(fc1(LN2(x)))).  LS2 is folded into fc2.
         Tensor h2;
         brotensor::layernorm_forward_inference_batched(x, b.ln2_w, b.ln2_b, h2, eps);
+        Tensor h2c = to16(h2);
         Tensor m1;
-        brotensor::linear_forward_batched(b.fc1_w, b.fc1_b, h2, m1);
+        linear16(b.fc1_w, b.fc1_b, h2c, m1);
         Tensor act;
         brotensor::gelu_exact_forward(m1, act);
         Tensor m2;
-        brotensor::linear_forward_batched(b.fc2_w, b.fc2_b, act, m2);
-        brotensor::add_inplace(x, m2);
+        linear16(b.fc2_w, b.fc2_b, act, m2);
+        Tensor m2f = to32(m2);
+        brotensor::add_inplace(x, m2f);
 
         if (wants_stage(i + 1)) {
             Tensor fm;
