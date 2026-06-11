@@ -4,6 +4,8 @@
 
 #include "broimage/geometric.h"
 
+#include "profile.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -81,13 +83,17 @@ NormalMap NormalEstimator::run(const PreprocessedImage& pp) const {
 
     // Upload the host-preprocessed pixels to the active device, then run
     // encoder -> decoder -> refiner on-device (CPU FP32 or CUDA FP32).
+    detail::profile_mark(device_, nullptr);
     brotensor::Tensor px = (device_ == brotensor::Device::CPU)
                                ? pp.pixels
                                : pp.pixels.to(device_);
     EncoderTaps taps = encoder_.forward(px, padH, padW);
+    detail::profile_mark(device_, "encoder");
     DecoderOutput dout = decoder_.forward(taps, pp.intrins, padH, padW);
+    detail::profile_mark(device_, "decoder");
     brotensor::Tensor normals =
         refiner_.forward(dout, pp.intrins, padH, padW, pp.transform);
+    detail::profile_mark(device_, "refine");
 
     // Pull the final normal map back to the host for the caller.
     brotensor::Tensor host = (normals.device == brotensor::Device::CPU)
