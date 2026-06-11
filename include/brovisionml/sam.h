@@ -94,9 +94,14 @@ public:
     // point, in order; equivalent to calling segment({p},{1},{}) for each point
     // but paying the per-decode overhead once. This is the automatic mask
     // generator's hot path. Throws if no image has been set.
+    //
+    // min_iou >= 0 drops masks whose predicted IoU is <= min_iou BEFORE the
+    // full-resolution upscale — they are never upscaled or downloaded — so a
+    // point's Segmentation may carry fewer than the usual mask count (its
+    // logits/iou hold only the survivors). Negative (default) keeps all.
     std::vector<Segmentation> segment_points(
         const std::vector<std::array<float, 2>>& points,
-        bool multimask_output = true) const;
+        bool multimask_output = true, float min_iou = -1.0f) const;
 
     const SamConfig& config() const { return cfg_; }
 

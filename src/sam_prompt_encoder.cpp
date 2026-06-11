@@ -306,4 +306,47 @@ PromptEmbeddings PromptEncoder::encode(const PromptInput& prompt) const {
     return out;
 }
 
+PromptEmbeddings PromptEncoder::encode_point_batch(
+    const std::vector<std::array<float, 2>>& points) const {
+    if (!w_->loaded) fail("encode_point_batch() called before load()");
+    const int H = cfg_.hidden_size;
+    const int F = cfg_.num_pos_feats();
+    const int g = cfg_.grid();
+    const float in = static_cast<float>(cfg_.input_image_size);
+    const int B = static_cast<int>(points.size());
+
+    PromptEmbeddings out;
+    if (B == 0) return out;
+
+    // Every prompt is [foreground point token, not_a_point padding token] —
+    // the same rows encode() emits for a one-point no-box prompt.
+    Tensor sparse = Tensor::mat(2 * B, H);
+    float* sp = sparse.host_f32_mut();
+    const float* gptr = w_->gaussian.host_f32();
+    const float* fg   = w_->point_embed[1].host_f32();
+    const float* nv   = w_->not_a_point.host_f32();
+    for (int b = 0; b < B; ++b) {
+        float* dst = sp + static_cast<std::size_t>(2 * b) * H;
+        const float xn = (points[static_cast<std::size_t>(b)][0] + 0.5f) / in;
+        const float yn = (points[static_cast<std::size_t>(b)][1] + 0.5f) / in;
+        pe_encode(gptr, F, xn, yn, dst);
+        for (int c = 0; c < H; ++c) dst[c] += fg[c];
+        float* pad = dst + H;
+        for (int c = 0; c < H; ++c) pad[c] = nv[c];
+    }
+    out.sparse = sparse.to(device_);
+
+    // Shared no-mask dense embedding, built and uploaded once for the batch.
+    Tensor dense = Tensor::mat(1, H * g * g);
+    float* dp = dense.host_f32_mut();
+    const float* nm = w_->no_mask.host_f32();
+    const int plane = g * g;
+    for (int c = 0; c < H; ++c) {
+        float* ch = dp + static_cast<std::size_t>(c) * plane;
+        for (int s = 0; s < plane; ++s) ch[s] = nm[c];
+    }
+    out.dense = dense.to(device_);
+    return out;
+}
+
 }  // namespace brovisionml::sam

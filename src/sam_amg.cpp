@@ -392,8 +392,14 @@ std::vector<GeneratedMask> AutomaticMaskGenerator::generate(const uint8_t* pixel
             std::vector<std::array<float, 2>> chunk(pts.begin() + static_cast<std::ptrdiff_t>(off),
                                                     pts.begin() + static_cast<std::ptrdiff_t>(end));
 
+            // The predicted-IoU threshold is applied inside segment_points,
+            // before the full-resolution upscale — rejected masks are never
+            // upscaled or downloaded. The per-mask check below then only sees
+            // survivors.
+            const float min_iou =
+                cfg_.pred_iou_thresh > 0.0f ? cfg_.pred_iou_thresh : -1.0f;
             const std::vector<Segmentation> segs =
-                model_.segment_points(chunk, /*multimask=*/true);
+                model_.segment_points(chunk, /*multimask=*/true, min_iou);
 
             for (std::size_t si = 0; si < segs.size(); ++si) {
                 const Segmentation& seg = segs[si];

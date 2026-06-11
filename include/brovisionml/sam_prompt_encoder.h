@@ -109,6 +109,15 @@ public:
     // Encode a prompt set into sparse + dense embeddings on device().
     PromptEmbeddings encode(const PromptInput& prompt) const;
 
+    // Batched single-foreground-point prompts — the automatic mask
+    // generator's grid. One host pass builds every prompt's [point token,
+    // padding token] pair into a (2*points, hidden_size) sparse block plus
+    // the shared no-mask dense embedding, one upload each: equivalent to
+    // points.size() encode() calls (S=2 per prompt) minus the per-call
+    // device round-trips. Point coords are in model input space.
+    PromptEmbeddings encode_point_batch(
+        const std::vector<std::array<float, 2>>& points) const;
+
     const PromptEncoderConfig& config() const { return cfg_; }
 
 private:

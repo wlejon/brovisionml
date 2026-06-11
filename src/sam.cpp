@@ -133,72 +133,77 @@ Segmentation Sam::segment(const std::vector<std::array<float, 2>>& points,
 
 std::vector<Segmentation> Sam::segment_points(
     const std::vector<std::array<float, 2>>& points,
-    bool multimask_output) const {
+    bool multimask_output, float min_iou) const {
     if (!has_image_) fail("segment_points() called before set_image()");
     std::vector<Segmentation> out;
     const int B = static_cast<int>(points.size());
     if (B == 0) return out;
 
-    // Encode each one-foreground-point prompt; collect the per-prompt sparse
-    // tokens (uniform count — point + its padding token) and the shared no-mask
-    // dense embedding (identical for every prompt, so we keep just the first).
+    // One batched prompt encode for the whole grid: every prompt is a single
+    // foreground click, S=2 sparse tokens (point + padding), shared no-mask
+    // dense embedding, one upload each.
     detail::profile_mark(device_, nullptr);
-    std::vector<Tensor> sparse_hosts;
-    sparse_hosts.reserve(static_cast<std::size_t>(B));
-    Tensor dense;
-    int S = -1;
-    for (const auto& p : points) {
-        PromptInput in;
-        float mx, my;
-        apply_coords(transform_, p[0], p[1], mx, my);
-        in.points.push_back({mx, my});
-        in.labels.push_back(1);
-        PromptEmbeddings emb = pe_.encode(in);
-        const int s = (emb.sparse.data && emb.sparse.size() > 0) ? emb.sparse.rows : 0;
-        if (S < 0) S = s;
-        else if (s != S) fail("segment_points: non-uniform sparse token count");
-        sparse_hosts.push_back(emb.sparse.to(brotensor::Device::CPU));
-        if (!dense.data) dense = emb.dense;   // shared no-mask dense embedding
-    }
+    std::vector<std::array<float, 2>> mapped(static_cast<std::size_t>(B));
+    for (int b = 0; b < B; ++b)
+        apply_coords(transform_, points[static_cast<std::size_t>(b)][0],
+                     points[static_cast<std::size_t>(b)][1],
+                     mapped[static_cast<std::size_t>(b)][0],
+                     mapped[static_cast<std::size_t>(b)][1]);
+    PromptEmbeddings emb = pe_.encode_point_batch(mapped);
+    const int S = 2;
     detail::profile_mark(device_, "prompt encode");
 
-    const int D = cfg_.prompt.hidden_size;
-    Tensor sparse_batched;
-    if (S > 0) {
-        Tensor sb = Tensor::mat(B * S, D);
-        float* dst = sb.host_f32_mut();
-        for (int b = 0; b < B; ++b) {
-            const float* sp = sparse_hosts[static_cast<std::size_t>(b)].host_f32();
-            std::copy(sp, sp + static_cast<std::size_t>(S) * D,
-                      dst + static_cast<std::size_t>(b) * S * D);
-        }
-        sparse_batched = sb.to(device_);
-    }
-
     DecodedMasks dm = dec_.decode_batched(image_embedding_, pe_.dense_pe(),
-                                          sparse_batched, B, S, dense,
+                                          emb.sparse, B, S, emb.dense,
                                           multimask_output);
     detail::profile_mark(device_, "decode batched");
 
     const int num = dm.num_out;
-    std::vector<float> up = upscale_masks(dm.masks, B * num, dm.mask_size);
+    Tensor iou_cpu = dm.iou.to(brotensor::Device::CPU);   // (B*num, 1) — tiny
+    const float* iv = iou_cpu.host_f32();
+
+    // Predicted-IoU pre-filter: select surviving mask rows BEFORE the
+    // full-resolution upscale, so rejected masks are never upscaled or
+    // downloaded. keep stays sorted, so survivors group by prompt below.
+    std::vector<int32_t> keep;
+    keep.reserve(static_cast<std::size_t>(B) * num);
+    for (int i = 0; i < B * num; ++i)
+        if (min_iou < 0.0f || iv[i] > min_iou)
+            keep.push_back(i);
+    const int n_keep = static_cast<int>(keep.size());
+
+    std::vector<float> up;
+    if (n_keep == B * num) {
+        up = upscale_masks(dm.masks, B * num, dm.mask_size);
+    } else if (n_keep > 0) {
+        Tensor idx_h = Tensor::zeros_on(brotensor::Device::CPU, n_keep, 1,
+                                        brotensor::Dtype::INT32);
+        int32_t* ip = static_cast<int32_t*>(idx_h.data);
+        std::copy(keep.begin(), keep.end(), ip);
+        Tensor idx = (device_ == brotensor::Device::CPU) ? idx_h
+                                                         : idx_h.to(device_);
+        Tensor kept_masks;
+        brotensor::gather_rows(dm.masks, idx, kept_masks);
+        up = upscale_masks(kept_masks, n_keep, dm.mask_size);
+    }
     detail::profile_mark(device_, "upscale masks");
 
-    Tensor iou_cpu = dm.iou.to(brotensor::Device::CPU);   // (B*num,1)
-    const float* iv = iou_cpu.host_f32();
     const int oh = transform_.orig_h, ow = transform_.orig_w;
     const std::size_t plane = static_cast<std::size_t>(oh) * ow;
 
     out.reserve(static_cast<std::size_t>(B));
+    std::size_t ki = 0;   // cursor into keep / up, grouped by prompt
     for (int b = 0; b < B; ++b) {
         Segmentation seg;
-        seg.num    = num;
         seg.height = oh;
         seg.width  = ow;
-        const float* base = up.data() + static_cast<std::size_t>(b) * num * plane;
-        seg.logits.assign(base, base + static_cast<std::size_t>(num) * plane);
-        seg.iou.assign(iv + static_cast<std::size_t>(b) * num,
-                       iv + static_cast<std::size_t>(b + 1) * num);
+        while (ki < keep.size() && keep[ki] < (b + 1) * num) {
+            const float* base = up.data() + ki * plane;
+            seg.logits.insert(seg.logits.end(), base, base + plane);
+            seg.iou.push_back(iv[keep[ki]]);
+            ++seg.num;
+            ++ki;
+        }
         out.push_back(std::move(seg));
     }
     return out;
