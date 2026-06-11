@@ -1,6 +1,7 @@
 #include "brovisionml/hed.h"
 
 #include "brotensor/ops.h"
+#include "brotensor/runtime.h"
 #include "brotensor/safetensors.h"
 
 #include "broimage/geometric.h"
@@ -125,6 +126,7 @@ Tensor run_block(const Block& b, Tensor& x, int& H, int& W, bool down) {
 
 struct SoftEdgeDetector::Impl {
     bool loaded = false;
+    bool fp16 = false;
     brotensor::Device device = brotensor::Device::CPU;
     Block blocks[kBlocks];
 };
@@ -177,13 +179,26 @@ void SoftEdgeDetector::to(brotensor::Device dev) {
     Impl& m = *impl_;
     if (!m.loaded) fail("to() called before load()");
     if (dev == m.device) return;
-    auto mv      = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
+    // Mixed precision on a GPU backend: every conv in the trunk is a WMMA-
+    // covered shape (3x3 s1 p1 / 1x1 s1 p0), so the whole forward — convs,
+    // pools, side-map fusion, sigmoid — runs FP16 and only the final edge map
+    // is widened for download. CPU stays all-FP32; to(CPU) widens back.
+    const bool fp16 = dev != brotensor::Device::CPU &&
+                      brotensor::compute_dtype() == brotensor::Dtype::FP16;
+    const brotensor::Dtype want = fp16 ? brotensor::Dtype::FP16
+                                       : brotensor::Dtype::FP32;
+    auto mv = [&](Tensor& t) {
+        if (!t.data) return;
+        t = t.to(dev);
+        if (t.dtype != want) { Tensor c; brotensor::cast(t, c, want); t = std::move(c); }
+    };
     auto mv_conv = [&](Conv& c) { mv(c.weight); mv(c.bias); };
     for (Block& b : m.blocks) {
         for (Conv& c : b.convs) mv_conv(c);
         mv_conv(b.projection);
     }
     m.device = dev;
+    m.fp16 = fp16;
 }
 
 brotensor::Device SoftEdgeDetector::device() const { return impl_->device; }
@@ -197,9 +212,15 @@ EdgeMap SoftEdgeDetector::run(const PreprocessedImage& pp) const {
     const int procH = pp.transform.proc_h;
     const int procW = pp.transform.proc_w;
 
-    // Upload the host-preprocessed pixels to the active device.
+    // Upload the host-preprocessed pixels to the active device; under mixed
+    // precision the whole trunk runs FP16, so narrow the input once here.
     Tensor x = (m.device == brotensor::Device::CPU) ? pp.pixels
                                                      : pp.pixels.to(m.device);
+    if (m.fp16) {
+        Tensor h;
+        brotensor::cast(x, h, brotensor::Dtype::FP16);
+        x = std::move(h);
+    }
 
     // Run the 5-block trunk; block1 keeps the input resolution, blocks 2-5
     // max-pool 2x2 first. Each block emits a 1-channel side map at its own scale.
@@ -239,7 +260,12 @@ EdgeMap SoftEdgeDetector::run(const PreprocessedImage& pp) const {
         edge = std::move(back);
     }
 
-    // Pull to the host.
+    // Widen the final edge map back to FP32 and pull to the host.
+    if (edge.dtype != brotensor::Dtype::FP32) {
+        Tensor f;
+        brotensor::cast(edge, f, brotensor::Dtype::FP32);
+        edge = std::move(f);
+    }
     Tensor host = (edge.device == brotensor::Device::CPU)
                       ? edge
                       : edge.to(brotensor::Device::CPU);
