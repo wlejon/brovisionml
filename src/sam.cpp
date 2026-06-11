@@ -142,6 +142,7 @@ std::vector<Segmentation> Sam::segment_points(
     // Encode each one-foreground-point prompt; collect the per-prompt sparse
     // tokens (uniform count — point + its padding token) and the shared no-mask
     // dense embedding (identical for every prompt, so we keep just the first).
+    detail::profile_mark(device_, nullptr);
     std::vector<Tensor> sparse_hosts;
     sparse_hosts.reserve(static_cast<std::size_t>(B));
     Tensor dense;
@@ -159,6 +160,7 @@ std::vector<Segmentation> Sam::segment_points(
         sparse_hosts.push_back(emb.sparse.to(brotensor::Device::CPU));
         if (!dense.data) dense = emb.dense;   // shared no-mask dense embedding
     }
+    detail::profile_mark(device_, "prompt encode");
 
     const int D = cfg_.prompt.hidden_size;
     Tensor sparse_batched;
@@ -176,9 +178,11 @@ std::vector<Segmentation> Sam::segment_points(
     DecodedMasks dm = dec_.decode_batched(image_embedding_, pe_.dense_pe(),
                                           sparse_batched, B, S, dense,
                                           multimask_output);
+    detail::profile_mark(device_, "decode batched");
 
     const int num = dm.num_out;
     std::vector<float> up = upscale_masks(dm.masks, B * num, dm.mask_size);
+    detail::profile_mark(device_, "upscale masks");
 
     Tensor iou_cpu = dm.iou.to(brotensor::Device::CPU);   // (B*num,1)
     const float* iv = iou_cpu.host_f32();
@@ -214,32 +218,26 @@ std::vector<float> Sam::upscale_masks(const brotensor::Tensor& masks,
     const int rh = transform_.resized_h, rw = transform_.resized_w;
     const int oh = transform_.orig_h,    ow = transform_.orig_w;
 
-    Tensor masks_cpu = masks.to(brotensor::Device::CPU);   // (num, ms*ms)
-    Tensor in0 = Tensor::view(brotensor::Device::CPU, masks_cpu.data,
-                              1, num * ms * ms);
+    // All three steps run on the masks' device (upscale -> de-letterbox crop
+    // -> resize to original); only the final full-resolution logits are
+    // downloaded. Under the automatic mask generator this is per point-batch
+    // hot path. (num, ms*ms) row-major is already NCHW (1, num, ms, ms).
+    Tensor in0 = Tensor::view(masks.device, masks.data, 1, num * ms * ms);
 
     Tensor up1;
     brotensor::interp2d_forward(in0, 1, num, ms, ms, S, S, /*bilinear=*/1, up1);
 
-    // Crop each mask plane's top-left content region (the rest is padding).
-    Tensor cropped = Tensor::mat(1, num * rh * rw);
-    {
-        const float* u = up1.host_f32();
-        float* c = cropped.host_f32_mut();
-        for (int ch = 0; ch < num; ++ch) {
-            const float* up = u + static_cast<std::size_t>(ch) * S * S;
-            float* cp = c + static_cast<std::size_t>(ch) * rh * rw;
-            for (int y = 0; y < rh; ++y)
-                for (int x = 0; x < rw; ++x)
-                    cp[static_cast<std::size_t>(y) * rw + x] =
-                        up[static_cast<std::size_t>(y) * S + x];
-        }
-    }
+    // Crop each plane's top-left content region (the rest is padding).
+    Tensor cropped;
+    brotensor::slice2d_forward(up1, 1, num, S, S, /*h0=*/0, /*w0=*/0,
+                               rh, rw, cropped);
 
     Tensor up2;
     brotensor::interp2d_forward(cropped, 1, num, rh, rw, oh, ow, /*bilinear=*/1, up2);
 
-    const float* logit = up2.host_f32();
+    Tensor host = (up2.device == brotensor::Device::CPU)
+                      ? up2 : up2.to(brotensor::Device::CPU);
+    const float* logit = host.host_f32();
     return std::vector<float>(
         logit, logit + static_cast<std::size_t>(num) * oh * ow);
 }
