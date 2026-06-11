@@ -52,6 +52,21 @@ struct Segmentation {
     int best() const;
 };
 
+// Binary segmentation result for bulk mask generation: masks arrive already
+// thresholded (logit > 0) as 0/1 bytes, with the stability score — the
+// fraction of the (logit > +offset) area retained at (logit > -offset),
+// computed on the full-resolution logits on device — alongside the predicted
+// IoU. A quarter the download volume of FP32 logits, and the host never scans
+// floats.
+struct BinarySegmentation {
+    std::vector<uint8_t> masks;     // num * height * width, values 0/1
+    std::vector<float>   iou;       // num
+    std::vector<float>   stability; // num
+    int num    = 0;
+    int height = 0;
+    int width  = 0;
+};
+
 class Sam {
 public:
     explicit Sam(SamConfig cfg);
@@ -103,6 +118,19 @@ public:
         const std::vector<std::array<float, 2>>& points,
         bool multimask_output = true, float min_iou = -1.0f) const;
 
+    // segment_points variant for the automatic mask generator: masks are
+    // binarized (logit > 0) and stability-scored ON DEVICE at full resolution,
+    // and only 0/1 bytes plus two INT32 counts per mask ever cross the bus.
+    // Filtering order matches the host pipeline exactly: min_iou (as in
+    // segment_points) before the upscale, then min_stability (> 0 to enable;
+    // score = count(logit > stability_offset) / count(logit > -stability_offset),
+    // 0 when the union is empty) on the upscaled logits before the mask
+    // download. Stability scores of survivors are returned per mask.
+    std::vector<BinarySegmentation> segment_points_binary(
+        const std::vector<std::array<float, 2>>& points,
+        bool multimask_output, float min_iou,
+        float stability_offset, float min_stability) const;
+
     const SamConfig& config() const { return cfg_; }
 
 private:
@@ -124,6 +152,11 @@ private:
     // segment_points().
     std::vector<float> upscale_masks(const brotensor::Tensor& masks,
                                      int num, int mask_size) const;
+
+    // Device-side core of upscale_masks: returns the (num, orig_h*orig_w)
+    // upscaled logit planes still on the masks' device, no download.
+    brotensor::Tensor upscale_masks_dev(const brotensor::Tensor& masks,
+                                        int num, int mask_size) const;
 };
 
 }  // namespace brovisionml::sam

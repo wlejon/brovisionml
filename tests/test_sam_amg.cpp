@@ -390,6 +390,84 @@ int main() {
             check(max_iou_diff < 1e-4f, "batched decode matches single decode (iou)");
         }
 
+        // Binary-decode parity: segment_points_binary must reproduce
+        // segment_points exactly — masks equal to (logit > 0), stability equal
+        // to the host recompute from the FP32 logits, and the stability filter
+        // keeping exactly the host-side survivor set. This anchors the
+        // device-side stability/threshold path the AMG loop uses.
+        {
+            const std::vector<std::array<float, 2>> pts = {
+                {10.f, 10.f}, {25.f, 20.f}, {40.f, 30.f}, {5.f, 35.f}, {30.f, 5.f}};
+            const float off = 1.0f;
+            const std::vector<Segmentation> ref = sam.segment_points(pts, true);
+            const std::vector<BinarySegmentation> bins =
+                sam.segment_points_binary(pts, true, /*min_iou=*/-1.0f,
+                                          off, /*min_stability=*/-1.0f);
+            check(bins.size() == ref.size(),
+                  "segment_points_binary returns one result per point");
+
+            auto host_stab = [&](const float* logit, std::size_t n) {
+                long long inter = 0, uni = 0;
+                for (std::size_t k = 0; k < n; ++k) {
+                    if (logit[k] > off)  ++inter;
+                    if (logit[k] > -off) ++uni;
+                }
+                return uni > 0 ? static_cast<float>(inter) /
+                                     static_cast<float>(uni)
+                               : 0.0f;
+            };
+
+            std::vector<std::vector<float>> ref_stab(ref.size());
+            bool masks_ok = true, stab_ok = true, iou_ok = true;
+            for (std::size_t i = 0; i < ref.size() && i < bins.size(); ++i) {
+                const Segmentation& r = ref[i];
+                const BinarySegmentation& b = bins[i];
+                check(b.num == r.num && b.height == r.height &&
+                      b.width == r.width, "binary/ref result shapes match");
+                const std::size_t plane =
+                    static_cast<std::size_t>(r.height) * r.width;
+                for (int m = 0; m < r.num && m < b.num; ++m) {
+                    const float* logit = r.logits.data() + m * plane;
+                    const uint8_t* mask = b.masks.data() + m * plane;
+                    for (std::size_t k = 0; k < plane; ++k)
+                        if ((logit[k] > 0.0f ? 1 : 0) != mask[k]) masks_ok = false;
+                    const float hs = host_stab(logit, plane);
+                    ref_stab[i].push_back(hs);
+                    if (hs != b.stability[static_cast<std::size_t>(m)])
+                        stab_ok = false;
+                    if (r.iou[static_cast<std::size_t>(m)] !=
+                        b.iou[static_cast<std::size_t>(m)])
+                        iou_ok = false;
+                }
+            }
+            check(masks_ok, "binary masks equal (logit > 0) of the FP32 logits");
+            check(stab_ok, "device stability equals host recompute");
+            check(iou_ok, "binary path returns identical predicted IoU");
+
+            // Stability filter: a mid threshold must keep exactly the masks
+            // whose host-recomputed score clears it (exercises the gather
+            // branch before the byte download).
+            float mid = 0.0f;
+            int cnt = 0;
+            for (const auto& v : ref_stab)
+                for (float s : v) { mid += s; ++cnt; }
+            if (cnt > 0) mid /= static_cast<float>(cnt);
+            const std::vector<BinarySegmentation> filt =
+                sam.segment_points_binary(pts, true, /*min_iou=*/-1.0f,
+                                          off, /*min_stability=*/mid);
+            bool filter_ok = filt.size() == ref.size();
+            for (std::size_t i = 0; filter_ok && i < filt.size(); ++i) {
+                int expect = 0;
+                for (float s : ref_stab[i])
+                    if (s >= mid) ++expect;
+                if (filt[i].num != expect) filter_ok = false;
+                for (float s : filt[i].stability)
+                    if (s < mid) filter_ok = false;
+            }
+            check(filter_ok,
+                  "stability filter keeps exactly the host survivor set");
+        }
+
         std::remove(path.c_str());
         std::printf("sam_amg (synthetic): structural checks done\n");
     }

@@ -87,12 +87,13 @@ struct Rle {
     int n = 0;                // total pixels encoded
 };
 
-Rle rle_encode(const std::vector<uint8_t>& mask) {
+Rle rle_encode(const uint8_t* mask, std::size_t n) {
     Rle r;
-    r.n = static_cast<int>(mask.size());
+    r.n = static_cast<int>(n);
     uint8_t last = 0;
     int run = 0;
-    for (uint8_t v : mask) {
+    for (std::size_t i = 0; i < n; ++i) {
+        const uint8_t v = mask[i];
         if (v == last) {
             ++run;
         } else {
@@ -128,10 +129,10 @@ long long rle_area(const Rle& r) {
 using Box = std::array<int, 4>;  // XYXY, inclusive pixel extents
 
 // Tight box of a binary mask (XYXY inclusive). Empty mask -> {0,0,0,0}.
-Box mask_to_box(const std::vector<uint8_t>& mask, int w, int h) {
+Box mask_to_box(const uint8_t* mask, int w, int h) {
     int minx = w, miny = h, maxx = -1, maxy = -1;
     for (int y = 0; y < h; ++y) {
-        const uint8_t* row = mask.data() + static_cast<std::size_t>(y) * w;
+        const uint8_t* row = mask + static_cast<std::size_t>(y) * w;
         for (int x = 0; x < w; ++x) {
             if (row[x]) {
                 if (x < minx) minx = x;
@@ -283,17 +284,6 @@ bool remove_small_regions(std::vector<uint8_t>& mask, int w, int h, int area,
     return true;
 }
 
-// Stability score: fraction of the high-threshold mask area retained at the
-// low threshold, i.e. how stable the binarization is to a ±offset logit nudge.
-float stability_score(const float* logits, int n, float offset) {
-    long long inter = 0, uni = 0;
-    for (int i = 0; i < n; ++i) {
-        if (logits[i] > offset) ++inter;
-        if (logits[i] > -offset) ++uni;
-    }
-    return uni > 0 ? static_cast<float>(inter) / static_cast<float>(uni) : 0.0f;
-}
-
 // is_box_near_crop_edge: box (image-frame XYXY) touches a crop edge (within
 // atol) that is not also the image edge.
 bool near_crop_edge(const Box& box, const CropBox& crop, int im_w, int im_h) {
@@ -346,7 +336,6 @@ std::vector<GeneratedMask> AutomaticMaskGenerator::generate(const uint8_t* pixel
     std::vector<Candidate> kept;  // survivors of within-crop NMS, all crops
 
     std::vector<uint8_t> crop_buf;  // reused scratch for non-trivial crops
-    std::vector<uint8_t> bin;       // reused scratch for a crop-frame binary mask
 
     for (const CropBox& crop : crops) {
         const int cw = crop.x1 - crop.x0;
@@ -392,36 +381,29 @@ std::vector<GeneratedMask> AutomaticMaskGenerator::generate(const uint8_t* pixel
             std::vector<std::array<float, 2>> chunk(pts.begin() + static_cast<std::ptrdiff_t>(off),
                                                     pts.begin() + static_cast<std::ptrdiff_t>(end));
 
-            // The predicted-IoU threshold is applied inside segment_points,
-            // before the full-resolution upscale — rejected masks are never
-            // upscaled or downloaded. The per-mask check below then only sees
-            // survivors.
+            // Both quality filters run inside segment_points_binary: the
+            // predicted-IoU threshold before the full-resolution upscale, the
+            // stability threshold (scored on device from the upscaled logits)
+            // before the mask download. Rejected masks never cross the bus,
+            // and survivors arrive as 0/1 bytes — the loop below only places
+            // them.
             const float min_iou =
                 cfg_.pred_iou_thresh > 0.0f ? cfg_.pred_iou_thresh : -1.0f;
-            const std::vector<Segmentation> segs =
-                model_.segment_points(chunk, /*multimask=*/true, min_iou);
+            const std::vector<BinarySegmentation> segs =
+                model_.segment_points_binary(chunk, /*multimask=*/true, min_iou,
+                                             cfg_.stability_score_offset,
+                                             cfg_.stability_score_thresh);
 
             for (std::size_t si = 0; si < segs.size(); ++si) {
-                const Segmentation& seg = segs[si];
+                const BinarySegmentation& seg = segs[si];
                 const float px = chunk[si][0], py = chunk[si][1];
                 const int plane = seg.height * seg.width;  // == ch*cw
 
                 for (int m = 0; m < seg.num; ++m) {
-                    const float iou = seg.iou[static_cast<std::size_t>(m)];
-                    if (cfg_.pred_iou_thresh > 0.0f && iou <= cfg_.pred_iou_thresh)
-                        continue;
-
-                    const float* logit =
-                        seg.logits.data() + static_cast<std::size_t>(m) * plane;
-                    const float stab =
-                        stability_score(logit, plane, cfg_.stability_score_offset);
-                    if (cfg_.stability_score_thresh > 0.0f &&
-                        stab < cfg_.stability_score_thresh)
-                        continue;
-
-                    bin.assign(static_cast<std::size_t>(plane), 0);
-                    for (int i = 0; i < plane; ++i)
-                        bin[static_cast<std::size_t>(i)] = logit[i] > 0.0f ? 1 : 0;
+                    const float iou  = seg.iou[static_cast<std::size_t>(m)];
+                    const float stab = seg.stability[static_cast<std::size_t>(m)];
+                    const uint8_t* bin =
+                        seg.masks.data() + static_cast<std::size_t>(m) * plane;
 
                     const Box cbox = mask_to_box(bin, cw, ch);
                     const Box ibox = {cbox[0] + crop.x0, cbox[1] + crop.y0,
@@ -429,7 +411,7 @@ std::vector<GeneratedMask> AutomaticMaskGenerator::generate(const uint8_t* pixel
                     if (near_crop_edge(ibox, crop, w, h)) continue;
 
                     Candidate cand;
-                    cand.rle = rle_encode(bin);
+                    cand.rle = rle_encode(bin, static_cast<std::size_t>(plane));
                     cand.cx0 = crop.x0;
                     cand.cy0 = crop.y0;
                     cand.cw = cw;
@@ -513,7 +495,7 @@ std::vector<GeneratedMask> AutomaticMaskGenerator::generate(const uint8_t* pixel
             changed |= remove_small_regions(out[i].mask, w, h,
                                             cfg_.min_mask_region_area,
                                             /*holes=*/false);
-            boxes[i] = mask_to_box(out[i].mask, w, h);
+            boxes[i] = mask_to_box(out[i].mask.data(), w, h);
             scores[i] = changed ? 0.0f : 1.0f;  // prefer unchanged masks
         }
         const float thresh = std::max(cfg_.box_nms_thresh, cfg_.crop_nms_thresh);
@@ -525,7 +507,7 @@ std::vector<GeneratedMask> AutomaticMaskGenerator::generate(const uint8_t* pixel
 
     // Finalize per-mask box + area, then sort by descending area.
     for (auto& gm : out) {
-        const Box b = mask_to_box(gm.mask, w, h);
+        const Box b = mask_to_box(gm.mask.data(), w, h);
         long long a = 0;
         for (uint8_t v : gm.mask) a += v;
         gm.area = a;

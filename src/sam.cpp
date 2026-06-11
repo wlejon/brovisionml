@@ -209,6 +209,138 @@ std::vector<Segmentation> Sam::segment_points(
     return out;
 }
 
+// ─── Batched binary segment (AMG hot path) ────────────────────────────────────
+
+std::vector<BinarySegmentation> Sam::segment_points_binary(
+    const std::vector<std::array<float, 2>>& points,
+    bool multimask_output, float min_iou,
+    float stability_offset, float min_stability) const {
+    if (!has_image_) fail("segment_points_binary() called before set_image()");
+    std::vector<BinarySegmentation> out;
+    const int B = static_cast<int>(points.size());
+    if (B == 0) return out;
+
+    detail::profile_mark(device_, nullptr);
+    std::vector<std::array<float, 2>> mapped(static_cast<std::size_t>(B));
+    for (int b = 0; b < B; ++b)
+        apply_coords(transform_, points[static_cast<std::size_t>(b)][0],
+                     points[static_cast<std::size_t>(b)][1],
+                     mapped[static_cast<std::size_t>(b)][0],
+                     mapped[static_cast<std::size_t>(b)][1]);
+    PromptEmbeddings emb = pe_.encode_point_batch(mapped);
+    const int S = 2;
+    detail::profile_mark(device_, "prompt encode");
+
+    DecodedMasks dm = dec_.decode_batched(image_embedding_, pe_.dense_pe(),
+                                          emb.sparse, B, S, emb.dense,
+                                          multimask_output);
+    detail::profile_mark(device_, "decode batched");
+
+    const int num = dm.num_out;
+    Tensor iou_cpu = dm.iou.to(brotensor::Device::CPU);   // (B*num, 1) — tiny
+    const float* iv = iou_cpu.host_f32();
+
+    // Predicted-IoU pre-filter (same as segment_points): survivors only ever
+    // reach the upscale. keep stays sorted, so survivors group by prompt.
+    std::vector<int32_t> keep;
+    keep.reserve(static_cast<std::size_t>(B) * num);
+    for (int i = 0; i < B * num; ++i)
+        if (min_iou < 0.0f || iv[i] > min_iou)
+            keep.push_back(i);
+    const int n1 = static_cast<int>(keep.size());
+
+    const int oh = transform_.orig_h, ow = transform_.orig_w;
+    const std::size_t plane = static_cast<std::size_t>(oh) * ow;
+
+    auto upload_idx = [&](const std::vector<int32_t>& rows) {
+        Tensor idx_h = Tensor::zeros_on(brotensor::Device::CPU,
+                                        static_cast<int>(rows.size()), 1,
+                                        brotensor::Dtype::INT32);
+        std::copy(rows.begin(), rows.end(), static_cast<int32_t*>(idx_h.data));
+        return (device_ == brotensor::Device::CPU) ? idx_h : idx_h.to(device_);
+    };
+
+    Tensor up;   // (1, n1*plane) full-resolution logits on device_
+    if (n1 == B * num) {
+        up = upscale_masks_dev(dm.masks, B * num, dm.mask_size);
+    } else if (n1 > 0) {
+        Tensor idx = upload_idx(keep);
+        Tensor kept_masks;
+        brotensor::gather_rows(dm.masks, idx, kept_masks);
+        up = upscale_masks_dev(kept_masks, n1, dm.mask_size);
+    }
+    detail::profile_mark(device_, "upscale masks");
+
+    // Stability score on device: per upscaled plane, count(logit > -offset)
+    // (union) and count(logit > +offset) (intersection); only 2 INT32 per mask
+    // cross the bus. Same comparisons on the same FP32 values as the old host
+    // scan, so the kept set is bit-identical.
+    std::vector<float>   stab(static_cast<std::size_t>(n1), 0.0f);
+    std::vector<int32_t> keep2;   // local row indices into `up`
+    keep2.reserve(static_cast<std::size_t>(n1));
+    if (n1 > 0) {
+        Tensor up_rows = Tensor::view(up.device, up.data, n1,
+                                      static_cast<int>(plane));
+        Tensor counts_dev;
+        brotensor::rows_count_above(up_rows, -stability_offset,
+                                    stability_offset, counts_dev);
+        Tensor counts_h = counts_dev.to(brotensor::Device::CPU);  // (n1,2)
+        const int32_t* cv = static_cast<const int32_t*>(counts_h.data);
+        for (int i = 0; i < n1; ++i) {
+            const int32_t uni = cv[2 * i], inter = cv[2 * i + 1];
+            const float s = uni > 0
+                                ? static_cast<float>(inter) /
+                                      static_cast<float>(uni)
+                                : 0.0f;
+            stab[static_cast<std::size_t>(i)] = s;
+            if (min_stability <= 0.0f || s >= min_stability)
+                keep2.push_back(i);
+        }
+    }
+
+    // Binarize the stability survivors at logit 0 on device and download 0/1
+    // bytes — a quarter of the FP32 logit volume.
+    const int n2 = static_cast<int>(keep2.size());
+    Tensor bin_h;
+    if (n2 > 0) {
+        Tensor up_rows = Tensor::view(up.device, up.data, n1,
+                                      static_cast<int>(plane));
+        Tensor src = up_rows;
+        if (n2 != n1) {
+            Tensor idx = upload_idx(keep2);
+            Tensor gathered;
+            brotensor::gather_rows(up_rows, idx, gathered);
+            src = std::move(gathered);
+        }
+        Tensor bin_dev;
+        brotensor::threshold_u8(src, 0.0f, bin_dev);
+        bin_h = (bin_dev.device == brotensor::Device::CPU)
+                    ? bin_dev : bin_dev.to(brotensor::Device::CPU);
+    }
+    detail::profile_mark(device_, "stability + masks download");
+
+    const uint8_t* bp =
+        n2 > 0 ? static_cast<const uint8_t*>(bin_h.data) : nullptr;
+    out.reserve(static_cast<std::size_t>(B));
+    std::size_t ki = 0;   // cursor into keep2 / bin rows, grouped by prompt
+    for (int b = 0; b < B; ++b) {
+        BinarySegmentation seg;
+        seg.height = oh;
+        seg.width  = ow;
+        while (ki < keep2.size() &&
+               keep[static_cast<std::size_t>(keep2[ki])] < (b + 1) * num) {
+            const uint8_t* base = bp + ki * plane;
+            seg.masks.insert(seg.masks.end(), base, base + plane);
+            seg.iou.push_back(iv[keep[static_cast<std::size_t>(keep2[ki])]]);
+            seg.stability.push_back(stab[static_cast<std::size_t>(keep2[ki])]);
+            ++seg.num;
+            ++ki;
+        }
+        out.push_back(std::move(seg));
+    }
+    return out;
+}
+
 // ─── Mask upscale (shared postprocess) ────────────────────────────────────────
 //
 // SAM's mask postprocess: bilinear-upscale each (mask_size, mask_size) logit
@@ -216,17 +348,17 @@ std::vector<Segmentation> Sam::segment_points(
 // resized content occupies the top-left resized_h x resized_w), then resize to
 // the original image size. Both resamples are bilinear / align_corners=False.
 
-std::vector<float> Sam::upscale_masks(const brotensor::Tensor& masks,
-                                      int num, int mask_size) const {
+brotensor::Tensor Sam::upscale_masks_dev(const brotensor::Tensor& masks,
+                                         int num, int mask_size) const {
     const int ms = mask_size;
     const int S  = cfg_.encoder.img_size;
     const int rh = transform_.resized_h, rw = transform_.resized_w;
     const int oh = transform_.orig_h,    ow = transform_.orig_w;
 
     // All three steps run on the masks' device (upscale -> de-letterbox crop
-    // -> resize to original); only the final full-resolution logits are
-    // downloaded. Under the automatic mask generator this is per point-batch
-    // hot path. (num, ms*ms) row-major is already NCHW (1, num, ms, ms).
+    // -> resize to original). Under the automatic mask generator this is per
+    // point-batch hot path. (num, ms*ms) row-major is already NCHW (1, num,
+    // ms, ms).
     Tensor in0 = Tensor::view(masks.device, masks.data, 1, num * ms * ms);
 
     Tensor up1;
@@ -239,7 +371,13 @@ std::vector<float> Sam::upscale_masks(const brotensor::Tensor& masks,
 
     Tensor up2;
     brotensor::interp2d_forward(cropped, 1, num, rh, rw, oh, ow, /*bilinear=*/1, up2);
+    return up2;
+}
 
+std::vector<float> Sam::upscale_masks(const brotensor::Tensor& masks,
+                                      int num, int mask_size) const {
+    const int oh = transform_.orig_h, ow = transform_.orig_w;
+    Tensor up2 = upscale_masks_dev(masks, num, mask_size);
     Tensor host = (up2.device == brotensor::Device::CPU)
                       ? up2 : up2.to(brotensor::Device::CPU);
     const float* logit = host.host_f32();
