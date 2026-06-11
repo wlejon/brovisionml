@@ -1,6 +1,7 @@
 #include "brovisionml/lineart.h"
 
 #include "brotensor/ops.h"
+#include "brotensor/runtime.h"
 #include "brotensor/safetensors.h"
 
 #include "broimage/geometric.h"
@@ -140,6 +141,7 @@ void apply_relu(Tensor& x) {
 
 struct LineartDetector::Impl {
     bool loaded = false;
+    bool fp16 = false;
     brotensor::Device device = brotensor::Device::CPU;
 
     Conv m0;                 // 3->64, 7x7   (reflect pad 3)
@@ -204,7 +206,23 @@ void LineartDetector::to(brotensor::Device dev) {
     Impl& m = *impl_;
     if (!m.loaded) fail("to() called before load()");
     if (dev == m.device) return;
-    auto mv      = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
+    // Mixed precision on a GPU backend: every trunk conv is a WMMA-covered
+    // shape (3x3 p0/p1 s1+s2, 7x7 p0 head; the skinny 64->1 tail falls to the
+    // naive FP16 kernel via the C_out<16 gate) and the conv-transpose
+    // upsamplers, reflect pads, instance norms, relu/add/sigmoid/interp all
+    // have FP16 paths, so the whole forward runs FP16 and only the final line
+    // map is widened for download. The instance-norm gamma/beta constants are
+    // cast too — group_norm requires per-channel params to match X's dtype.
+    // CPU stays all-FP32; to(CPU) widens back.
+    const bool fp16 = dev != brotensor::Device::CPU &&
+                      brotensor::compute_dtype() == brotensor::Dtype::FP16;
+    const brotensor::Dtype want = fp16 ? brotensor::Dtype::FP16
+                                       : brotensor::Dtype::FP32;
+    auto mv = [&](Tensor& t) {
+        if (!t.data) return;
+        t = t.to(dev);
+        if (t.dtype != want) { Tensor c; brotensor::cast(t, c, want); t = std::move(c); }
+    };
     auto mv_conv = [&](Conv& c) { mv(c.weight); mv(c.bias); };
     mv_conv(m.m0);
     mv_conv(m.d0); mv_conv(m.d1);
@@ -213,6 +231,7 @@ void LineartDetector::to(brotensor::Device dev) {
     mv_conv(m.m4);
     for (auto& kv : m.norm_const) { mv(kv.second.first); mv(kv.second.second); }
     m.device = dev;
+    m.fp16 = fp16;
 }
 
 brotensor::Device LineartDetector::device() const { return impl_->device; }
@@ -228,6 +247,11 @@ LineMap LineartDetector::run(const PreprocessedImage& pp) const {
 
     Tensor x = (m.device == brotensor::Device::CPU) ? pp.pixels
                                                      : pp.pixels.to(m.device);
+    if (m.fp16) {
+        Tensor h;
+        brotensor::cast(x, h, brotensor::Dtype::FP16);
+        x = std::move(h);
+    }
 
     // InstanceNorm applied in place to `x` for the given channel count.
     auto instance_norm = [&](Tensor& t, int C, int h, int w) {
@@ -293,7 +317,12 @@ LineMap LineartDetector::run(const PreprocessedImage& pp) const {
     }
     (void)procH; (void)procW;
 
-    // Pull to host.
+    // Widen back to FP32 and pull to host.
+    if (line.dtype != brotensor::Dtype::FP32) {
+        Tensor f;
+        brotensor::cast(line, f, brotensor::Dtype::FP32);
+        line = std::move(f);
+    }
     Tensor host = (line.device == brotensor::Device::CPU)
                       ? line
                       : line.to(brotensor::Device::CPU);
