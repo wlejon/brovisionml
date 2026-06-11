@@ -126,6 +126,7 @@ endif()
 
 target_sources(brovisionml PRIVATE
     src/version.cpp
+    src/profile.cpp
     src/tile_runner.cpp
     src/dpt_preprocess.cpp
     src/dsine_preprocess.cpp
