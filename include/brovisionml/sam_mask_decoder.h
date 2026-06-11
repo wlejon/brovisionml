@@ -86,8 +86,11 @@ public:
     void load_file(const std::string& path);
 
     // Migrate weights onto `dev`. decode() then runs on `dev` and expects its
-    // input tensors resident there. No-op if already on `dev`. Throws before
-    // load().
+    // input tensors resident there. On a GPU backend whose compute dtype is
+    // FP16, the attention projections (the only GEMMs that scale with
+    // batch*grid² rows) migrate to FP16; everything else stays FP32, and the
+    // CPU keeps its exact all-FP32 path. No-op if already on `dev`. Throws
+    // before load().
     void to(brotensor::Device dev);
     brotensor::Device device() const { return device_; }
 
@@ -138,6 +141,7 @@ private:
     MaskDecoderConfig                   cfg_;
     std::unique_ptr<MaskDecoderWeights> w_;
     brotensor::Device                   device_ = brotensor::Device::CPU;
+    bool fp16_ = false;  // attention weights in FP16 (set by to() on a GPU backend)
 };
 
 }  // namespace brovisionml::sam
