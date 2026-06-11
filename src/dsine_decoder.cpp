@@ -1,12 +1,14 @@
 #include "brovisionml/dsine_decoder.h"
 
 #include "brotensor/ops.h"
+#include "brotensor/runtime.h"
 #include "brotensor/safetensors.h"
 
 #include "weights_util.h"
 
 #include <cmath>
 #include <cstring>
+#include <utility>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -294,6 +296,7 @@ UvMap build_ray8(const Intrinsics& intrins, int Hf, int Wf, int origH, int origW
 
 struct Decoder::Impl {
     bool loaded = false;
+    bool fp16 = false;
     brotensor::Device device = brotensor::Device::CPU;
     Conv       conv2;        // decoder.conv2  Conv2d(2050, 2048, 1x1)
     UpSampleGN up1;          // decoder.up1
@@ -329,7 +332,22 @@ void Decoder::to(brotensor::Device dev) {
     Impl& m = *impl_;
     if (!m.loaded) fail("to() called before load()");
     if (dev == m.device) return;
-    auto mv      = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
+    // Mixed precision on a GPU backend: the 3x3 p1 and 1x1 convs ride the
+    // WMMA implicit-GEMM path; GroupNorm (params cast to match X's dtype),
+    // leaky-ReLU, bilinear upsample, concat and the L2 normalize all have
+    // FP16 paths. The encoder taps arrive FP16 (same compute-dtype policy);
+    // the three outputs are widened back to FP32 before returning because the
+    // refiner consumes them with brovisionml's FP32 CUDA domain kernels
+    // (RayReLU / AngMF propagate). CPU stays all-FP32; to(CPU) widens back.
+    const bool fp16 = dev != brotensor::Device::CPU &&
+                      brotensor::compute_dtype() == brotensor::Dtype::FP16;
+    const brotensor::Dtype want = fp16 ? brotensor::Dtype::FP16
+                                       : brotensor::Dtype::FP32;
+    auto mv = [&](Tensor& t) {
+        if (!t.data) return;
+        t = t.to(dev);
+        if (t.dtype != want) { Tensor c; brotensor::cast(t, c, want); t = std::move(c); }
+    };
     auto mv_conv = [&](Conv& c) { mv(c.weight); mv(c.bias); };
     auto mv_gn   = [&](GN& g) { mv(g.weight); mv(g.bias); };
     auto mv_up   = [&](UpSampleGN& u) {
@@ -340,6 +358,7 @@ void Decoder::to(brotensor::Device dev) {
     mv_up(m.up1); mv_up(m.up2);
     mv_head(m.normal_head); mv_head(m.feature_head); mv_head(m.hidden_head);
     m.device = dev;
+    m.fp16 = fp16;
 }
 
 brotensor::Device Decoder::device() const { return impl_->device; }
@@ -363,6 +382,16 @@ DecoderOutput Decoder::forward(const EncoderTaps& taps, const Intrinsics& intrin
         uv32.data = uv32.data.to(m.device);
         uv16.data = uv16.data.to(m.device);
         uv8.data  = uv8.data.to(m.device);
+    }
+    if (m.fp16) {
+        // The channel-concats below require the uv planes to match the (FP16)
+        // encoder taps' dtype.
+        auto narrow = [](Tensor& t) {
+            Tensor c;
+            brotensor::cast(t, c, brotensor::Dtype::FP16);
+            t = std::move(c);
+        };
+        narrow(uv32.data); narrow(uv16.data); narrow(uv8.data);
     }
 
     // The uv grid dims must match the encoder taps (both derive from origH/W).
@@ -397,6 +426,16 @@ DecoderOutput Decoder::forward(const EncoderTaps& taps, const Intrinsics& intrin
     // f = feature_head(x_feat); h = hidden_head(x_feat)
     out.feature = run_head(m.feature_head, x_feat2, h8, w8);
     out.hidden  = run_head(m.hidden_head, x_feat2, h8, w8);
+
+    // The refiner consumes these with FP32 CUDA domain kernels (RayReLU /
+    // AngMF propagate) and FP32 uv/ray planes — widen at the boundary.
+    auto widen = [](Tensor& t) {
+        if (t.dtype == brotensor::Dtype::FP32) return;
+        Tensor f32;
+        brotensor::cast(t, f32, brotensor::Dtype::FP32);
+        t = std::move(f32);
+    };
+    widen(out.normal); widen(out.feature); widen(out.hidden);
 
     return out;
 }

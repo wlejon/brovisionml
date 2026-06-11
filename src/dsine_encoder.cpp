@@ -1,6 +1,7 @@
 #include "brovisionml/dsine_encoder.h"
 
 #include "brotensor/ops.h"
+#include "brotensor/runtime.h"
 #include "brotensor/safetensors.h"
 
 #include "weights_util.h"
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace brovisionml::dsine {
@@ -123,6 +125,7 @@ BN load_bn(const st::File& f, const std::string& prefix) {
 
 struct EncoderB5::Impl {
     bool loaded = false;
+    bool fp16 = false;
     brotensor::Device device = brotensor::Device::CPU;
 
     // Stem.
@@ -255,7 +258,23 @@ void EncoderB5::to(brotensor::Device dev) {
     Impl& m = *impl_;
     if (!m.loaded) fail("to() called before load()");
     if (dev == m.device) return;
-    auto mv    = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
+    // Mixed precision on a GPU backend: the 1x1 pointwise/projection convs and
+    // conv_head ride the WMMA implicit-GEMM path; the depthwise convs fall to
+    // the naive FP16 kernel (memory-bound — fine); BN inference, SiLU, the SE
+    // blocks (adaptive pool / 1x1 convs / sigmoid / broadcast gate), TF-same
+    // pads and the residual adds all have FP16 paths. BN per-channel params
+    // are cast too — batch_norm_inference requires them to match X's dtype.
+    // The taps are returned FP16 for the (equally FP16) decoder. CPU stays
+    // all-FP32; to(CPU) widens back.
+    const bool fp16 = dev != brotensor::Device::CPU &&
+                      brotensor::compute_dtype() == brotensor::Dtype::FP16;
+    const brotensor::Dtype want = fp16 ? brotensor::Dtype::FP16
+                                       : brotensor::Dtype::FP32;
+    auto mv = [&](Tensor& t) {
+        if (!t.data) return;
+        t = t.to(dev);
+        if (t.dtype != want) { Tensor c; brotensor::cast(t, c, want); t = std::move(c); }
+    };
     auto mv_bn = [&](BN& bn) { mv(bn.weight); mv(bn.bias); mv(bn.mean); mv(bn.var); };
     mv(m.conv_stem);
     mv_bn(m.bn1);
@@ -270,6 +289,7 @@ void EncoderB5::to(brotensor::Device dev) {
     }
     mv(m.conv_head);
     m.device = dev;
+    m.fp16 = fp16;
 }
 
 brotensor::Device EncoderB5::device() const { return impl_->device; }
@@ -426,9 +446,18 @@ EncoderTaps EncoderB5::forward(const brotensor::Tensor& pixels,
     if (pixels.rows != 1 || pixels.cols != 3 * H * W)
         fail("pixels must be (1, 3*H*W)");
 
+    // Under mixed precision the whole trunk runs FP16: narrow the (FP32)
+    // pixel upload once here; the taps are handed to the decoder still FP16.
+    Tensor in = pixels;
+    if (m.fp16) {
+        Tensor hx;
+        brotensor::cast(in, hx, brotensor::Dtype::FP16);
+        in = std::move(hx);
+    }
+
     // Stem: conv_stem (s2,k3,TF-same) -> bn1 -> SiLU.
     int h, w;
-    Tensor x = conv(pixels, m.conv_stem, /*C_in=*/3, H, W, m.stem_out,
+    Tensor x = conv(in, m.conv_stem, /*C_in=*/3, H, W, m.stem_out,
                     /*k=*/3, /*stride=*/2, /*depthwise=*/false,
                     /*pad_same=*/true, h, w);
     apply_bn(x, m.bn1, m.stem_out, h, w);
