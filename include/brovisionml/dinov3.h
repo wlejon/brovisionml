@@ -79,9 +79,11 @@ public:
 
     // Migrate weights to a compute device (CPU/CUDA/Metal). No-op if already there.
     // On a GPU backend (brotensor::compute_dtype() == FP16) encode() runs mixed
-    // precision: the projection weights migrate to FP16 for tensor-core GEMMs while
-    // the residual stream and LayerNorm stay FP32 (DINOv3's massive activations
-    // overflow FP16). CPU keeps the all-FP32 path and its exact parity.
+    // precision: the bounded-input projections (q/k/v/gate/up, patch embed) run
+    // FP16 tensor-core GEMMs; the residual-writing o_proj/down_proj run BF16
+    // (DINOv3's massive activations overflow FP16's range but not BF16's); the
+    // residual stream and LayerNorm stay FP32. CPU keeps the all-FP32 path and
+    // its exact parity.
     void to(brotensor::Device dev);
     brotensor::Device device() const { return device_; }
 

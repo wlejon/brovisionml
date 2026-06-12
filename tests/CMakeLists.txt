@@ -90,6 +90,13 @@ brovisionml_add_test(brovisionml_test_depth_parity       test_depth_parity.cpp)
 target_compile_definitions(brovisionml_test_depth_parity PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
 
+# DINOv3 encode benchmark at the TripoSplat production shape (1024^2, K=4101).
+# Gated on the real ViT-H checkpoint (skips cleanly); a perf tool, not a ctest.
+add_executable(brovisionml_bench_dinov3 bench_dinov3.cpp)
+target_link_libraries(brovisionml_bench_dinov3 PRIVATE brovisionml)
+target_compile_definitions(brovisionml_bench_dinov3 PRIVATE
+    BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+
 # DINOv3 ViT-H backbone test: structural CPU checks always run; the HF
 # numeric-parity part is gated on the real checkpoint
 # (weights/triposplat/clip_vision/dino_v3_vit_h.safetensors) and the

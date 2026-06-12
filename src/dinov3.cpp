@@ -6,10 +6,14 @@
 
 #include "weights_util.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace brovisionml::dinov3 {
@@ -24,6 +28,50 @@ const std::string kWho = "dinov3::Backbone: ";
 
 [[noreturn]] void fail(const std::string& msg) {
     throw std::runtime_error(kWho + msg);
+}
+
+// Per-op profiler, enabled with BROVISIONML_DINO_PROFILE=1. Syncs around each
+// op category, accumulates ms per category across one encode(), prints a
+// summary at the end. The per-op syncs serialise the stream, so the absolute
+// total runs a little above production — the split, not the total, is the
+// signal here. (Same pattern as brodiffusion's FlowProf.)
+struct DinoProf {
+    static bool enabled() {
+        static const bool on = [] {
+            const char* e = std::getenv("BROVISIONML_DINO_PROFILE");
+            return e && *e && *e != '0';
+        }();
+        return on;
+    }
+    std::vector<std::pair<const char*, double>> cats;  // insertion-ordered
+    double& at(const char* n) {
+        for (auto& p : cats)
+            if (p.first == n || std::string(p.first) == n) return p.second;
+        cats.emplace_back(n, 0.0);
+        return cats.back().second;
+    }
+    void dump_and_reset(const char* tag) {
+        double total = 0.0;
+        for (auto& p : cats) total += p.second;
+        std::fprintf(stderr, "[dino] ── %s ──\n", tag);
+        for (auto& p : cats)
+            std::fprintf(stderr, "[dino] %-22s %8.1f ms  %4.1f%%\n",
+                         p.first, p.second, total > 0 ? 100.0 * p.second / total : 0.0);
+        std::fprintf(stderr, "[dino] %-22s %8.1f ms\n", "TOTAL", total);
+        cats.clear();
+    }
+};
+DinoProf g_dino_prof;
+
+template <class F>
+inline void prof(const char* name, F&& f) {
+    if (!DinoProf::enabled()) { f(); return; }
+    brotensor::sync_all();
+    const auto t0 = std::chrono::steady_clock::now();
+    f();
+    brotensor::sync_all();
+    g_dino_prof.at(name) +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
 // Fold a per-output-channel scale `s` (rows,1) into a linear layer's weight
@@ -202,13 +250,13 @@ void Backbone::load_file(const std::string& path) {
 void Backbone::to(brotensor::Device dev) {
     if (!w_->loaded) fail("to() called before load()");
     if (dev == device_) return;
-    // Mixed precision on a GPU backend: the projection weights run FP16
+    // Mixed precision on a GPU backend: the projection weights run 16-bit
     // tensor-core GEMMs (the speed win), but the residual stream and every
     // LayerNorm stay FP32. DINOv3 ViT-H has "massive activations" whose magnitude
     // runs into the thousands — well past FP16's 65504 ceiling — so an FP16
     // residual would store them as inf and flood the output with NaNs. The
     // LayerNorm params and token embeddings therefore live on the FP32 side (they
-    // touch the FP32 residual directly); only the matmul weights go to half.
+    // touch the FP32 residual directly); only the matmul weights go 16-bit.
     // CPU stays all-FP32 (its exact parity path). cast is registered both
     // directions on CPU and CUDA, so to(CPU) after a GPU stint widens back.
     const bool fp16 = dev != brotensor::Device::CPU &&
@@ -219,23 +267,28 @@ void Backbone::to(brotensor::Device dev) {
         if (t.dtype != want) { Tensor c; brotensor::cast(t, c, want); t = std::move(c); }
     };
     const brotensor::Dtype proj = fp16 ? brotensor::Dtype::FP16 : brotensor::Dtype::FP32;
+    const brotensor::Dtype wide = fp16 ? brotensor::Dtype::BF16 : brotensor::Dtype::FP32;
     auto mv32 = [&](Tensor& t) { to_dt(t, brotensor::Dtype::FP32); };  // FP32 residual side
     auto mv16 = [&](Tensor& t) { to_dt(t, proj); };                   // FP16 GEMM weights
-    // The four projections that read from the LayerNorm'd (bounded) stream stay
+    auto mvbf = [&](Tensor& t) { to_dt(t, wide); };                   // BF16 GEMM weights
+    // The four projections that read from the LayerNorm'd (bounded) stream run
     // FP16 — q/k/v/gate/up — as does the patch embed. The two that WRITE the
     // residual — o_proj and down_proj — carry the LayerScale-amplified massive
     // activations (down_proj's output hits ~1e5 by layer 22, well over FP16's
-    // 65504 ceiling, and would store as inf), so they run FP32.
+    // 65504 ceiling, and would store as inf), so they run BF16: FP32's exponent
+    // range at tensor-core speed, trading mantissa (8 bits vs FP16's 11) on
+    // outputs whose scale dwarfs that rounding. (FP32 here costs ~93% of the
+    // encode — the wide-batch FP32 linear path has no tensor cores.)
     mv16(w_->patch_w); mv16(w_->patch_b);
     mv32(w_->cls_token); mv32(w_->register_tokens);
     mv32(w_->final_ln_w); mv32(w_->final_ln_b);
     for (BlockWeights& b : w_->blocks) {
         mv32(b.n1_w); mv32(b.n1_b);
         mv16(b.q_w); mv16(b.q_b); mv16(b.k_w); mv16(b.k_b); mv16(b.v_w); mv16(b.v_b);
-        mv32(b.o_w); mv32(b.o_b);
+        mvbf(b.o_w); mvbf(b.o_b);
         mv32(b.n2_w); mv32(b.n2_b);
         mv16(b.gate_w); mv16(b.gate_b); mv16(b.up_w); mv16(b.up_b);
-        mv32(b.down_w); mv32(b.down_b);
+        mvbf(b.down_w); mvbf(b.down_b);
     }
     device_ = dev;
     fp16_ = fp16;
@@ -306,6 +359,20 @@ Tensor to32(bool fp16, const Tensor& t) {
     Tensor c; brotensor::cast(t, c, brotensor::Dtype::FP32); return c;
 }
 
+// BF16 tensor-core linear for the residual-writing projections (o_proj /
+// down_proj, LayerScale folded in): X arrives FP16 (attention / swiglu output),
+// hops to BF16 for the GEMM against the BF16 weights, and the result — which
+// carries the massive activations, so it needs BF16's FP32-sized exponent —
+// widens to FP32 for the residual add. Plain FP32 GEMM when fp16 is off.
+void linear_wide(bool fp16, const Tensor& W, const Tensor& bias,
+                 const Tensor& X, Tensor& Y) {
+    if (!fp16) { brotensor::linear_forward_batched(W, bias, X, Y); return; }
+    Tensor xbf, ybf;
+    brotensor::cast(X, xbf, brotensor::Dtype::BF16);
+    brotensor::linear_forward_batched_fp16(W, &bias, xbf, ybf);
+    brotensor::cast(ybf, Y, brotensor::Dtype::FP32);
+}
+
 }  // namespace
 
 // ─── Forward ──────────────────────────────────────────────────────────────────
@@ -341,13 +408,16 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
 
     // 1. Patch embed -> token-major (np, D), then widen to the FP32 residual.
     Tensor feat;
-    brotensor::conv2d_forward(px, w_->patch_w, &w_->patch_b,
-                              /*N=*/1, cfg_.in_chans, H, W,
-                              /*C_out=*/D, p, p, /*stride=*/p, p,
-                              /*pad=*/0, 0, /*dil=*/1, 1, feat);
-    Tensor patch_seq;
-    brotensor::nchw_to_sequence(feat, 1, D, gh, gw, patch_seq);
-    Tensor patch_tokens = to32(fp16_, patch_seq);  // FP32 token embeddings
+    Tensor patch_tokens;
+    prof("patch embed", [&] {
+        brotensor::conv2d_forward(px, w_->patch_w, &w_->patch_b,
+                                  /*N=*/1, cfg_.in_chans, H, W,
+                                  /*C_out=*/D, p, p, /*stride=*/p, p,
+                                  /*pad=*/0, 0, /*dil=*/1, 1, feat);
+        Tensor patch_seq;
+        brotensor::nchw_to_sequence(feat, 1, D, gh, gw, patch_seq);
+        patch_tokens = to32(fp16_, patch_seq);  // FP32 token embeddings
+    });
 
     // 2. Assemble [cls, register..., patches] -> (K, D). concat_rows yields a flat
     //    (K*D,1) buffer whose row-major bytes already are the (K, D) matrix.
@@ -381,53 +451,76 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
 
         // Attention: x = x + LS1·o_proj(attn(rope(q),rope(k),v)).  LS1 in o_w/o_b.
         // LN(x) is FP32 and range-bounded; drop to FP16 only to feed q/k/v. The
-        // attention output is a convex mix of (bounded) V, but o_proj carries LS1
-        // so its result re-enters the residual at full FP32 width.
-        Tensor h1;
-        brotensor::layernorm_forward_inference_batched(x, b.n1_w, b.n1_b, h1, eps);
-        Tensor h1c = to16(fp16_, h1);
+        // attention output is a convex mix of (bounded) V; o_proj carries LS1 and
+        // writes the residual, so it runs BF16 (range) and widens to FP32.
+        Tensor h1, h1c;
+        prof("layernorm", [&] {
+            brotensor::layernorm_forward_inference_batched(x, b.n1_w, b.n1_b, h1, eps);
+        });
+        prof("casts", [&] { h1c = to16(fp16_, h1); });
         Tensor q, k, v;
-        linear_b(fp16_, b.q_w, b.q_b, h1c, q);
-        linear_b(fp16_, b.k_w, b.k_b, h1c, k);
-        linear_b(fp16_, b.v_w, b.v_b, h1c, v);
+        prof("qkv proj", [&] {
+            linear_b(fp16_, b.q_w, b.q_b, h1c, q);
+            linear_b(fp16_, b.k_w, b.k_b, h1c, k);
+            linear_b(fp16_, b.v_w, b.v_b, h1c, v);
+        });
         Tensor qr, kr;
-        brotensor::rope_apply(q, cos_tbl, sin_tbl, hd, nh, qr);
-        brotensor::rope_apply(k, cos_tbl, sin_tbl, hd, nh, kr);
+        prof("rope", [&] {
+            brotensor::rope_apply(q, cos_tbl, sin_tbl, hd, nh, qr);
+            brotensor::rope_apply(k, cos_tbl, sin_tbl, hd, nh, kr);
+        });
         Tensor attn;
-        brotensor::flash_attention_varlen_forward(qr, kr, v, cu_p, cu_p,
-                                                  /*batch_size=*/1,
-                                                  /*max_seqlen_q=*/K,
-                                                  /*max_seqlen_k=*/K,
-                                                  nh, hd, /*causal=*/false, attn);
-        Tensor attn32 = to32(fp16_, attn);
+        prof("attention", [&] {
+            brotensor::flash_attention_varlen_forward(qr, kr, v, cu_p, cu_p,
+                                                      /*batch_size=*/1,
+                                                      /*max_seqlen_q=*/K,
+                                                      /*max_seqlen_k=*/K,
+                                                      nh, hd, /*causal=*/false, attn);
+        });
         Tensor o;
-        linear_b(/*fp16=*/false, b.o_w, b.o_b, attn32, o);    // FP32 o_proj
-        brotensor::add_inplace(x, o);                         // FP32 residual
+        prof("o_proj", [&] {
+            linear_wide(fp16_, b.o_w, b.o_b, attn, o);  // BF16 GEMM, FP32 out
+        });
+        prof("residual add", [&] { brotensor::add_inplace(x, o); });  // FP32 residual
 
         // MLP: x = x + LS2·down(silu(gate(LN2(x))) * up(LN2(x))).  LS2 in down.
         // gate/up read bounded LN(x) → FP16; down_proj writes the residual and
-        // carries LS2 + the massive activations (~1e5), so it runs FP32.
-        Tensor h2;
-        brotensor::layernorm_forward_inference_batched(x, b.n2_w, b.n2_b, h2, eps);
-        Tensor h2c = to16(fp16_, h2);
+        // carries LS2 + the massive activations (~1e5, over FP16's 65504), so it
+        // runs BF16 and widens to FP32.
+        Tensor h2, h2c;
+        prof("layernorm", [&] {
+            brotensor::layernorm_forward_inference_batched(x, b.n2_w, b.n2_b, h2, eps);
+        });
+        prof("casts", [&] { h2c = to16(fp16_, h2); });
         Tensor gate, up;
-        linear_b(fp16_, b.gate_w, b.gate_b, h2c, gate);
-        linear_b(fp16_, b.up_w, b.up_b, h2c, up);
-        Tensor swin;
-        brotensor::concat_batched_rows({&gate, &up}, swin);  // per row [gate|up]
-        Tensor act;
-        brotensor::swiglu_forward(swin, act);
-        Tensor act32 = to32(fp16_, act);
+        prof("gate/up proj", [&] {
+            linear_b(fp16_, b.gate_w, b.gate_b, h2c, gate);
+            linear_b(fp16_, b.up_w, b.up_b, h2c, up);
+        });
+        Tensor swin, act;
+        prof("swiglu", [&] {
+            brotensor::concat_batched_rows({&gate, &up}, swin);  // per row [gate|up]
+            brotensor::swiglu_forward(swin, act);
+        });
         Tensor down;
-        linear_b(/*fp16=*/false, b.down_w, b.down_b, act32, down);  // FP32 down_proj
-        brotensor::add_inplace(x, down);                      // FP32 residual
+        prof("down_proj", [&] {
+            linear_wide(fp16_, b.down_w, b.down_b, act, down);  // BF16 GEMM, FP32 out
+        });
+        prof("residual add", [&] { brotensor::add_inplace(x, down); });  // FP32 residual
     }
 
     // 5. Final LayerNorm (HF apply_layernorm=True). Output is FP32: the residual
     //    and the final norm are FP32, and the normalized result is range-safe.
     BackboneOutput out;
-    brotensor::layernorm_forward_inference_batched(
-        x, w_->final_ln_w, w_->final_ln_b, out.last_hidden_state, eps);
+    prof("layernorm", [&] {
+        brotensor::layernorm_forward_inference_batched(
+            x, w_->final_ln_w, w_->final_ln_b, out.last_hidden_state, eps);
+    });
+    if (DinoProf::enabled()) {
+        char tag[64];
+        std::snprintf(tag, sizeof(tag), "encode K=%d D=%d", K, D);
+        g_dino_prof.dump_and_reset(tag);
+    }
     out.patch_h = gh;
     out.patch_w = gw;
     out.num_prefix_tokens = pre;
