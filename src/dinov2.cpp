@@ -112,7 +112,12 @@ void Backbone::load_file(const std::string& path) {
     const int p  = cfg_.patch_size;
     const int md = cfg_.mlp_dim();
     const int ng = cfg_.native_grid();
-    const std::string pre = "backbone.";
+    // Two checkpoint layouts carry this backbone: the `backbone.` namespace
+    // of a DepthAnythingForDepthEstimation checkpoint, and a plain HF DINOv2
+    // checkpoint (facebook/dinov2-*) with bare keys. Probe which one this is.
+    const std::string pre =
+        f.find("backbone.embeddings.patch_embeddings.projection.weight")
+            ? "backbone." : "";
 
     Weights w;
 
