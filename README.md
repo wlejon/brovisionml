@@ -1,5 +1,9 @@
 # brovisionml
 
+[![CI](https://github.com/wlejon/brovisionml/actions/workflows/ci.yml/badge.svg)](https://github.com/wlejon/brovisionml/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/wlejon/brovisionml/actions/workflows/codeql.yml/badge.svg)](https://github.com/wlejon/brovisionml/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Vision-model inference in pure C++20. brovisionml runs standalone
 image-understanding models — promptable segmentation, depth, surface
 normals, pose, edges, lines, semantic segmentation, background matting, and

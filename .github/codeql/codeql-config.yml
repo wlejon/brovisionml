@@ -1,0 +1,15 @@
+name: brovisionml CodeQL config
+
+queries:
+  - uses: security-extended
+
+# The sibling libraries (brotensor, broimage) are kept out of the analysis by
+# build order (see the pre-build step in codeql.yml) — that is what excludes
+# their compiled TUs. This paths-ignore is the complement: it drops any finding
+# that originates in a sibling *header* pulled into a brovisionml translation
+# unit, which build order cannot catch. Together they scope the Security tab to
+# brovisionml's own code.
+paths-ignore:
+  - bromath
+  - brotensor
+  - broimage
