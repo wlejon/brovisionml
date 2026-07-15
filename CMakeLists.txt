@@ -170,7 +170,9 @@ target_sources(brovisionml PRIVATE
 if(BROTENSOR_WITH_CUDA)
     target_sources(brovisionml PRIVATE src/dsine_ops.cu)
     target_compile_definitions(brovisionml PRIVATE BROVISIONML_WITH_CUDA=1)
-    target_link_libraries(brovisionml PUBLIC CUDA::cudart)
+    # Static CUDA runtime so the shipped binary carries no cudart DLL dependency
+    # and launches on machines without the CUDA toolkit (falls back to CPU).
+    target_link_libraries(brovisionml PUBLIC CUDA::cudart_static)
     # dsine_ops.cu is self-contained (kernels + host launchers in one TU, no
     # cross-TU device symbols), so it uses whole-program compilation — no
     # separable/relocatable device code, which would otherwise need a device-link
