@@ -45,6 +45,15 @@ if(BROTENSOR_WITH_CUDA)
     endif()
 endif()
 
+# The Metal twin of the DSINE kernels (src/dsine_ops.mm) is Objective-C++. Enable
+# OBJCXX only when the Metal backend is requested; the Metal frameworks it needs
+# come transitively from brotensor's brotensor_metal target (which PUBLIC-links
+# Foundation/Metal), and the kernels are authored against brotensor's public
+# <brotensor/metal_interop.h> surface, so no find_library is needed here.
+if(BROTENSOR_WITH_METAL)
+    enable_language(OBJCXX)
+endif()
+
 # --- Siblings: bromath (header-only) + brotensor (tensor + ops) + broimage ---
 #
 # Prefer standalone repos at ../<name>; fall back to third_party/ submodules.
@@ -181,6 +190,19 @@ if(BROTENSOR_WITH_CUDA)
         CUDA_STANDARD 17
         CUDA_STANDARD_REQUIRED ON
         CUDA_SEPARABLE_COMPILATION OFF)
+endif()
+
+# brovisionml's Metal twin of the same DSINE kernels. Compiled into the library
+# only when the Metal backend is on; BROVISIONML_WITH_METAL gates the
+# device-dispatch branch in src/dsine_ops.cpp that calls them. The .mm is
+# Objective-C++ with ARC; it links no Metal frameworks of its own (they arrive
+# transitively via brotensor::brotensor -> brotensor_metal).
+if(BROTENSOR_WITH_METAL)
+    target_sources(brovisionml PRIVATE src/dsine_ops.mm)
+    target_compile_definitions(brovisionml PRIVATE BROVISIONML_WITH_METAL=1)
+    set_source_files_properties(src/dsine_ops.mm PROPERTIES
+        LANGUAGE OBJCXX
+        COMPILE_OPTIONS "-fobjc-arc")
 endif()
 
 # --- Install ---

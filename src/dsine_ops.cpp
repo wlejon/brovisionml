@@ -8,6 +8,9 @@
 #if defined(BROVISIONML_WITH_CUDA)
 #include "dsine_ops_cuda.h"
 #endif
+#if defined(BROVISIONML_WITH_METAL)
+#include "dsine_ops_metal.h"
+#endif
 
 namespace brovisionml::dsine {
 
@@ -185,9 +188,11 @@ void ray_relu(brotensor::Tensor& normal, const brotensor::Tensor& ray,
     }
 #if defined(BROVISIONML_WITH_CUDA)
     detail::ray_relu_cuda(normal, ray, H, W);
+#elif defined(BROVISIONML_WITH_METAL)
+    detail::ray_relu_metal(normal, ray, H, W);
 #else
     fail("ray_relu: tensor on a non-CPU device, but brovisionml was built "
-         "without CUDA");
+         "without a GPU backend");
 #endif
 }
 
@@ -208,9 +213,12 @@ void angmf_propagate(const brotensor::Tensor& pred_norm,
 #if defined(BROVISIONML_WITH_CUDA)
     detail::angmf_propagate_cuda(pred_norm, prob, xy, angle, ray, fu, cu, fv, cv,
                                  H, W, out);
+#elif defined(BROVISIONML_WITH_METAL)
+    detail::angmf_propagate_metal(pred_norm, prob, xy, angle, ray, fu, cu, fv, cv,
+                                  H, W, out);
 #else
     fail("angmf_propagate: tensors on a non-CPU device, but brovisionml was "
-         "built without CUDA");
+         "built without a GPU backend");
 #endif
 }
 
