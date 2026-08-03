@@ -54,7 +54,7 @@ jobs:
         run: cmake --build build --parallel 4 --target brotensor_core brotensor_cpu broimage
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@v4.37.4
         with:
           languages: c-cpp
           build-mode: manual
@@ -65,6 +65,6 @@ jobs:
         run: cmake --build build --parallel 4 --target brovisionml
 
       - name: Analyze
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@v4.37.4
         with:
           category: /language:c-cpp
