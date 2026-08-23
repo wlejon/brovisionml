@@ -90,7 +90,7 @@ int main() {
     const std::string ckpt = base + "/triposplat/background_removal/birefnet.safetensors";
 
     const char* genv = std::getenv("BIREFNET_GOLDEN_DIR");
-    const std::string gdir = (genv && *genv) ? genv : "D:/projects/_splat_assets";
+    const std::string gdir = (genv && *genv) ? genv : "tests/golden";
     const std::string gpath = gdir + "/birefnet_backbone_golden.bin";
 
     if (!file_exists(ckpt) || !file_exists(gpath)) {
