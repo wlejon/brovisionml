@@ -21,10 +21,10 @@ inline brotensor::Device preferred_gpu() {
 }
 
 inline const char* device_name(brotensor::Device d) {
-    switch (d) {
-        case brotensor::Device::CUDA:  return "CUDA";
-        case brotensor::Device::Metal: return "Metal";
-        default:                       return "CPU";
+    switch (d.type) {
+        case brotensor::DeviceType::CUDA:  return "CUDA";
+        case brotensor::DeviceType::Metal: return "Metal";
+        default:                           return "CPU";
     }
 }
 

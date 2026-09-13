@@ -1,6 +1,7 @@
 #include "brovisionml/sam_image_encoder.h"
 
 #include "brotensor/ops.h"
+#include "brotensor/ops/fused.h"
 #include "brotensor/safetensors.h"
 
 #include "profile.h"
@@ -356,12 +357,10 @@ brotensor::Tensor ImageEncoder::encode(const brotensor::Tensor& pixels) const {
                 cfg_.num_heads, g, g, cfg_.window_size, scale, attn);
         }
         Tensor attn32 = to32(attn);
-        brotensor::add_inplace(x, attn32);
-        detail::profile_mark(device_, b.global ? "blk attn global" : "blk attn win");
-
-        // MLP sub-block: x = x + lin2(gelu(lin1(LN2(x)))).
+        // MLP sub-block: x += attn32, h2 = LN2(x) fused in-register pass without intermediate DRAM round-trip
         Tensor h2;
-        brotensor::layernorm_forward_inference_batched(x, b.ln2_w, b.ln2_b, h2, eps);
+        brotensor::fused_residual_layernorm(x, attn32, b.ln2_w, b.ln2_b, eps, h2);
+        detail::profile_mark(device_, b.global ? "blk attn global" : "blk attn win");
         Tensor h2c = to16(h2);
         Tensor m1;
         linear(b.mlp1_w, b.mlp1_b, h2c, m1);

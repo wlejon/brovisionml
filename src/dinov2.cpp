@@ -1,6 +1,7 @@
 #include "brovisionml/dinov2.h"
 
 #include "brotensor/ops.h"
+#include "brotensor/ops/fused.h"
 #include "brotensor/runtime.h"
 #include "brotensor/safetensors.h"
 
@@ -365,11 +366,9 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
                                    /*d_mask=*/nullptr, cfg_.num_heads,
                                    Qh, Kh, Vh, Attnh, Yc, attn);
         }
-        brotensor::add_inplace(x, attn);
-
-        // MLP: x = x + LS2·fc2(gelu(fc1(LN2(x)))).  LS2 is folded into fc2.
+        // MLP: x += attn, h2 = LN2(x) fused in-register pass without intermediate DRAM round-trip
         Tensor h2;
-        brotensor::layernorm_forward_inference_batched(x, b.ln2_w, b.ln2_b, h2, eps);
+        brotensor::fused_residual_layernorm(x, attn, b.ln2_w, b.ln2_b, eps, h2);
         Tensor h2c = to16(h2);
         Tensor m1;
         linear16(b.fc1_w, b.fc1_b, h2c, m1);
