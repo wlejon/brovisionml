@@ -179,3 +179,16 @@ target_compile_definitions(brovisionml_test_openpose PRIVATE
 # transformer parity); gate 2 compares the per-pixel class map agreement.
 target_compile_definitions(brovisionml_test_segformer PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
+
+# Bronze standalone JavaScript API test
+if(BROVISIONML_ENABLE_API)
+    add_executable(brovisionml_test_api test_vision_api.cpp)
+    target_include_directories(brovisionml_test_api PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src/api
+    )
+    target_link_libraries(brovisionml_test_api PRIVATE
+        brovisionml_api
+        bronze_runtime_shared
+    )
+    add_test(NAME brovisionml_test_api COMMAND brovisionml_test_api)
+endif()
