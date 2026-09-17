@@ -13,3 +13,5 @@ paths-ignore:
   - bromath
   - brotensor
   - broimage
+  - bronze
+  - brass
