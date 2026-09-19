@@ -1,8 +1,12 @@
 add_library(brovisionml_api STATIC
     api.cpp
     host_class.cpp
+    native_vision_annotators.cpp
+    native_vision_backbones.cpp
+    native_vision_generative.cpp
     native_vision_models.cpp
     native_vision_ops.cpp
+    native_vision_sam.cpp
 )
 
 target_include_directories(brovisionml_api PUBLIC

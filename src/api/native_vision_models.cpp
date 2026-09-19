@@ -42,42 +42,63 @@ static void addDeviceAccessor(ObjectBuilder& proto, const HostClass& cls) {
 static void decorateDepthEstimatorProto(ObjectBuilder& proto) {
     addDeviceAccessor<DepthEstimatorWrapper>(proto, g_depthEstimatorClass);
 
+    // estimate(image, opts?) -> { width, height, depth, gray, min, max }
+    //   opts.invert — the old binding's `image` ImageBitmap was min/max
+    //   normalized and optionally inverted (near = bright). A standalone
+    //   sibling cannot mint an ImageBitmap, so the same normalized plane comes
+    //   back as `gray` (Uint8Array) and `invert` flips it there.
     proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
         void* p = g_depthEstimatorClass.unwrap(thisVal);
         auto* w = p ? static_cast<DepthEstimatorWrapper*>(p) : nullptr;
 
+        const bool invert = args.size() > 1 && ev::isObject(args[1])
+                                ? ev::toBool(ev::getProperty(args[1], "invert"))
+                                : false;
+
         std::vector<uint8_t> rgba;
         int width = 512, height = 512;
         std::string err;
+        std::vector<float> depth;
         if (!args.empty() && readImageInput(args[0], rgba, width, height, err) && w && w->loaded && w->estimator) {
             try {
+                brotensor::DeviceScope scope(w->device);
                 auto dm = w->estimator->estimate(rgba.data(), width, height, 4);
-                float minV = 0.0f, maxV = 1.0f;
-                if (!dm.depth.empty()) {
-                    minV = *std::min_element(dm.depth.begin(), dm.depth.end());
-                    maxV = *std::max_element(dm.depth.begin(), dm.depth.end());
-                }
-                ObjectBuilder res;
-                res.set("width", static_cast<double>(dm.width));
-                res.set("height", static_cast<double>(dm.height));
-                ev::Persistent dep(makeFloat32Array(dm.depth.data(), dm.depth.size()));
-                res.set("depth", dep.get());
-                res.set("min", static_cast<double>(minV));
-                res.set("max", static_cast<double>(maxV));
-                return res.build();
+                depth = std::move(dm.depth);
+                width = dm.width;
+                height = dm.height;
             } catch (const std::exception& e) {
                 return ev::throwError(std::string("estimate failed: ") + e.what());
             }
+        } else {
+            depth.assign(static_cast<size_t>(width) * height, 0.5f);
         }
 
-        std::vector<float> dummy(static_cast<size_t>(width) * height, 0.5f);
+        float minV = 0.0f, maxV = 1.0f;
+        if (!depth.empty()) {
+            minV = *std::min_element(depth.begin(), depth.end());
+            maxV = *std::max_element(depth.begin(), depth.end());
+        }
+        const float span = (maxV > minV) ? (maxV - minV) : 1.0f;
+        std::vector<uint8_t> gray(depth.size());
+        for (size_t i = 0; i < depth.size(); ++i) {
+            float t = (depth[i] - minV) / span;
+            if (invert) t = 1.0f - t;
+            gray[i] = static_cast<uint8_t>(std::clamp(t * 255.0f, 0.0f, 255.0f));
+        }
+
         ObjectBuilder res;
         res.set("width", static_cast<double>(width));
         res.set("height", static_cast<double>(height));
-        ev::Persistent dep(makeFloat32Array(dummy.data(), dummy.size()));
-        res.set("depth", dep.get());
-        res.set("min", 0.0);
-        res.set("max", 1.0);
+        {
+            ev::Persistent dep(makeFloat32Array(depth.data(), depth.size()));
+            res.set("depth", dep.get());
+        }
+        {
+            ev::Persistent g(makeUint8Array(gray.data(), gray.size()));
+            res.set("gray", g.get());
+        }
+        res.set("min", static_cast<double>(minV));
+        res.set("max", static_cast<double>(maxV));
         return res.build();
     });
 }
@@ -86,108 +107,8 @@ static void decorateDepthEstimatorProto(ObjectBuilder& proto) {
 // Sam
 // ═══════════════════════════════════════════════════════════════════════════
 
-static void decorateSamProto(ObjectBuilder& proto) {
-    addDeviceAccessor<SamWrapper>(proto, g_samClass);
-
-    proto.accessor("hasImage", [](Value thisVal, std::span<const Value>) -> Value {
-        void* p = g_samClass.unwrap(thisVal);
-        if (!p) return ev::fromBool(false);
-        auto* w = static_cast<SamWrapper*>(p);
-        return ev::fromBool(w->hasImage);
-    });
-
-    proto.def("setImage", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_samClass.unwrap(thisVal);
-        if (!p) return ev::throwTypeError("Sam.prototype.setImage: not a Sam instance");
-        auto* w = static_cast<SamWrapper*>(p);
-
-        if (args.empty()) return ev::throwTypeError("setImage: image is required");
-        std::vector<uint8_t> rgba;
-        int imgW = 0, imgH = 0;
-        std::string err;
-        if (!readImageInput(args[0], rgba, imgW, imgH, err)) {
-            return ev::throwTypeError(std::string("setImage: ") + err);
-        }
-
-        w->imageW = imgW;
-        w->imageH = imgH;
-        w->hasImage = true;
-        if (w->loaded && w->sam) {
-            try {
-                w->sam->set_image(rgba.data(), imgW, imgH, 4);
-            } catch (const std::exception& e) {
-                return ev::throwError(std::string("setImage failed: ") + e.what());
-            }
-        }
-        return ev::undefined();
-    });
-
-    proto.def("segment", 1, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_samClass.unwrap(thisVal);
-        if (!p) return ev::throwTypeError("Sam.prototype.segment: not a Sam instance");
-        auto* w = static_cast<SamWrapper*>(p);
-
-        int outW = w->imageW > 0 ? w->imageW : 512;
-        int outH = w->imageH > 0 ? w->imageH : 512;
-
-        if (w->loaded && w->sam && w->hasImage) {
-            try {
-                std::vector<std::array<float, 2>> points;
-                std::vector<int> labels;
-                std::vector<std::array<float, 4>> boxes;
-                if (!args.empty() && ev::isObject(args[0])) {
-                    Value ptsVal = ev::getProperty(args[0], "points");
-                    if (isJsArray(ptsVal)) {
-                        uint32_t len = getJsArrayLength(ptsVal);
-                        for (uint32_t i = 0; i < len; ++i) {
-                            Value pt = ev::getElement(ptsVal, i);
-                            if (ev::isObject(pt)) {
-                                float px = static_cast<float>(ev::toDouble(ev::getProperty(pt, "x")));
-                                float py = static_cast<float>(ev::toDouble(ev::getProperty(pt, "y")));
-                                int lbl = 1;
-                                Value lv = ev::getProperty(pt, "label");
-                                if (!ev::isUndefined(lv)) lbl = static_cast<int>(ev::toDouble(lv));
-                                points.push_back({px, py});
-                                labels.push_back(lbl);
-                            }
-                        }
-                    }
-                }
-                auto seg = w->sam->segment(points, labels, boxes, true);
-                ObjectBuilder res;
-                res.set("num", static_cast<double>(seg.num));
-                res.set("width", static_cast<double>(seg.width));
-                res.set("height", static_cast<double>(seg.height));
-                res.set("best", static_cast<double>(seg.best()));
-
-                Value masksArr = hostArrayOf(seg.num, [&](size_t i) {
-                    size_t plane = static_cast<size_t>(seg.width) * seg.height;
-                    return makeFloat32Array(seg.logits.data() + i * plane, plane);
-                });
-                res.set("masks", masksArr);
-                return res.build();
-            } catch (const std::exception& e) {
-                return ev::throwError(std::string("segment failed: ") + e.what());
-            }
-        }
-
-        ObjectBuilder res;
-        res.set("num", 1.0);
-        res.set("width", static_cast<double>(outW));
-        res.set("height", static_cast<double>(outH));
-        res.set("best", 0.0);
-        res.set("masks", makeEmptyArray());
-        return res.build();
-    });
-
-    proto.def("segmentEverything", 2, [](Value, std::span<const Value>) -> Value {
-        ObjectBuilder res;
-        res.set("width", 512.0);
-        res.set("height", 512.0);
-        res.set("masks", makeEmptyArray());
-        return res.build();
-    });
-}
+// decorateSamProto lives in native_vision_sam.cpp — the restored setImage /
+// segment(points, labels, boxes, multimask) / segmentEverything(image, cfg).
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NormalEstimator (DSINE)
@@ -196,33 +117,58 @@ static void decorateSamProto(ObjectBuilder& proto) {
 static void decorateNormalEstimatorProto(ObjectBuilder& proto) {
     addDeviceAccessor<NormalEstimatorWrapper>(proto, g_normalEstimatorClass);
 
+    // estimate(image, opts?) -> { width, height, normals, normal }
+    //   opts.fx / fy / cx / cy — explicit pinhole intrinsics. Passing fx
+    //   switches DSINE off its fov-synthesized default, which is the whole
+    //   point of the option; the bronze port read none of them.
     proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
         void* p = g_normalEstimatorClass.unwrap(thisVal);
         auto* w = p ? static_cast<NormalEstimatorWrapper*>(p) : nullptr;
 
-        std::vector<uint8_t> rgba;
-        int width = 512, height = 512;
-        std::string err;
-        if (!args.empty() && readImageInput(args[0], rgba, width, height, err) && w && w->loaded && w->estimator) {
-            try {
-                auto nm = w->estimator->estimate(rgba.data(), width, height, 4);
-                ObjectBuilder res;
-                res.set("width", static_cast<double>(nm.width));
-                res.set("height", static_cast<double>(nm.height));
-                ev::Persistent norm(makeFloat32Array(nm.normals.data(), nm.normals.size()));
-                res.set("normal", norm.get());
-                return res.build();
-            } catch (const std::exception& e) {
-                return ev::throwError(std::string("normal estimate failed: ") + e.what());
+        bool hasIntrinsics = false;
+        float fx = 0.0f, fy = 0.0f, cx = 0.0f, cy = 0.0f;
+        if (args.size() > 1 && ev::isObject(args[1])) {
+            Value opts = args[1];
+            Value fxv = ev::getProperty(opts, "fx");
+            if (ev::isNumber(fxv)) {
+                hasIntrinsics = true;
+                fx = static_cast<float>(ev::toDouble(fxv));
+                Value v = ev::getProperty(opts, "fy");
+                if (ev::isNumber(v)) fy = static_cast<float>(ev::toDouble(v));
+                v = ev::getProperty(opts, "cx");
+                if (ev::isNumber(v)) cx = static_cast<float>(ev::toDouble(v));
+                v = ev::getProperty(opts, "cy");
+                if (ev::isNumber(v)) cy = static_cast<float>(ev::toDouble(v));
             }
         }
 
-        std::vector<float> dummy(static_cast<size_t>(width) * height * 3, 0.0f);
+        std::vector<uint8_t> rgba;
+        int width = 512, height = 512;
+        std::string err;
+        std::vector<float> normals;
+        if (!args.empty() && readImageInput(args[0], rgba, width, height, err) && w && w->loaded && w->estimator) {
+            try {
+                brotensor::DeviceScope scope(w->device);
+                auto nm = hasIntrinsics
+                              ? w->estimator->estimate(rgba.data(), width, height, 4,
+                                                       fx, fy, cx, cy)
+                              : w->estimator->estimate(rgba.data(), width, height, 4);
+                normals = std::move(nm.normals);
+                width = nm.width;
+                height = nm.height;
+            } catch (const std::exception& e) {
+                return ev::throwError(std::string("normal estimate failed: ") + e.what());
+            }
+        } else {
+            normals.assign(static_cast<size_t>(width) * height * 3, 0.0f);
+        }
+
         ObjectBuilder res;
         res.set("width", static_cast<double>(width));
         res.set("height", static_cast<double>(height));
-        ev::Persistent norm(makeFloat32Array(dummy.data(), dummy.size()));
-        res.set("normal", norm.get());
+        ev::Persistent norm(makeFloat32Array(normals.data(), normals.size()));
+        res.set("normals", norm.get());
+        res.set("normal", norm.get());   // the port's name for the same plane
         return res.build();
     });
 }
@@ -231,321 +177,22 @@ static void decorateNormalEstimatorProto(ObjectBuilder& proto) {
 // Edge & Line Annotators: HED, Lineart, MLSD
 // ═══════════════════════════════════════════════════════════════════════════
 
-static void decorateHedProto(ObjectBuilder& proto) {
-    addDeviceAccessor<HedWrapper>(proto, g_hedClass);
+// The five ControlNet annotators (HED, Lineart, MLSD, OpenPose, SegFormer)
+// live in native_vision_annotators.cpp, where detect() is restored alongside
+// the port's estimate() and both spellings of the result keys are published.
 
-    proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_hedClass.unwrap(thisVal);
-        auto* w = p ? static_cast<HedWrapper*>(p) : nullptr;
-
-        std::vector<uint8_t> rgba;
-        int width = 512, height = 512;
-        std::string err;
-        if (!args.empty() && readImageInput(args[0], rgba, width, height, err) && w && w->loaded && w->detector) {
-            try {
-                auto em = w->detector->detect(rgba.data(), width, height, 4);
-                std::vector<uint8_t> u8(em.edge.size());
-                for (size_t i = 0; i < em.edge.size(); ++i) {
-                    u8[i] = static_cast<uint8_t>(std::clamp(em.edge[i] * 255.0f, 0.0f, 255.0f));
-                }
-                ObjectBuilder res;
-                res.set("width", static_cast<double>(em.width));
-                res.set("height", static_cast<double>(em.height));
-                ev::Persistent d(makeUint8Array(u8.data(), u8.size()));
-                res.set("edges", d.get());
-                return res.build();
-            } catch (const std::exception& e) {
-                return ev::throwError(std::string("HED estimate failed: ") + e.what());
-            }
-        }
-
-        std::vector<uint8_t> dummy(static_cast<size_t>(width) * height, 0);
-        ObjectBuilder res;
-        res.set("width", static_cast<double>(width));
-        res.set("height", static_cast<double>(height));
-        ev::Persistent d(makeUint8Array(dummy.data(), dummy.size()));
-        res.set("edges", d.get());
-        return res.build();
-    });
-}
-
-static void decorateLineartProto(ObjectBuilder& proto) {
-    addDeviceAccessor<LineartWrapper>(proto, g_lineartClass);
-
-    proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_lineartClass.unwrap(thisVal);
-        auto* w = p ? static_cast<LineartWrapper*>(p) : nullptr;
-
-        std::vector<uint8_t> rgba;
-        int width = 512, height = 512;
-        std::string err;
-        if (!args.empty() && readImageInput(args[0], rgba, width, height, err) && w && w->loaded && w->detector) {
-            try {
-                auto lm = w->detector->detect(rgba.data(), width, height, 4);
-                std::vector<uint8_t> u8(lm.line.size());
-                for (size_t i = 0; i < lm.line.size(); ++i) {
-                    u8[i] = static_cast<uint8_t>(std::clamp(lm.line[i] * 255.0f, 0.0f, 255.0f));
-                }
-                ObjectBuilder res;
-                res.set("width", static_cast<double>(lm.width));
-                res.set("height", static_cast<double>(lm.height));
-                ev::Persistent d(makeUint8Array(u8.data(), u8.size()));
-                res.set("lines", d.get());
-                return res.build();
-            } catch (const std::exception& e) {
-                return ev::throwError(std::string("Lineart estimate failed: ") + e.what());
-            }
-        }
-
-        std::vector<uint8_t> dummy(static_cast<size_t>(width) * height, 0);
-        ObjectBuilder res;
-        res.set("width", static_cast<double>(width));
-        res.set("height", static_cast<double>(height));
-        ev::Persistent d(makeUint8Array(dummy.data(), dummy.size()));
-        res.set("lines", d.get());
-        return res.build();
-    });
-}
-
-static void decorateMlsdProto(ObjectBuilder& proto) {
-    addDeviceAccessor<MlsdWrapper>(proto, g_mlsdClass);
-
-    proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_mlsdClass.unwrap(thisVal);
-        auto* w = p ? static_cast<MlsdWrapper*>(p) : nullptr;
-
-        std::vector<uint8_t> rgba;
-        int width = 512, height = 512;
-        std::string err;
-        if (!args.empty() && readImageInput(args[0], rgba, width, height, err) && w && w->loaded && w->detector) {
-            try {
-                auto segs = w->detector->detect(rgba.data(), width, height, 4);
-                ObjectBuilder res;
-                res.set("width", static_cast<double>(segs.width));
-                res.set("height", static_cast<double>(segs.height));
-                Value linesArr = hostArrayOf(segs.segments.size(), [&](size_t i) {
-                    ObjectBuilder lineObj;
-                    lineObj.set("x1", segs.segments[i].x1);
-                    lineObj.set("y1", segs.segments[i].y1);
-                    lineObj.set("x2", segs.segments[i].x2);
-                    lineObj.set("y2", segs.segments[i].y2);
-                    lineObj.set("score", segs.segments[i].score);
-                    return lineObj.build();
-                });
-                res.set("lines", linesArr);
-                return res.build();
-            } catch (const std::exception& e) {
-                return ev::throwError(std::string("MLSD estimate failed: ") + e.what());
-            }
-        }
-
-        ObjectBuilder res;
-        res.set("width", static_cast<double>(width));
-        res.set("height", static_cast<double>(height));
-        res.set("lines", makeEmptyArray());
-        return res.build();
-    });
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// OpenPose, SegFormer, BiRefNet
-// ═══════════════════════════════════════════════════════════════════════════
-
-static void decorateOpenposeProto(ObjectBuilder& proto) {
-    addDeviceAccessor<OpenposeWrapper>(proto, g_openposeClass);
-
-    proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_openposeClass.unwrap(thisVal);
-        auto* w = p ? static_cast<OpenposeWrapper*>(p) : nullptr;
-
-        std::vector<uint8_t> rgba;
-        int width = 512, height = 512;
-        std::string err;
-        if (!args.empty() && readImageInput(args[0], rgba, width, height, err) && w && w->loaded && w->detector) {
-            try {
-                auto poseRes = w->detector->detect(rgba.data(), width, height, 4);
-                ObjectBuilder res;
-                res.set("width", static_cast<double>(poseRes.width));
-                res.set("height", static_cast<double>(poseRes.height));
-                Value posesArr = hostArrayOf(poseRes.bodies.size(), [&](size_t i) {
-                    ObjectBuilder poseObj;
-                    poseObj.set("score", poseRes.bodies[i].total_score);
-                    Value kpsArr = hostArrayOf(poseRes.bodies[i].keypoints.size(), [&](size_t k) {
-                        ObjectBuilder kp;
-                        kp.set("x", poseRes.bodies[i].keypoints[k].x);
-                        kp.set("y", poseRes.bodies[i].keypoints[k].y);
-                        kp.set("score", poseRes.bodies[i].keypoints[k].score);
-                        return kp.build();
-                    });
-                    poseObj.set("keypoints", kpsArr);
-                    return poseObj.build();
-                });
-                res.set("poses", posesArr);
-                return res.build();
-            } catch (const std::exception& e) {
-                return ev::throwError(std::string("Openpose estimate failed: ") + e.what());
-            }
-        }
-
-        ObjectBuilder res;
-        res.set("width", static_cast<double>(width));
-        res.set("height", static_cast<double>(height));
-        res.set("poses", makeEmptyArray());
-        return res.build();
-    });
-}
-
-static void decorateSegformerProto(ObjectBuilder& proto) {
-    addDeviceAccessor<SegformerWrapper>(proto, g_segformerClass);
-
-    proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_segformerClass.unwrap(thisVal);
-        auto* w = p ? static_cast<SegformerWrapper*>(p) : nullptr;
-
-        std::vector<uint8_t> rgba;
-        int width = 512, height = 512;
-        std::string err;
-        if (!args.empty() && readImageInput(args[0], rgba, width, height, err) && w && w->loaded && w->detector) {
-            try {
-                auto sm = w->detector->detect(rgba.data(), width, height, 4);
-                std::vector<int32_t> segs(sm.classes.begin(), sm.classes.end());
-                ObjectBuilder res;
-                res.set("width", static_cast<double>(sm.width));
-                res.set("height", static_cast<double>(sm.height));
-                ev::Persistent d(makeInt32Array(segs.data(), segs.size()));
-                res.set("segments", d.get());
-                return res.build();
-            } catch (const std::exception& e) {
-                return ev::throwError(std::string("Segformer estimate failed: ") + e.what());
-            }
-        }
-
-        std::vector<int32_t> dummy(static_cast<size_t>(width) * height, 0);
-        ObjectBuilder res;
-        res.set("width", static_cast<double>(width));
-        res.set("height", static_cast<double>(height));
-        ev::Persistent d(makeInt32Array(dummy.data(), dummy.size()));
-        res.set("segments", d.get());
-        return res.build();
-    });
-}
-
-static void decorateBirefnetProto(ObjectBuilder& proto) {
-    addDeviceAccessor<BirefnetWrapper>(proto, g_birefnetClass);
-
-    proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_birefnetClass.unwrap(thisVal);
-        auto* w = p ? static_cast<BirefnetWrapper*>(p) : nullptr;
-
-        std::vector<uint8_t> rgba;
-        int width = 512, height = 512;
-        std::string err;
-        if (!args.empty() && readImageInput(args[0], rgba, width, height, err) && w && w->loaded && w->net) {
-            try {
-                std::vector<float> rgb(static_cast<size_t>(width) * height * 3);
-                for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i) {
-                    rgb[i * 3 + 0] = rgba[i * 4 + 0];
-                    rgb[i * 3 + 1] = rgba[i * 4 + 1];
-                    rgb[i * 3 + 2] = rgba[i * 4 + 2];
-                }
-                auto bm = w->net->removeBackground(rgb.data(), width, height, true);
-                std::vector<uint8_t> mask(bm.alpha.size());
-                for (size_t i = 0; i < bm.alpha.size(); ++i) {
-                    mask[i] = static_cast<uint8_t>(std::clamp(bm.alpha[i] * 255.0f, 0.0f, 255.0f));
-                }
-                ObjectBuilder res;
-                res.set("width", static_cast<double>(bm.width));
-                res.set("height", static_cast<double>(bm.height));
-                ev::Persistent d(makeUint8Array(mask.data(), mask.size()));
-                res.set("mask", d.get());
-                return res.build();
-            } catch (const std::exception& e) {
-                return ev::throwError(std::string("BiRefNet estimate failed: ") + e.what());
-            }
-        }
-
-        std::vector<uint8_t> dummy(static_cast<size_t>(width) * height, 0);
-        ObjectBuilder res;
-        res.set("width", static_cast<double>(width));
-        res.set("height", static_cast<double>(height));
-        ev::Persistent d(makeUint8Array(dummy.data(), dummy.size()));
-        res.set("mask", d.get());
-        return res.build();
-    });
-}
+// decorateBirefnetProto lives in native_vision_generative.cpp — the restored
+// removeBackground() (alpha / matte / cutout) plus dispose().
 
 // ═══════════════════════════════════════════════════════════════════════════
 // StyleGAN3, DINOv2, DINOv3
 // ═══════════════════════════════════════════════════════════════════════════
 
-static void decorateStyleGAN3Proto(ObjectBuilder& proto) {
-    addDeviceAccessor<StyleGAN3Wrapper>(proto, g_stylegan3Class);
+// decorateStyleGAN3Proto lives in native_vision_generative.cpp — the restored
+// generate(seed/z/truncation/returnLatents), synthesize(w) and invert(image).
 
-    proto.accessor("zDim", [](Value thisVal, std::span<const Value>) -> Value {
-        void* p = g_stylegan3Class.unwrap(thisVal);
-        return ev::fromDouble(p ? static_cast<StyleGAN3Wrapper*>(p)->zDim : 512);
-    });
-    proto.accessor("cDim", [](Value thisVal, std::span<const Value>) -> Value {
-        void* p = g_stylegan3Class.unwrap(thisVal);
-        return ev::fromDouble(p ? static_cast<StyleGAN3Wrapper*>(p)->cDim : 0);
-    });
-    proto.accessor("wDim", [](Value thisVal, std::span<const Value>) -> Value {
-        void* p = g_stylegan3Class.unwrap(thisVal);
-        return ev::fromDouble(p ? static_cast<StyleGAN3Wrapper*>(p)->wDim : 512);
-    });
-    proto.accessor("imgResolution", [](Value thisVal, std::span<const Value>) -> Value {
-        void* p = g_stylegan3Class.unwrap(thisVal);
-        return ev::fromDouble(p ? static_cast<StyleGAN3Wrapper*>(p)->imgResolution : 1024);
-    });
-    proto.accessor("imgChannels", [](Value thisVal, std::span<const Value>) -> Value {
-        void* p = g_stylegan3Class.unwrap(thisVal);
-        return ev::fromDouble(p ? static_cast<StyleGAN3Wrapper*>(p)->imgChannels : 3);
-    });
-
-    proto.def("generate", 2, [](Value thisVal, std::span<const Value>) -> Value {
-        void* p = g_stylegan3Class.unwrap(thisVal);
-        auto* w = p ? static_cast<StyleGAN3Wrapper*>(p) : nullptr;
-        int res = w ? w->imgResolution : 1024;
-        int channels = w ? w->imgChannels : 3;
-
-        std::vector<uint8_t> dummy(static_cast<size_t>(res) * res * channels, 128);
-        ObjectBuilder r;
-        r.set("width", static_cast<double>(res));
-        r.set("height", static_cast<double>(res));
-        r.set("channels", static_cast<double>(channels));
-        ev::Persistent d(makeUint8Array(dummy.data(), dummy.size()));
-        r.set("data", d.get());
-        return r.build();
-    });
-}
-
-static void decorateDinov2Proto(ObjectBuilder& proto) {
-    addDeviceAccessor<Dinov2Wrapper>(proto, g_dinov2Class);
-
-    proto.def("estimate", 2, [](Value, std::span<const Value>) -> Value {
-        std::vector<float> dummy(512, 0.0f);
-        ObjectBuilder res;
-        res.set("width", 512.0);
-        res.set("height", 512.0);
-        ev::Persistent d(makeFloat32Array(dummy.data(), dummy.size()));
-        res.set("features", d.get());
-        return res.build();
-    });
-}
-
-static void decorateDinov3Proto(ObjectBuilder& proto) {
-    addDeviceAccessor<Dinov3Wrapper>(proto, g_dinov3Class);
-
-    proto.def("estimate", 2, [](Value, std::span<const Value>) -> Value {
-        std::vector<float> dummy(512, 0.0f);
-        ObjectBuilder res;
-        res.set("width", 512.0);
-        res.set("height", 512.0);
-        ev::Persistent d(makeFloat32Array(dummy.data(), dummy.size()));
-        res.set("features", d.get());
-        return res.build();
-    });
-}
+// decorateDinov2Proto / decorateDinov3Proto live in native_vision_backbones.cpp
+// — the restored encode(image, opts) and dispose().
 
 // ═══════════════════════════════════════════════════════════════════════════
 // VisionModel Wrapper
@@ -868,6 +515,10 @@ Value makeVisionNamespace() {
         auto w = std::make_unique<BirefnetWrapper>();
         w->path = path;
         w->device = dev;
+        if (ev::isObject(opts)) {
+            Value msv = ev::getProperty(opts, "modelSize");
+            if (ev::isNumber(msv)) w->modelSize = static_cast<int>(ev::toDouble(msv));
+        }
         try {
             w->net = std::make_unique<brovisionml::birefnet::BiRefNet>();
             w->net->load(path);
@@ -889,7 +540,12 @@ Value makeVisionNamespace() {
         auto w = std::make_unique<StyleGAN3Wrapper>();
         w->path = path;
         w->device = dev;
-        w->loaded = true;
+        // Actually construct and load the Generator: the bronze port only
+        // recorded the path, which is why generate() could not do anything.
+        std::string loadErr;
+        if (!loadStyleGAN3Generator(path, opts, *w, loadErr)) {
+            return ev::throwTypeError(loadErr);
+        }
         return g_stylegan3Class.createInstance(std::move(w));
     });
 
@@ -903,7 +559,7 @@ Value makeVisionNamespace() {
         auto w = std::make_unique<Dinov2Wrapper>();
         w->path = path;
         w->device = dev;
-        w->loaded = true;
+        loadDinov2Backbone(path, opts, *w);
         return g_dinov2Class.createInstance(std::move(w));
     });
 
@@ -917,7 +573,7 @@ Value makeVisionNamespace() {
         auto w = std::make_unique<Dinov3Wrapper>();
         w->path = path;
         w->device = dev;
-        w->loaded = true;
+        loadDinov3Backbone(path, *w);
         return g_dinov3Class.createInstance(std::move(w));
     });
 

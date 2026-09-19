@@ -6,6 +6,10 @@
 #include <string>
 #include <vector>
 
+// tests/test_vision_api_restored.cpp — the bro.vision members the bronze port
+// dropped or renamed (bro's docs/transition-drift.md row H7).
+void brovisionmlTestRestoredSurface();
+
 int main() {
     namespace ev = bronze::embed;
 
@@ -164,6 +168,8 @@ int main() {
     assert(!opsCheck.thrown);
     assert(ev::toBool(opsCheck.value) == true);
     std::cout << "  bro.vision.ops sub-namespace fully populated" << std::endl;
+
+    brovisionmlTestRestoredSurface();
 
     std::cout << "All brovisionml_api standalone tests passed successfully!" << std::endl;
     return 0;

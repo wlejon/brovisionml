@@ -122,6 +122,7 @@ struct BirefnetWrapper {
     uint32_t tag = kHostBirefnetTag;
     std::unique_ptr<brovisionml::birefnet::BiRefNet> net;
     brotensor::Device device = brotensor::Device::CPU;
+    int modelSize = 1024;          // square resolution the matte runs at
     bool loaded = false;
     std::string path;
 };
@@ -133,8 +134,10 @@ struct StyleGAN3Wrapper {
     int32_t zDim = 512;
     int32_t cDim = 0;
     int32_t wDim = 512;
+    int32_t numWs = 16;            // mapping rows / W+ row count
     int32_t imgResolution = 1024;
     int32_t imgChannels = 3;
+    char variant = 'r';            // 'r' = config-R, 't' = config-T
     bool loaded = false;
     std::string path;
 };
@@ -143,6 +146,7 @@ struct Dinov2Wrapper {
     uint32_t tag = kHostDinov2Tag;
     std::unique_ptr<brovisionml::dinov2::Backbone> backbone;
     brotensor::Device device = brotensor::Device::CPU;
+    int size = 518;                // default square encode resolution
     bool loaded = false;
     std::string path;
 };
@@ -255,6 +259,38 @@ inline uint32_t getJsArrayLength(Value v) {
     double d = ev::toDouble(lenV);
     return (d > 0.0) ? static_cast<uint32_t>(d) : 0;
 }
+
+// Prototype decoration is split across translation units so each file stays
+// small: SAM in native_vision_sam.cpp, StyleGAN3 + BiRefNet in
+// native_vision_generative.cpp, the ControlNet annotators in
+// native_vision_annotators.cpp, everything else in native_vision_models.cpp.
+void decorateSamProto(ObjectBuilder& proto);
+void decorateStyleGAN3Proto(ObjectBuilder& proto);
+void decorateBirefnetProto(ObjectBuilder& proto);
+
+// The two ViT backbones, in native_vision_backbones.cpp.
+void decorateDinov2Proto(ObjectBuilder& proto);
+void decorateDinov3Proto(ObjectBuilder& proto);
+void loadDinov2Backbone(const std::string& dir, Value opts, Dinov2Wrapper& w);
+void loadDinov3Backbone(const std::string& path, Dinov3Wrapper& w);
+
+// The five ControlNet annotators, in native_vision_annotators.cpp.
+void decorateHedProto(ObjectBuilder& proto);
+void decorateLineartProto(ObjectBuilder& proto);
+void decorateMlsdProto(ObjectBuilder& proto);
+void decorateOpenposeProto(ObjectBuilder& proto);
+void decorateSegformerProto(ObjectBuilder& proto);
+
+// { num, width, height, best, masks: [{ iou, data: Uint8Array }] } — the shape
+// the pre-transition Sam.segment() returned (minus the ImageBitmap, which is
+// an engine-side type; callers rasterize `data` themselves).
+Value buildSegmentation(const brovisionml::sam::Segmentation& seg);
+
+// Build a StyleGAN3 generator for `path`. opts.resolution (256/512/1024) and
+// opts.variant ('r'/'t') must match the checkpoint. Fills the wrapper's
+// dimensions; returns false and sets `err` on a bad option or a load failure.
+bool loadStyleGAN3Generator(const std::string& path, Value opts,
+                            StyleGAN3Wrapper& w, std::string& err);
 
 void ensureVisionClassesInstalled();
 Value makeVisionNamespace();
