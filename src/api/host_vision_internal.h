@@ -220,6 +220,11 @@ bool readUint8Array(Value val, const uint8_t*& outData, size_t& outCount);
 bool readInt32Array(Value val, const int32_t*& outData, size_t& outCount);
 bool readImageInput(Value val, std::vector<uint8_t>& rgba, int& w, int& h, std::string& err);
 
+// Path resolution for the model loaders and the image-by-filename argument
+// (api.h setPathResolver). Every string path a binding hands to brovisionml
+// or to broimage's decoder goes through this first.
+std::string resolvePath(const std::string& path);
+
 Value makeFloat32Array(const float* data, size_t count);
 Value makeUint8Array(const uint8_t* data, size_t count);
 Value makeUint8ClampedArray(const uint8_t* data, size_t count);

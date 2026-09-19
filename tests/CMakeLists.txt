@@ -182,7 +182,10 @@ target_compile_definitions(brovisionml_test_segformer PRIVATE
 
 # Bronze standalone JavaScript API test
 if(BROVISIONML_ENABLE_API)
-    add_executable(brovisionml_test_api test_vision_api.cpp test_vision_api_restored.cpp)
+    add_executable(brovisionml_test_api
+        test_vision_api.cpp
+        test_vision_api_restored.cpp
+        test_vision_api_paths.cpp)
     target_include_directories(brovisionml_test_api PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../src/api
     )

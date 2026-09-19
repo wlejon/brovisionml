@@ -329,7 +329,7 @@ static bool validateLoaderPath(const char* name, std::span<const Value> args, st
         outError = ev::throwTypeError(std::string("bro.vision.") + name + ": path must be a string");
         return false;
     }
-    path = ev::toUtf8(args[0]);
+    path = resolvePath(ev::toUtf8(args[0]));
     if (!std::filesystem::exists(path)) {
         outError = ev::throwError(std::string(name) + " failed: model dir not found: " + path);
         return false;

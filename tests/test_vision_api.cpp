@@ -10,6 +10,10 @@
 // dropped or renamed (bro's docs/transition-drift.md row H7).
 void brovisionmlTestRestoredSurface();
 
+// tests/test_vision_api_paths.cpp — setPathResolver: the host's resolver is
+// consulted for every model path the loaders take.
+void brovisionmlTestPathResolver();
+
 int main() {
     namespace ev = bronze::embed;
 
@@ -170,6 +174,7 @@ int main() {
     std::cout << "  bro.vision.ops sub-namespace fully populated" << std::endl;
 
     brovisionmlTestRestoredSurface();
+    brovisionmlTestPathResolver();
 
     std::cout << "All brovisionml_api standalone tests passed successfully!" << std::endl;
     return 0;

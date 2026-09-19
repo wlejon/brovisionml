@@ -74,7 +74,7 @@ bool readInt32Array(Value val, const int32_t*& outData, size_t& outCount) {
 
 bool readImageInput(Value val, std::vector<uint8_t>& rgba, int& w, int& h, std::string& err) {
     if (ev::isString(val)) {
-        std::string path = ev::toUtf8(val);
+        std::string path = resolvePath(ev::toUtf8(val));
         broimage::Image img;
         if (!broimage::decode_file(path, img, &err)) {
             if (err.empty()) err = "Failed to decode image file: " + path;
