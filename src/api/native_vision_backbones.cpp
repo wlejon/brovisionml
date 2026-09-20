@@ -279,7 +279,7 @@ void decorateDinov3Proto(ObjectBuilder& proto) {
     });
 }
 
-void loadDinov2Backbone(const std::string& dir, Value opts, Dinov2Wrapper& w) {
+bool loadDinov2Backbone(const std::string& dir, Value opts, Dinov2Wrapper& w, std::string& err) {
     std::string variant = "small";
     if (ev::isObject(opts)) {
         Value v = ev::getProperty(opts, "variant");
@@ -295,15 +295,21 @@ void loadDinov2Backbone(const std::string& dir, Value opts, Dinov2Wrapper& w) {
         w.backbone->load(dir);
         w.backbone->to(w.device);
         w.loaded = true;
-    } catch (...) {
-        // A missing checkpoint leaves the handle usable for surface probes,
-        // as every other loader in this binding does.
+        return true;
+    } catch (const std::exception& e) {
         w.backbone.reset();
         w.loaded = false;
+        err = e.what();
+        return false;
+    } catch (...) {
+        w.backbone.reset();
+        w.loaded = false;
+        err = "unknown error";
+        return false;
     }
 }
 
-void loadDinov3Backbone(const std::string& path, Dinov3Wrapper& w) {
+bool loadDinov3Backbone(const std::string& path, Dinov3Wrapper& w, std::string& err) {
     const brovisionml::dinov3::Config cfg = brovisionml::dinov3::Config::vit_h();
     w.size = cfg.img_size;
     try {
@@ -319,9 +325,17 @@ void loadDinov3Backbone(const std::string& path, Dinov3Wrapper& w) {
         }
         w.backbone->to(w.device);
         w.loaded = true;
+        return true;
+    } catch (const std::exception& e) {
+        w.backbone.reset();
+        w.loaded = false;
+        err = e.what();
+        return false;
     } catch (...) {
         w.backbone.reset();
         w.loaded = false;
+        err = "unknown error";
+        return false;
     }
 }
 

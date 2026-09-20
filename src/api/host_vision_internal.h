@@ -276,8 +276,8 @@ void decorateBirefnetProto(ObjectBuilder& proto);
 // The two ViT backbones, in native_vision_backbones.cpp.
 void decorateDinov2Proto(ObjectBuilder& proto);
 void decorateDinov3Proto(ObjectBuilder& proto);
-void loadDinov2Backbone(const std::string& dir, Value opts, Dinov2Wrapper& w);
-void loadDinov3Backbone(const std::string& path, Dinov3Wrapper& w);
+bool loadDinov2Backbone(const std::string& dir, Value opts, Dinov2Wrapper& w, std::string& err);
+bool loadDinov3Backbone(const std::string& path, Dinov3Wrapper& w, std::string& err);
 
 // The five ControlNet annotators, in native_vision_annotators.cpp.
 void decorateHedProto(ObjectBuilder& proto);

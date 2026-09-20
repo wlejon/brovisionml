@@ -219,61 +219,37 @@ static void decorateVisionModelProto(ObjectBuilder& proto) {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.predict: not a VisionModel");
         auto* w = static_cast<VisionModelWrapper*>(p);
-
-        ObjectBuilder res;
-        res.set("type", w->taskName);
-        res.set("success", true);
-        return res.build();
+        return ev::throwError(std::string("VisionModel: model weights not loaded for task '") + w->taskName + "'");
     });
 
     proto.def("detect", 2, [](Value thisVal, std::span<const Value>) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.detect: not a VisionModel");
-        auto* w = static_cast<VisionModelWrapper*>(p);
-
-        ObjectBuilder res;
-        res.set("detections", makeEmptyArray());
-        res.set("confThreshold", static_cast<double>(w->confThreshold));
-        return res.build();
+        return ev::throwError("VisionModel: model weights not loaded for task 'detect'");
     });
 
     proto.def("segment", 2, [](Value thisVal, std::span<const Value>) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.segment: not a VisionModel");
-
-        ObjectBuilder res;
-        res.set("num", 0.0);
-        res.set("masks", makeEmptyArray());
-        return res.build();
+        return ev::throwError("VisionModel: model weights not loaded for task 'segment'");
     });
 
     proto.def("depth", 2, [](Value thisVal, std::span<const Value>) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.depth: not a VisionModel");
-
-        ObjectBuilder res;
-        res.set("width", 512.0);
-        res.set("height", 512.0);
-        res.set("depth", makeFloat32Array(nullptr, 0));
-        return res.build();
+        return ev::throwError("VisionModel: model weights not loaded for task 'depth'");
     });
 
     proto.def("pose", 2, [](Value thisVal, std::span<const Value>) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.pose: not a VisionModel");
-
-        ObjectBuilder res;
-        res.set("poses", makeEmptyArray());
-        return res.build();
+        return ev::throwError("VisionModel: model weights not loaded for task 'pose'");
     });
 
     proto.def("ocr", 2, [](Value thisVal, std::span<const Value>) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.ocr: not a VisionModel");
-
-        ObjectBuilder res;
-        res.set("texts", makeEmptyArray());
-        return res.build();
+        return ev::throwError("VisionModel: model weights not loaded for task 'ocr'");
     });
 
     proto.def("dispose", 0, [](Value thisVal, std::span<const Value>) -> Value {
@@ -358,8 +334,10 @@ static Value loadVisionDetector(const char* name, const HostClass& hostCls, std:
             w->detector->load(path);
         }
         w->loaded = true;
+    } catch (const std::exception& e) {
+        return ev::throwError(std::string(name) + " failed: " + e.what());
     } catch (...) {
-        w->loaded = false;
+        return ev::throwError(std::string(name) + " failed: unknown error");
     }
     return hostCls.createInstance(std::move(w));
 }
@@ -390,7 +368,7 @@ Value makeVisionNamespace() {
         auto w = std::make_unique<VisionModelWrapper>();
         w->modelPath = path;
         w->device = parseDevice(opts);
-        w->loaded = true;
+        w->loaded = false;
 
         if (ev::isObject(opts)) {
             Value tv = ev::getProperty(opts, "type");
@@ -399,6 +377,146 @@ Value makeVisionNamespace() {
             if (!ev::isUndefined(cv)) w->confThreshold = static_cast<float>(ev::toDouble(cv));
             Value iv = ev::getProperty(opts, "iouThreshold");
             if (!ev::isUndefined(iv)) w->iouThreshold = static_cast<float>(ev::toDouble(iv));
+        }
+
+        try {
+            if (w->taskName == "depth") {
+                auto dw = std::make_unique<DepthEstimatorWrapper>();
+                dw->path = path;
+                dw->device = w->device;
+                dw->estimator = std::make_unique<brovisionml::depth::DepthEstimator>(
+                    brovisionml::depth::DepthAnythingConfig::v2_small());
+                dw->estimator->to(w->device);
+                if (std::filesystem::is_regular_file(path)) {
+                    dw->estimator->load_file(path);
+                } else {
+                    dw->estimator->load(path);
+                }
+                dw->loaded = true;
+                w->depthEstimator = std::move(dw);
+                w->task = VisionTaskType::Depth;
+                w->loaded = true;
+            } else if (w->taskName == "sam" || w->taskName == "segment") {
+                auto sw = std::make_unique<SamWrapper>();
+                sw->path = path;
+                sw->device = w->device;
+                sw->sam = std::make_unique<brovisionml::sam::Sam>(brovisionml::sam::SamConfig::vit_b());
+                sw->sam->to(w->device);
+                if (std::filesystem::is_regular_file(path)) {
+                    sw->sam->load_file(path);
+                } else {
+                    sw->sam->load(path);
+                }
+                sw->loaded = true;
+                w->sam = std::move(sw);
+                w->task = VisionTaskType::Sam;
+                w->loaded = true;
+            } else if (w->taskName == "normal") {
+                auto nw = std::make_unique<NormalEstimatorWrapper>();
+                nw->path = path;
+                nw->device = w->device;
+                nw->estimator = std::make_unique<brovisionml::dsine::NormalEstimator>();
+                nw->estimator->to(w->device);
+                if (std::filesystem::is_regular_file(path)) {
+                    nw->estimator->load_file(path);
+                } else {
+                    nw->estimator->load(path);
+                }
+                nw->loaded = true;
+                w->normalEstimator = std::move(nw);
+                w->task = VisionTaskType::Normal;
+                w->loaded = true;
+            } else if (w->taskName == "hed" || w->taskName == "edge") {
+                auto hw = std::make_unique<HedWrapper>();
+                hw->path = path;
+                hw->device = w->device;
+                hw->detector = std::make_unique<brovisionml::hed::SoftEdgeDetector>();
+                hw->detector->to(w->device);
+                if (std::filesystem::is_regular_file(path)) {
+                    hw->detector->load_file(path);
+                } else {
+                    hw->detector->load(path);
+                }
+                hw->loaded = true;
+                w->hed = std::move(hw);
+                w->task = VisionTaskType::Edge;
+                w->loaded = true;
+            } else if (w->taskName == "lineart") {
+                auto lw = std::make_unique<LineartWrapper>();
+                lw->path = path;
+                lw->device = w->device;
+                lw->detector = std::make_unique<brovisionml::lineart::LineartDetector>();
+                lw->detector->to(w->device);
+                if (std::filesystem::is_regular_file(path)) {
+                    lw->detector->load_file(path);
+                } else {
+                    lw->detector->load(path);
+                }
+                lw->loaded = true;
+                w->lineart = std::move(lw);
+                w->task = VisionTaskType::Lineart;
+                w->loaded = true;
+            } else if (w->taskName == "mlsd") {
+                auto mw = std::make_unique<MlsdWrapper>();
+                mw->path = path;
+                mw->device = w->device;
+                mw->detector = std::make_unique<brovisionml::mlsd::MLSDdetector>();
+                mw->detector->to(w->device);
+                if (std::filesystem::is_regular_file(path)) {
+                    mw->detector->load_file(path);
+                } else {
+                    mw->detector->load(path);
+                }
+                mw->loaded = true;
+                w->mlsd = std::move(mw);
+                w->task = VisionTaskType::Mlsd;
+                w->loaded = true;
+            } else if (w->taskName == "openpose" || w->taskName == "pose") {
+                auto ow = std::make_unique<OpenposeWrapper>();
+                ow->path = path;
+                ow->device = w->device;
+                ow->detector = std::make_unique<brovisionml::openpose::OpenposeDetector>();
+                ow->detector->to(w->device);
+                if (std::filesystem::is_regular_file(path)) {
+                    ow->detector->load_file(path);
+                } else {
+                    ow->detector->load(path);
+                }
+                ow->loaded = true;
+                w->openpose = std::move(ow);
+                w->task = VisionTaskType::Pose;
+                w->loaded = true;
+            } else if (w->taskName == "segformer") {
+                auto sfw = std::make_unique<SegformerWrapper>();
+                sfw->path = path;
+                sfw->device = w->device;
+                sfw->detector = std::make_unique<brovisionml::segformer::SegformerDetector>();
+                sfw->detector->to(w->device);
+                if (std::filesystem::is_regular_file(path)) {
+                    sfw->detector->load_file(path);
+                } else {
+                    sfw->detector->load(path);
+                }
+                sfw->loaded = true;
+                w->segformer = std::move(sfw);
+                w->task = VisionTaskType::Segformer;
+                w->loaded = true;
+            } else if (w->taskName == "birefnet") {
+                auto bw = std::make_unique<BirefnetWrapper>();
+                bw->path = path;
+                bw->device = w->device;
+                bw->net = std::make_unique<brovisionml::birefnet::BiRefNet>();
+                bw->net->load(path);
+                bw->net->to(w->device);
+                bw->loaded = true;
+                w->birefnet = std::move(bw);
+                w->task = VisionTaskType::Birefnet;
+                w->loaded = true;
+            }
+        } catch (const std::exception& e) {
+            return ev::throwError(std::string("loadModel failed: ") + e.what());
+        } catch (...) {
+            return ev::throwError("loadModel failed: unknown error");
         }
 
         return g_visionModelClass.createInstance(std::move(w));
@@ -424,8 +542,10 @@ Value makeVisionNamespace() {
                 w->estimator->load(path);
             }
             w->loaded = true;
+        } catch (const std::exception& e) {
+            return ev::throwError(std::string("loadDepth failed: ") + e.what());
         } catch (...) {
-            w->loaded = false;
+            return ev::throwError("loadDepth failed: unknown error");
         }
         return g_depthEstimatorClass.createInstance(std::move(w));
     });
@@ -449,8 +569,10 @@ Value makeVisionNamespace() {
                 w->sam->load(path);
             }
             w->loaded = true;
+        } catch (const std::exception& e) {
+            return ev::throwError(std::string("loadSam failed: ") + e.what());
         } catch (...) {
-            w->loaded = false;
+            return ev::throwError("loadSam failed: unknown error");
         }
         return g_samClass.createInstance(std::move(w));
     });
@@ -474,8 +596,10 @@ Value makeVisionNamespace() {
                 w->estimator->load(path);
             }
             w->loaded = true;
+        } catch (const std::exception& e) {
+            return ev::throwError(std::string("loadNormal failed: ") + e.what());
         } catch (...) {
-            w->loaded = false;
+            return ev::throwError("loadNormal failed: unknown error");
         }
         return g_normalEstimatorClass.createInstance(std::move(w));
     });
@@ -524,8 +648,10 @@ Value makeVisionNamespace() {
             w->net->load(path);
             w->net->to(dev);
             w->loaded = true;
+        } catch (const std::exception& e) {
+            return ev::throwError(std::string("loadBirefnet failed: ") + e.what());
         } catch (...) {
-            w->loaded = false;
+            return ev::throwError("loadBirefnet failed: unknown error");
         }
         return g_birefnetClass.createInstance(std::move(w));
     });
@@ -544,7 +670,7 @@ Value makeVisionNamespace() {
         // recorded the path, which is why generate() could not do anything.
         std::string loadErr;
         if (!loadStyleGAN3Generator(path, opts, *w, loadErr)) {
-            return ev::throwTypeError(loadErr);
+            return ev::throwError(loadErr);
         }
         return g_stylegan3Class.createInstance(std::move(w));
     });
@@ -559,7 +685,10 @@ Value makeVisionNamespace() {
         auto w = std::make_unique<Dinov2Wrapper>();
         w->path = path;
         w->device = dev;
-        loadDinov2Backbone(path, opts, *w);
+        std::string loadErr;
+        if (!loadDinov2Backbone(path, opts, *w, loadErr)) {
+            return ev::throwError("loadDinov2 failed: " + loadErr);
+        }
         return g_dinov2Class.createInstance(std::move(w));
     });
 
@@ -573,7 +702,10 @@ Value makeVisionNamespace() {
         auto w = std::make_unique<Dinov3Wrapper>();
         w->path = path;
         w->device = dev;
-        loadDinov3Backbone(path, *w);
+        std::string loadErr;
+        if (!loadDinov3Backbone(path, *w, loadErr)) {
+            return ev::throwError("loadDinov3 failed: " + loadErr);
+        }
         return g_dinov3Class.createInstance(std::move(w));
     });
 

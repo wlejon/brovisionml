@@ -70,10 +70,8 @@ void brovisionmlTestRestoredSurface() {
             const p = proto(cls);
             needFn(p, cls, "detect", 2);
             needFn(p, cls, "estimate", 2);
-            const r = p.detect.call(undefined);
-            if (!(r[oldKey] instanceof Float32Array)) fail(cls + ".detect lost the '" + oldKey + "' FP32 plane");
-            if (!(r[newKey] instanceof Uint8Array)) fail(cls + ".detect lost the '" + newKey + "' byte plane");
-            if (r[oldKey].length !== r.width * r.height) fail(cls + ".detect plane is the wrong size");
+            needThrows(p, cls, "detect", [img]);
+            needThrows(p, cls, "estimate", [img]);
         }
 
         const mlsd = proto("Mlsd");
@@ -84,15 +82,15 @@ void brovisionmlTestRestoredSurface() {
 
         const op = proto("Openpose");
         needFn(op, "Openpose", "detect", 2);
-        const pose = op.detect.call(undefined);
-        if (!Array.isArray(pose.bodies)) fail("Openpose.detect lost the 'bodies' array");
-        if (!Array.isArray(pose.poses)) fail("Openpose.detect lost the 'poses' array");
+        needFn(op, "Openpose", "estimate", 2);
+        needThrows(op, "Openpose", "detect", [img]);
+        needThrows(op, "Openpose", "estimate", [img]);
 
         const sf = proto("Segformer");
         needFn(sf, "Segformer", "detect", 2);
-        const seg = sf.detect.call(undefined);
-        if (!(seg.classes instanceof Uint8Array)) fail("Segformer.detect lost the 'classes' byte map");
-        if (!(seg.segments instanceof Int32Array)) fail("Segformer.detect lost the 'segments' map");
+        needFn(sf, "Segformer", "estimate", 2);
+        needThrows(sf, "Segformer", "detect", [img]);
+        needThrows(sf, "Segformer", "estimate", [img]);
 
         // ── DepthEstimator.estimate(image, { invert }) ────────────────────
         // The old binding's `invert` flipped the normalized grayscale map; it

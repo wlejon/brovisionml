@@ -66,42 +66,50 @@ Value scalarPlaneResult(int w, int h, const std::vector<float>& plane,
 
 Value hedDetect(Value thisVal, std::span<const Value> args) {
     auto* w = selfOf<HedWrapper>(g_hedClass, thisVal, kHostHedTag);
+    if (!w || !w->loaded || !w->detector) {
+        return ev::throwError("Hed: detector is uninitialized or model weights not loaded");
+    }
+    if (args.empty()) {
+        return ev::throwTypeError("Hed.detect: image argument required");
+    }
 
     std::vector<uint8_t> rgba;
-    int width = 512, height = 512;
+    int width = 0, height = 0;
     std::string err;
-    if (!args.empty() && readImageInput(args[0], rgba, width, height, err) &&
-        w && w->loaded && w->detector) {
-        try {
-            auto em = w->detector->detect(rgba.data(), width, height, 4);
-            return scalarPlaneResult(em.width, em.height, em.edge, "edge", "edges");
-        } catch (const std::exception& e) {
-            return ev::throwError(std::string("HED detect failed: ") + e.what());
-        }
+    if (!readImageInput(args[0], rgba, width, height, err)) {
+        return ev::throwTypeError(std::string("Hed.detect: ") + err);
     }
-    std::vector<float> dummy(static_cast<size_t>(width) * height, 0.0f);
-    return scalarPlaneResult(width, height, dummy, "edge", "edges");
+    try {
+        auto em = w->detector->detect(rgba.data(), width, height, 4);
+        return scalarPlaneResult(em.width, em.height, em.edge, "edge", "edges");
+    } catch (const std::exception& e) {
+        return ev::throwError(std::string("HED detect failed: ") + e.what());
+    }
 }
 
 // ─── Lineart ──────────────────────────────────────────────────────────────
 
 Value lineartDetect(Value thisVal, std::span<const Value> args) {
     auto* w = selfOf<LineartWrapper>(g_lineartClass, thisVal, kHostLineartTag);
+    if (!w || !w->loaded || !w->detector) {
+        return ev::throwError("Lineart: detector is uninitialized or model weights not loaded");
+    }
+    if (args.empty()) {
+        return ev::throwTypeError("Lineart.detect: image argument required");
+    }
 
     std::vector<uint8_t> rgba;
-    int width = 512, height = 512;
+    int width = 0, height = 0;
     std::string err;
-    if (!args.empty() && readImageInput(args[0], rgba, width, height, err) &&
-        w && w->loaded && w->detector) {
-        try {
-            auto lm = w->detector->detect(rgba.data(), width, height, 4);
-            return scalarPlaneResult(lm.width, lm.height, lm.line, "line", "lines");
-        } catch (const std::exception& e) {
-            return ev::throwError(std::string("Lineart detect failed: ") + e.what());
-        }
+    if (!readImageInput(args[0], rgba, width, height, err)) {
+        return ev::throwTypeError(std::string("Lineart.detect: ") + err);
     }
-    std::vector<float> dummy(static_cast<size_t>(width) * height, 0.0f);
-    return scalarPlaneResult(width, height, dummy, "line", "lines");
+    try {
+        auto lm = w->detector->detect(rgba.data(), width, height, 4);
+        return scalarPlaneResult(lm.width, lm.height, lm.line, "line", "lines");
+    } catch (const std::exception& e) {
+        return ev::throwError(std::string("Lineart detect failed: ") + e.what());
+    }
 }
 
 // ─── MLSD ─────────────────────────────────────────────────────────────────
@@ -148,74 +156,77 @@ Value mlsdDetect(Value thisVal, std::span<const Value> args) {
 
 Value openposeDetect(Value thisVal, std::span<const Value> args) {
     auto* w = selfOf<OpenposeWrapper>(g_openposeClass, thisVal, kHostOpenposeTag);
+    if (!w || !w->loaded || !w->detector) {
+        return ev::throwError("Openpose: detector is uninitialized or model weights not loaded");
+    }
+    if (args.empty()) {
+        return ev::throwTypeError("Openpose.detect: image argument required");
+    }
 
     std::vector<uint8_t> rgba;
-    int width = 512, height = 512;
+    int width = 0, height = 0;
     std::string err;
-    if (!args.empty() && readImageInput(args[0], rgba, width, height, err) &&
-        w && w->loaded && w->detector) {
-        try {
-            auto pose = w->detector->detect(rgba.data(), width, height, 4);
-            ev::Persistent bodies(hostArrayOf(pose.bodies.size(), [&pose](size_t b) {
-                const auto& body = pose.bodies[b];
-                ev::Persistent kps(hostArrayOf(body.keypoints.size(), [&body](size_t k) {
-                    const auto& kp = body.keypoints[k];
-                    ObjectBuilder ko;
-                    ko.set("x", static_cast<double>(kp.x));
-                    ko.set("y", static_cast<double>(kp.y));
-                    ko.set("score", static_cast<double>(kp.score));
-                    ko.set("present", kp.present);
-                    return ko.build();
-                }));
-                ObjectBuilder bo;
-                bo.set("keypoints", kps.get());
-                bo.set("totalScore", static_cast<double>(body.total_score));
-                bo.set("totalParts", static_cast<double>(body.total_parts));
-                // The port published the body score as `score`; keep it.
-                bo.set("score", static_cast<double>(body.total_score));
-                return bo.build();
-            }));
-            ObjectBuilder res;
-            res.set("width", static_cast<double>(pose.width));
-            res.set("height", static_cast<double>(pose.height));
-            res.set("bodies", bodies.get());
-            res.set("poses", bodies.get());   // the port's name for the same array
-            return res.build();
-        } catch (const std::exception& e) {
-            return ev::throwError(std::string("Openpose detect failed: ") + e.what());
-        }
+    if (!readImageInput(args[0], rgba, width, height, err)) {
+        return ev::throwTypeError(std::string("Openpose.detect: ") + err);
     }
-    ObjectBuilder res;
-    res.set("width", static_cast<double>(width));
-    res.set("height", static_cast<double>(height));
-    ev::Persistent empty(makeEmptyArray());
-    res.set("bodies", empty.get());
-    res.set("poses", empty.get());
-    return res.build();
+    try {
+        auto pose = w->detector->detect(rgba.data(), width, height, 4);
+        ev::Persistent bodies(hostArrayOf(pose.bodies.size(), [&pose](size_t b) {
+            const auto& body = pose.bodies[b];
+            ev::Persistent kps(hostArrayOf(body.keypoints.size(), [&body](size_t k) {
+                const auto& kp = body.keypoints[k];
+                ObjectBuilder ko;
+                ko.set("x", static_cast<double>(kp.x));
+                ko.set("y", static_cast<double>(kp.y));
+                ko.set("score", static_cast<double>(kp.score));
+                ko.set("present", kp.present);
+                return ko.build();
+            }));
+            ObjectBuilder bo;
+            bo.set("keypoints", kps.get());
+            bo.set("totalScore", static_cast<double>(body.total_score));
+            bo.set("totalParts", static_cast<double>(body.total_parts));
+            // The port published the body score as `score`; keep it.
+            bo.set("score", static_cast<double>(body.total_score));
+            return bo.build();
+        }));
+        ObjectBuilder res;
+        res.set("width", static_cast<double>(pose.width));
+        res.set("height", static_cast<double>(pose.height));
+        res.set("bodies", bodies.get());
+        res.set("poses", bodies.get());   // the port's name for the same array
+        return res.build();
+    } catch (const std::exception& e) {
+        return ev::throwError(std::string("Openpose detect failed: ") + e.what());
+    }
 }
 
 // ─── SegFormer ────────────────────────────────────────────────────────────
 
 Value segformerDetect(Value thisVal, std::span<const Value> args) {
     auto* w = selfOf<SegformerWrapper>(g_segformerClass, thisVal, kHostSegformerTag);
+    if (!w || !w->loaded || !w->detector) {
+        return ev::throwError("Segformer: detector is uninitialized or model weights not loaded");
+    }
+    if (args.empty()) {
+        return ev::throwTypeError("Segformer.detect: image argument required");
+    }
 
     std::vector<uint8_t> rgba;
-    int width = 512, height = 512;
+    int width = 0, height = 0;
     std::string err;
+    if (!readImageInput(args[0], rgba, width, height, err)) {
+        return ev::throwTypeError(std::string("Segformer.detect: ") + err);
+    }
     std::vector<uint8_t> classes;
     int outW = width, outH = height;
-    if (!args.empty() && readImageInput(args[0], rgba, width, height, err) &&
-        w && w->loaded && w->detector) {
-        try {
-            auto sm = w->detector->detect(rgba.data(), width, height, 4);
-            classes = std::move(sm.classes);
-            outW = sm.width;
-            outH = sm.height;
-        } catch (const std::exception& e) {
-            return ev::throwError(std::string("Segformer detect failed: ") + e.what());
-        }
-    } else {
-        classes.assign(static_cast<size_t>(width) * height, 0);
+    try {
+        auto sm = w->detector->detect(rgba.data(), width, height, 4);
+        classes = std::move(sm.classes);
+        outW = sm.width;
+        outH = sm.height;
+    } catch (const std::exception& e) {
+        return ev::throwError(std::string("Segformer detect failed: ") + e.what());
     }
 
     std::vector<int32_t> asI32(classes.begin(), classes.end());

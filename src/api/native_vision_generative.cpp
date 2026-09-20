@@ -114,24 +114,6 @@ Value sg3Result(const StyleGAN3Wrapper& w, const sg3::Image& img, int64_t seed,
     return res.build();
 }
 
-// An un-loaded generator still answers, so a surface probe works without
-// weights: a mid-gray image of the model resolution, no latents.
-Value sg3Placeholder(const StyleGAN3Wrapper* w, int64_t seed) {
-    const int res = w ? w->imgResolution : 1024;
-    const int ch = w ? w->imgChannels : 3;
-    std::vector<uint8_t> gray(static_cast<size_t>(res) * res * ch, 128);
-    ObjectBuilder r;
-    {
-        ev::Persistent d(makeUint8Array(gray.data(), gray.size()));
-        r.set("data", d.get());
-    }
-    r.set("width", static_cast<double>(res));
-    r.set("height", static_cast<double>(res));
-    r.set("channels", static_cast<double>(ch));
-    if (seed >= 0) r.set("seed", static_cast<double>(seed));
-    return r.build();
-}
-
 // ─────────────────────────────────────────────────────────────────────────
 // StyleGAN3
 // ─────────────────────────────────────────────────────────────────────────
@@ -145,6 +127,9 @@ Value sg3Placeholder(const StyleGAN3Wrapper* w, int64_t seed) {
 Value sgGenerate(Value thisVal, std::span<const Value> args) {
     auto* w = sgSelf(thisVal);
     if (!w) return ev::throwTypeError("StyleGAN3.prototype.generate: not a generator");
+    if (!(w->loaded && w->generator)) {
+        return ev::throwError("StyleGAN3: generator is uninitialized or model weights not loaded");
+    }
 
     Value opts = args.empty() ? ev::undefined() : args[0];
     float psi = 1.0f;
@@ -176,8 +161,6 @@ Value sgGenerate(Value thisVal, std::span<const Value> args) {
         for (float& v : z) v = nd(rng);
     }
 
-    if (!(w->loaded && w->generator)) return sg3Placeholder(w, seed);
-
     try {
         brotensor::DeviceScope scope(w->device);
         brotensor::Tensor zt = brotensor::Tensor::mat(1, w->zDim);
@@ -203,6 +186,9 @@ Value sgGenerate(Value thisVal, std::span<const Value> args) {
 Value sgSynthesize(Value thisVal, std::span<const Value> args) {
     auto* w = sgSelf(thisVal);
     if (!w) return ev::throwTypeError("StyleGAN3.prototype.synthesize: not a generator");
+    if (!(w->loaded && w->generator)) {
+        return ev::throwError("StyleGAN3: generator is uninitialized or model weights not loaded");
+    }
     if (args.empty() || !ev::isObject(args[0])) {
         return ev::throwTypeError("synthesize(w, opts?): w Float32Array required");
     }
@@ -221,8 +207,6 @@ Value sgSynthesize(Value thisVal, std::span<const Value> args) {
         return ev::throwTypeError(
             "synthesize: w must have length numWs*wDim (W+) or wDim (single w)");
     }
-
-    if (!(w->loaded && w->generator)) return sg3Placeholder(w, -1);
 
     try {
         brotensor::DeviceScope scope(w->device);
@@ -450,11 +434,15 @@ bool loadStyleGAN3Generator(const std::string& path, Value opts,
         w.generator->to(w.device);
         w.loaded = true;
     } catch (const std::exception& e) {
-        // A missing checkpoint is not fatal: the handle stays usable for
-        // surface probes, exactly as the other loaders in this binding.
         w.generator.reset();
         w.loaded = false;
-        err = e.what();
+        err = std::string("loadStyleGAN3 failed: ") + e.what();
+        return false;
+    } catch (...) {
+        w.generator.reset();
+        w.loaded = false;
+        err = "loadStyleGAN3 failed: unknown error";
+        return false;
     }
     return true;
 }
