@@ -39,76 +39,76 @@ static void addDeviceAccessor(ObjectBuilder& proto, const HostClass& cls) {
 // DepthEstimator
 // ═══════════════════════════════════════════════════════════════════════════
 
+static Value runDepthEstimator(DepthEstimatorWrapper* w, std::span<const Value> args) {
+    if (!w || !w->loaded || !w->estimator) {
+        return ev::throwError("DepthEstimator.estimate: model is not initialized/loaded");
+    }
+    if (args.empty()) {
+        return ev::throwTypeError("DepthEstimator.estimate: image argument required");
+    }
+
+    const bool invert = args.size() > 1 && ev::isObject(args[1])
+                            ? ev::toBool(ev::getProperty(args[1], "invert"))
+                            : false;
+
+    std::vector<uint8_t> rgba;
+    int width = 0, height = 0;
+    std::string err;
+    if (!readImageInput(args[0], rgba, width, height, err)) {
+        return ev::throwTypeError(std::string("DepthEstimator.estimate: ") + err);
+    }
+
+    std::vector<float> depth;
+    try {
+        brotensor::DeviceScope scope(w->device);
+        auto dm = w->estimator->estimate(rgba.data(), width, height, 4);
+        depth = std::move(dm.depth);
+        width = dm.width;
+        height = dm.height;
+    } catch (const std::exception& e) {
+        return ev::throwError(std::string("DepthEstimator estimate failed: ") + e.what());
+    }
+
+    float minV = 0.0f, maxV = 1.0f;
+    if (!depth.empty()) {
+        minV = *std::min_element(depth.begin(), depth.end());
+        maxV = *std::max_element(depth.begin(), depth.end());
+    }
+    const float span = (maxV > minV) ? (maxV - minV) : 1.0f;
+    std::vector<uint8_t> gray(depth.size());
+    for (size_t i = 0; i < depth.size(); ++i) {
+        float t = (depth[i] - minV) / span;
+        if (invert) t = 1.0f - t;
+        gray[i] = static_cast<uint8_t>(std::clamp(t * 255.0f, 0.0f, 255.0f));
+    }
+
+    ObjectBuilder res;
+    res.set("width", static_cast<double>(width));
+    res.set("height", static_cast<double>(height));
+    {
+        ev::Persistent dep(makeFloat32Array(depth.data(), depth.size()));
+        res.set("depth", dep.get());
+    }
+    {
+        ev::Persistent g(makeUint8Array(gray.data(), gray.size()));
+        res.set("gray", g.get());
+    }
+    res.set("min", static_cast<double>(minV));
+    res.set("max", static_cast<double>(maxV));
+    return res.build();
+}
+
 static void decorateDepthEstimatorProto(ObjectBuilder& proto) {
     addDeviceAccessor<DepthEstimatorWrapper>(proto, g_depthEstimatorClass);
 
     // estimate(image, opts?) -> { width, height, depth, gray, min, max }
-    //   opts.invert — the old binding's `image` ImageBitmap was min/max
-    //   normalized and optionally inverted (near = bright). A standalone
-    //   sibling cannot mint an ImageBitmap, so the same normalized plane comes
-    //   back as `gray` (Uint8Array) and `invert` flips it there.
     proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
         void* p = g_depthEstimatorClass.unwrap(thisVal);
         auto* w = p ? static_cast<DepthEstimatorWrapper*>(p) : nullptr;
         if (!w || w->tag != kHostDepthEstimatorTag) {
             return ev::throwTypeError("DepthEstimator.prototype.estimate: not a DepthEstimator instance");
         }
-        if (!w->loaded || !w->estimator) {
-            return ev::throwError("DepthEstimator.estimate: model is not initialized/loaded");
-        }
-        if (args.empty()) {
-            return ev::throwTypeError("DepthEstimator.estimate: image argument required");
-        }
-
-        const bool invert = args.size() > 1 && ev::isObject(args[1])
-                                ? ev::toBool(ev::getProperty(args[1], "invert"))
-                                : false;
-
-        std::vector<uint8_t> rgba;
-        int width = 0, height = 0;
-        std::string err;
-        if (!readImageInput(args[0], rgba, width, height, err)) {
-            return ev::throwTypeError(std::string("DepthEstimator.estimate: ") + err);
-        }
-
-        std::vector<float> depth;
-        try {
-            brotensor::DeviceScope scope(w->device);
-            auto dm = w->estimator->estimate(rgba.data(), width, height, 4);
-            depth = std::move(dm.depth);
-            width = dm.width;
-            height = dm.height;
-        } catch (const std::exception& e) {
-            return ev::throwError(std::string("DepthEstimator estimate failed: ") + e.what());
-        }
-
-        float minV = 0.0f, maxV = 1.0f;
-        if (!depth.empty()) {
-            minV = *std::min_element(depth.begin(), depth.end());
-            maxV = *std::max_element(depth.begin(), depth.end());
-        }
-        const float span = (maxV > minV) ? (maxV - minV) : 1.0f;
-        std::vector<uint8_t> gray(depth.size());
-        for (size_t i = 0; i < depth.size(); ++i) {
-            float t = (depth[i] - minV) / span;
-            if (invert) t = 1.0f - t;
-            gray[i] = static_cast<uint8_t>(std::clamp(t * 255.0f, 0.0f, 255.0f));
-        }
-
-        ObjectBuilder res;
-        res.set("width", static_cast<double>(width));
-        res.set("height", static_cast<double>(height));
-        {
-            ev::Persistent dep(makeFloat32Array(depth.data(), depth.size()));
-            res.set("depth", dep.get());
-        }
-        {
-            ev::Persistent g(makeUint8Array(gray.data(), gray.size()));
-            res.set("gray", g.get());
-        }
-        res.set("min", static_cast<double>(minV));
-        res.set("max", static_cast<double>(maxV));
-        return res.build();
+        return runDepthEstimator(w, args);
     });
 }
 
@@ -123,71 +123,72 @@ static void decorateDepthEstimatorProto(ObjectBuilder& proto) {
 // NormalEstimator (DSINE)
 // ═══════════════════════════════════════════════════════════════════════════
 
+static Value runNormalEstimator(NormalEstimatorWrapper* w, std::span<const Value> args) {
+    if (!w || !w->loaded || !w->estimator) {
+        return ev::throwError("NormalEstimator.estimate: model is not initialized/loaded");
+    }
+    if (args.empty()) {
+        return ev::throwTypeError("NormalEstimator.estimate: image argument required");
+    }
+
+    bool hasIntrinsics = false;
+    float fx = 0.0f, fy = 0.0f, cx = 0.0f, cy = 0.0f;
+    if (args.size() > 1 && ev::isObject(args[1])) {
+        Value opts = args[1];
+        Value fxv = ev::getProperty(opts, "fx");
+        if (ev::isNumber(fxv)) {
+            hasIntrinsics = true;
+            fx = static_cast<float>(ev::toDouble(fxv));
+            Value v = ev::getProperty(opts, "fy");
+            if (ev::isNumber(v)) fy = static_cast<float>(ev::toDouble(v));
+            v = ev::getProperty(opts, "cx");
+            if (ev::isNumber(v)) cx = static_cast<float>(ev::toDouble(v));
+            v = ev::getProperty(opts, "cy");
+            if (ev::isNumber(v)) cy = static_cast<float>(ev::toDouble(v));
+        }
+    }
+
+    std::vector<uint8_t> rgba;
+    int width = 0, height = 0;
+    std::string err;
+    if (!readImageInput(args[0], rgba, width, height, err)) {
+        return ev::throwTypeError(std::string("NormalEstimator.estimate: ") + err);
+    }
+
+    std::vector<float> normals;
+    try {
+        brotensor::DeviceScope scope(w->device);
+        auto nm = hasIntrinsics
+                      ? w->estimator->estimate(rgba.data(), width, height, 4,
+                                               fx, fy, cx, cy)
+                      : w->estimator->estimate(rgba.data(), width, height, 4);
+        normals = std::move(nm.normals);
+        width = nm.width;
+        height = nm.height;
+    } catch (const std::exception& e) {
+        return ev::throwError(std::string("NormalEstimator estimate failed: ") + e.what());
+    }
+
+    ObjectBuilder res;
+    res.set("width", static_cast<double>(width));
+    res.set("height", static_cast<double>(height));
+    ev::Persistent norm(makeFloat32Array(normals.data(), normals.size()));
+    res.set("normals", norm.get());
+    res.set("normal", norm.get());   // the port's name for the same plane
+    return res.build();
+}
+
 static void decorateNormalEstimatorProto(ObjectBuilder& proto) {
     addDeviceAccessor<NormalEstimatorWrapper>(proto, g_normalEstimatorClass);
 
     // estimate(image, opts?) -> { width, height, normals, normal }
-    //   opts.fx / fy / cx / cy — explicit pinhole intrinsics. Passing fx
-    //   switches DSINE off its fov-synthesized default, which is the whole
-    //   point of the option; the bronze port read none of them.
     proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
         void* p = g_normalEstimatorClass.unwrap(thisVal);
         auto* w = p ? static_cast<NormalEstimatorWrapper*>(p) : nullptr;
         if (!w || w->tag != kHostNormalEstimatorTag) {
             return ev::throwTypeError("NormalEstimator.prototype.estimate: not a NormalEstimator instance");
         }
-        if (!w->loaded || !w->estimator) {
-            return ev::throwError("NormalEstimator.estimate: model is not initialized/loaded");
-        }
-        if (args.empty()) {
-            return ev::throwTypeError("NormalEstimator.estimate: image argument required");
-        }
-
-        bool hasIntrinsics = false;
-        float fx = 0.0f, fy = 0.0f, cx = 0.0f, cy = 0.0f;
-        if (args.size() > 1 && ev::isObject(args[1])) {
-            Value opts = args[1];
-            Value fxv = ev::getProperty(opts, "fx");
-            if (ev::isNumber(fxv)) {
-                hasIntrinsics = true;
-                fx = static_cast<float>(ev::toDouble(fxv));
-                Value v = ev::getProperty(opts, "fy");
-                if (ev::isNumber(v)) fy = static_cast<float>(ev::toDouble(v));
-                v = ev::getProperty(opts, "cx");
-                if (ev::isNumber(v)) cx = static_cast<float>(ev::toDouble(v));
-                v = ev::getProperty(opts, "cy");
-                if (ev::isNumber(v)) cy = static_cast<float>(ev::toDouble(v));
-            }
-        }
-
-        std::vector<uint8_t> rgba;
-        int width = 0, height = 0;
-        std::string err;
-        if (!readImageInput(args[0], rgba, width, height, err)) {
-            return ev::throwTypeError(std::string("NormalEstimator.estimate: ") + err);
-        }
-
-        std::vector<float> normals;
-        try {
-            brotensor::DeviceScope scope(w->device);
-            auto nm = hasIntrinsics
-                          ? w->estimator->estimate(rgba.data(), width, height, 4,
-                                                   fx, fy, cx, cy)
-                          : w->estimator->estimate(rgba.data(), width, height, 4);
-            normals = std::move(nm.normals);
-            width = nm.width;
-            height = nm.height;
-        } catch (const std::exception& e) {
-            return ev::throwError(std::string("NormalEstimator estimate failed: ") + e.what());
-        }
-
-        ObjectBuilder res;
-        res.set("width", static_cast<double>(width));
-        res.set("height", static_cast<double>(height));
-        ev::Persistent norm(makeFloat32Array(normals.data(), normals.size()));
-        res.set("normals", norm.get());
-        res.set("normal", norm.get());   // the port's name for the same plane
-        return res.build();
+        return runNormalEstimator(w, args);
     });
 }
 
@@ -233,38 +234,61 @@ static void decorateVisionModelProto(ObjectBuilder& proto) {
         return ev::fromBool(w->loaded);
     });
 
-    proto.def("predict", 2, [](Value thisVal, std::span<const Value>) -> Value {
+    proto.def("predict", 2, [](Value thisVal, std::span<const Value> args) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.predict: not a VisionModel");
         auto* w = static_cast<VisionModelWrapper*>(p);
+        if (w->depthEstimator) return runDepthEstimator(w->depthEstimator.get(), args);
+        if (w->sam) return runSamSegment(w->sam.get(), args);
+        if (w->normalEstimator) return runNormalEstimator(w->normalEstimator.get(), args);
+        if (w->hed) return runHedDetect(w->hed.get(), args);
+        if (w->lineart) return runLineartDetect(w->lineart.get(), args);
+        if (w->mlsd) return runMlsdDetect(w->mlsd.get(), args);
+        if (w->openpose) return runOpenposeDetect(w->openpose.get(), args);
+        if (w->segformer) return runSegformerDetect(w->segformer.get(), args);
+        if (w->birefnet) return runBirefnet(w->birefnet.get(), args);
         return ev::throwError(std::string("VisionModel: model weights not loaded for task '") + w->taskName + "'");
     });
 
-    proto.def("detect", 2, [](Value thisVal, std::span<const Value>) -> Value {
+    proto.def("detect", 2, [](Value thisVal, std::span<const Value> args) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.detect: not a VisionModel");
+        auto* w = static_cast<VisionModelWrapper*>(p);
+        if (w->openpose) return runOpenposeDetect(w->openpose.get(), args);
+        if (w->hed) return runHedDetect(w->hed.get(), args);
+        if (w->lineart) return runLineartDetect(w->lineart.get(), args);
+        if (w->mlsd) return runMlsdDetect(w->mlsd.get(), args);
+        if (w->segformer) return runSegformerDetect(w->segformer.get(), args);
         return ev::throwError("VisionModel: model weights not loaded for task 'detect'");
     });
 
-    proto.def("segment", 2, [](Value thisVal, std::span<const Value>) -> Value {
+    proto.def("segment", 2, [](Value thisVal, std::span<const Value> args) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.segment: not a VisionModel");
+        auto* w = static_cast<VisionModelWrapper*>(p);
+        if (w->sam) return runSamSegment(w->sam.get(), args);
+        if (w->segformer) return runSegformerDetect(w->segformer.get(), args);
+        if (w->birefnet) return runBirefnet(w->birefnet.get(), args);
         return ev::throwError("VisionModel: model weights not loaded for task 'segment'");
     });
 
-    proto.def("depth", 2, [](Value thisVal, std::span<const Value>) -> Value {
+    proto.def("depth", 2, [](Value thisVal, std::span<const Value> args) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.depth: not a VisionModel");
+        auto* w = static_cast<VisionModelWrapper*>(p);
+        if (w->depthEstimator) return runDepthEstimator(w->depthEstimator.get(), args);
         return ev::throwError("VisionModel: model weights not loaded for task 'depth'");
     });
 
-    proto.def("pose", 2, [](Value thisVal, std::span<const Value>) -> Value {
+    proto.def("pose", 2, [](Value thisVal, std::span<const Value> args) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.pose: not a VisionModel");
+        auto* w = static_cast<VisionModelWrapper*>(p);
+        if (w->openpose) return runOpenposeDetect(w->openpose.get(), args);
         return ev::throwError("VisionModel: model weights not loaded for task 'pose'");
     });
 
-    proto.def("ocr", 2, [](Value thisVal, std::span<const Value>) -> Value {
+    proto.def("ocr", 2, [](Value thisVal, std::span<const Value> /*args*/) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.ocr: not a VisionModel");
         return ev::throwError("VisionModel: model weights not loaded for task 'ocr'");

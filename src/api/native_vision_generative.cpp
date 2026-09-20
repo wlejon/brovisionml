@@ -311,6 +311,8 @@ Value sgInvert(Value thisVal, std::span<const Value> args) {
     }
 }
 
+} // namespace
+
 // ─────────────────────────────────────────────────────────────────────────
 // BiRefNet
 // ─────────────────────────────────────────────────────────────────────────
@@ -320,11 +322,9 @@ Value sgInvert(Value thisVal, std::span<const Value> args) {
 //   matte  Uint8Array(h*w)   the same matte as bytes (the old `matte` bitmap)
 //   data   Uint8Array(h*w*4) the input RGBA with its alpha replaced — the
 //          ready-to-draw cutout the old binding returned as `image`.
-Value brRemoveBackground(Value thisVal, std::span<const Value> args) {
-    auto* w = brSelf(thisVal);
+Value runBirefnet(BirefnetWrapper* w, std::span<const Value> args) {
     if (!w) {
-        return ev::throwTypeError(
-            "BiRefNet.prototype.removeBackground: not a BiRefNet instance");
+        return ev::throwTypeError("BiRefNet: not a BiRefNet instance");
     }
     if (args.empty()) {
         return ev::throwTypeError("removeBackground(image, opts?): image required");
@@ -398,7 +398,13 @@ Value brRemoveBackground(Value thisVal, std::span<const Value> args) {
     return res.build();
 }
 
-} // namespace
+Value brRemoveBackground(Value thisVal, std::span<const Value> args) {
+    auto* w = brSelf(thisVal);
+    if (!w) {
+        return ev::throwTypeError("BiRefNet.prototype.removeBackground: not a BiRefNet instance");
+    }
+    return runBirefnet(w, args);
+}
 
 bool loadStyleGAN3Generator(const std::string& path, Value opts,
                             StyleGAN3Wrapper& w, std::string& err) {

@@ -62,10 +62,11 @@ Value scalarPlaneResult(int w, int h, const std::vector<float>& plane,
     return res.build();
 }
 
+} // namespace
+
 // ─── HED ──────────────────────────────────────────────────────────────────
 
-Value hedDetect(Value thisVal, std::span<const Value> args) {
-    auto* w = selfOf<HedWrapper>(g_hedClass, thisVal, kHostHedTag);
+Value runHedDetect(HedWrapper* w, std::span<const Value> args) {
     if (!w || !w->loaded || !w->detector) {
         return ev::throwError("Hed: detector is uninitialized or model weights not loaded");
     }
@@ -80,6 +81,7 @@ Value hedDetect(Value thisVal, std::span<const Value> args) {
         return ev::throwTypeError(std::string("Hed.detect: ") + err);
     }
     try {
+        brotensor::DeviceScope scope(w->device);
         auto em = w->detector->detect(rgba.data(), width, height, 4);
         return scalarPlaneResult(em.width, em.height, em.edge, "edge", "edges");
     } catch (const std::exception& e) {
@@ -87,10 +89,15 @@ Value hedDetect(Value thisVal, std::span<const Value> args) {
     }
 }
 
+Value hedDetect(Value thisVal, std::span<const Value> args) {
+    auto* w = selfOf<HedWrapper>(g_hedClass, thisVal, kHostHedTag);
+    if (!w) return ev::throwTypeError("Hed: not a Hed instance");
+    return runHedDetect(w, args);
+}
+
 // ─── Lineart ──────────────────────────────────────────────────────────────
 
-Value lineartDetect(Value thisVal, std::span<const Value> args) {
-    auto* w = selfOf<LineartWrapper>(g_lineartClass, thisVal, kHostLineartTag);
+Value runLineartDetect(LineartWrapper* w, std::span<const Value> args) {
     if (!w || !w->loaded || !w->detector) {
         return ev::throwError("Lineart: detector is uninitialized or model weights not loaded");
     }
@@ -105,6 +112,7 @@ Value lineartDetect(Value thisVal, std::span<const Value> args) {
         return ev::throwTypeError(std::string("Lineart.detect: ") + err);
     }
     try {
+        brotensor::DeviceScope scope(w->device);
         auto lm = w->detector->detect(rgba.data(), width, height, 4);
         return scalarPlaneResult(lm.width, lm.height, lm.line, "line", "lines");
     } catch (const std::exception& e) {
@@ -112,17 +120,22 @@ Value lineartDetect(Value thisVal, std::span<const Value> args) {
     }
 }
 
+Value lineartDetect(Value thisVal, std::span<const Value> args) {
+    auto* w = selfOf<LineartWrapper>(g_lineartClass, thisVal, kHostLineartTag);
+    if (!w) return ev::throwTypeError("Lineart: not a Lineart instance");
+    return runLineartDetect(w, args);
+}
+
 // ─── MLSD ─────────────────────────────────────────────────────────────────
 
-Value mlsdDetect(Value thisVal, std::span<const Value> args) {
-    auto* w = selfOf<MlsdWrapper>(g_mlsdClass, thisVal, kHostMlsdTag);
-
+Value runMlsdDetect(MlsdWrapper* w, std::span<const Value> args) {
     std::vector<uint8_t> rgba;
     int width = 512, height = 512;
     std::string err;
     if (!args.empty() && readImageInput(args[0], rgba, width, height, err) &&
         w && w->loaded && w->detector) {
         try {
+            brotensor::DeviceScope scope(w->device);
             auto segs = w->detector->detect(rgba.data(), width, height, 4);
             ev::Persistent arr(hostArrayOf(segs.segments.size(), [&segs](size_t i) {
                 ObjectBuilder o;
@@ -152,10 +165,14 @@ Value mlsdDetect(Value thisVal, std::span<const Value> args) {
     return res.build();
 }
 
+Value mlsdDetect(Value thisVal, std::span<const Value> args) {
+    auto* w = selfOf<MlsdWrapper>(g_mlsdClass, thisVal, kHostMlsdTag);
+    return runMlsdDetect(w, args);
+}
+
 // ─── OpenPose ─────────────────────────────────────────────────────────────
 
-Value openposeDetect(Value thisVal, std::span<const Value> args) {
-    auto* w = selfOf<OpenposeWrapper>(g_openposeClass, thisVal, kHostOpenposeTag);
+Value runOpenposeDetect(OpenposeWrapper* w, std::span<const Value> args) {
     if (!w || !w->loaded || !w->detector) {
         return ev::throwError("Openpose: detector is uninitialized or model weights not loaded");
     }
@@ -170,6 +187,7 @@ Value openposeDetect(Value thisVal, std::span<const Value> args) {
         return ev::throwTypeError(std::string("Openpose.detect: ") + err);
     }
     try {
+        brotensor::DeviceScope scope(w->device);
         auto pose = w->detector->detect(rgba.data(), width, height, 4);
         ev::Persistent bodies(hostArrayOf(pose.bodies.size(), [&pose](size_t b) {
             const auto& body = pose.bodies[b];
@@ -201,10 +219,15 @@ Value openposeDetect(Value thisVal, std::span<const Value> args) {
     }
 }
 
+Value openposeDetect(Value thisVal, std::span<const Value> args) {
+    auto* w = selfOf<OpenposeWrapper>(g_openposeClass, thisVal, kHostOpenposeTag);
+    if (!w) return ev::throwTypeError("Openpose: not an Openpose instance");
+    return runOpenposeDetect(w, args);
+}
+
 // ─── SegFormer ────────────────────────────────────────────────────────────
 
-Value segformerDetect(Value thisVal, std::span<const Value> args) {
-    auto* w = selfOf<SegformerWrapper>(g_segformerClass, thisVal, kHostSegformerTag);
+Value runSegformerDetect(SegformerWrapper* w, std::span<const Value> args) {
     if (!w || !w->loaded || !w->detector) {
         return ev::throwError("Segformer: detector is uninitialized or model weights not loaded");
     }
@@ -221,6 +244,7 @@ Value segformerDetect(Value thisVal, std::span<const Value> args) {
     std::vector<uint8_t> classes;
     int outW = width, outH = height;
     try {
+        brotensor::DeviceScope scope(w->device);
         auto sm = w->detector->detect(rgba.data(), width, height, 4);
         classes = std::move(sm.classes);
         outW = sm.width;
@@ -246,6 +270,12 @@ Value segformerDetect(Value thisVal, std::span<const Value> args) {
     return res.build();
 }
 
+Value segformerDetect(Value thisVal, std::span<const Value> args) {
+    auto* w = selfOf<SegformerWrapper>(g_segformerClass, thisVal, kHostSegformerTag);
+    if (!w) return ev::throwTypeError("Segformer: not a Segformer instance");
+    return runSegformerDetect(w, args);
+}
+
 // Both names for the same body: `detect` is what the pre-transition binding
 // published, `estimate` is what the bronze port renamed it to.
 template <typename Fn>
@@ -253,8 +283,6 @@ void defDetect(ObjectBuilder& proto, Fn fn) {
     proto.def("detect", 2, fn);
     proto.def("estimate", 2, fn);
 }
-
-} // namespace
 
 void decorateHedProto(ObjectBuilder& proto) {
     proto.accessor("device", [](Value thisVal, std::span<const Value>) -> Value {

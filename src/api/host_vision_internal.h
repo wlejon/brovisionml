@@ -286,6 +286,14 @@ void decorateMlsdProto(ObjectBuilder& proto);
 void decorateOpenposeProto(ObjectBuilder& proto);
 void decorateSegformerProto(ObjectBuilder& proto);
 
+Value runHedDetect(HedWrapper* w, std::span<const Value> args);
+Value runLineartDetect(LineartWrapper* w, std::span<const Value> args);
+Value runMlsdDetect(MlsdWrapper* w, std::span<const Value> args);
+Value runOpenposeDetect(OpenposeWrapper* w, std::span<const Value> args);
+Value runSegformerDetect(SegformerWrapper* w, std::span<const Value> args);
+Value runSamSegment(SamWrapper* w, std::span<const Value> args);
+Value runBirefnet(BirefnetWrapper* w, std::span<const Value> args);
+
 // { num, width, height, best, masks: [{ iou, data: Uint8Array }] } — the shape
 // the pre-transition Sam.segment() returned (minus the ImageBitmap, which is
 // an engine-side type; callers rasterize `data` themselves).

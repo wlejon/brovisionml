@@ -121,10 +121,7 @@ Value samSetImage(Value thisVal, std::span<const Value> args) {
 //   opts.labels    [1, 0, ...]  1 = foreground, 0 = background (default all 1)
 //   opts.boxes     [[x1,y1,x2,y2], ...]
 //   opts.multimask bool (default true)
-Value samSegment(Value thisVal, std::span<const Value> args) {
-    auto* w = samSelf(thisVal);
-    if (!w) return ev::throwTypeError("Sam.prototype.segment: not a Sam instance");
-
+static Value samSegmentDirect(SamWrapper* w, std::span<const Value> args) {
     std::vector<std::array<float, 2>> points;
     std::vector<int> inlineLabels;
     std::vector<int> labels;
@@ -165,14 +162,18 @@ Value samSegment(Value thisVal, std::span<const Value> args) {
     }
 }
 
+Value samSegment(Value thisVal, std::span<const Value> args) {
+    auto* w = samSelf(thisVal);
+    if (!w) return ev::throwTypeError("Sam.prototype.segment: not a Sam instance");
+    return samSegmentDirect(w, args);
+}
+
 // segmentEverything(image, opts?) -> { width, height, masks }
 //   masks sorted by descending area; each is
 //   { data, bbox, area, predictedIou, stabilityScore, point }.
 //   opts.pointsPerSide / pointsPerBatch / predIouThresh / stabilityThresh /
 //   boxNmsThresh / cropNLayers / minMaskRegionArea — defaults mirror upstream.
-Value samSegmentEverything(Value thisVal, std::span<const Value> args) {
-    auto* w = samSelf(thisVal);
-    if (!w) return ev::throwTypeError("Sam.prototype.segmentEverything: not a Sam instance");
+static Value samSegmentEverythingDirect(SamWrapper* w, std::span<const Value> args) {
     if (args.empty()) {
         return ev::throwTypeError("segmentEverything(image, opts?): image required");
     }
@@ -248,13 +249,55 @@ Value samSegmentEverything(Value thisVal, std::span<const Value> args) {
     }));
 
     ObjectBuilder res;
+    res.set("num", static_cast<double>(masks.size()));
     res.set("width", static_cast<double>(inW));
     res.set("height", static_cast<double>(inH));
     res.set("masks", arr.get());
     return res.build();
 }
 
+Value samSegmentEverything(Value thisVal, std::span<const Value> args) {
+    auto* w = samSelf(thisVal);
+    if (!w) return ev::throwTypeError("Sam.prototype.segmentEverything: not a Sam instance");
+    return samSegmentEverythingDirect(w, args);
+}
+
 } // namespace
+
+Value runSamSegment(SamWrapper* w, std::span<const Value> args) {
+    if (!w) return ev::throwTypeError("Sam: not a Sam instance");
+    if (!(w->loaded && w->sam)) {
+        return ev::throwError("Sam: model is not initialized/loaded");
+    }
+    if (args.empty()) {
+        return ev::throwTypeError("Sam.segment: image or prompt argument required");
+    }
+
+    std::vector<uint8_t> rgba;
+    int inW = 0, inH = 0;
+    std::string err;
+    if (readImageInput(args[0], rgba, inW, inH, err)) {
+        if (args.size() > 1 && ev::isObject(args[1])) {
+            Value pv = ev::getProperty(args[1], "points");
+            Value bv = ev::getProperty(args[1], "boxes");
+            if (isJsArray(pv) || isJsArray(bv)) {
+                try {
+                    brotensor::DeviceScope scope(w->device);
+                    w->sam->set_image(rgba.data(), inW, inH, 4);
+                    w->hasImage = true;
+                    w->imageW = inW;
+                    w->imageH = inH;
+                } catch (const std::exception& e) {
+                    return ev::throwError(std::string("Sam setImage failed: ") + e.what());
+                }
+                std::span<const Value> promptArgs = args.subspan(1);
+                return samSegmentDirect(w, promptArgs);
+            }
+        }
+        return samSegmentEverythingDirect(w, args);
+    }
+    return samSegmentDirect(w, args);
+}
 
 Value buildSegmentation(const brovisionml::sam::Segmentation& seg) {
     const int W = seg.width, H = seg.height;
