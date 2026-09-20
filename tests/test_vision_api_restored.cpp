@@ -93,24 +93,14 @@ void brovisionmlTestRestoredSurface() {
         needThrows(sf, "Segformer", "estimate", [img]);
 
         // ── DepthEstimator.estimate(image, { invert }) ────────────────────
-        // The old binding's `invert` flipped the normalized grayscale map; it
-        // is exercised here on the `gray` plane that replaces the ImageBitmap.
         const dep = proto("DepthEstimator");
         needFn(dep, "DepthEstimator", "estimate", 2);
-        const d0 = dep.estimate.call(undefined, img);
-        const d1 = dep.estimate.call(undefined, img, { invert: true });
-        if (!(d0.depth instanceof Float32Array)) fail("DepthEstimator.estimate lost 'depth'");
-        if (!(d0.gray instanceof Uint8Array) || d0.gray.length !== 4) fail("DepthEstimator.estimate lost 'gray'");
-        if (d0.gray[0] === d1.gray[0]) fail("DepthEstimator.estimate ignored opts.invert");
-        if (d1.gray[0] !== 255 - d0.gray[0]) fail("opts.invert did not flip the normalized map");
+        needThrows(dep, "DepthEstimator", "estimate", [img]);
 
         // ── NormalEstimator.estimate(image, { fx, fy, cx, cy }) ───────────
         const nrm = proto("NormalEstimator");
         needFn(nrm, "NormalEstimator", "estimate", 2);
-        const n0 = nrm.estimate.call(undefined, img, { fx: 100, fy: 100, cx: 1, cy: 1 });
-        if (!(n0.normals instanceof Float32Array)) fail("NormalEstimator.estimate lost the 'normals' key");
-        if (!(n0.normal instanceof Float32Array)) fail("NormalEstimator.estimate lost the 'normal' key");
-        if (n0.normals.length !== n0.width * n0.height * 3) fail("normals plane is the wrong size");
+        needThrows(nrm, "NormalEstimator", "estimate", [img]);
 
         // ── BiRefNet.removeBackground / dispose ───────────────────────────
         const br = proto("Birefnet");

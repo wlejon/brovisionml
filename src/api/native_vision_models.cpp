@@ -50,27 +50,36 @@ static void decorateDepthEstimatorProto(ObjectBuilder& proto) {
     proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
         void* p = g_depthEstimatorClass.unwrap(thisVal);
         auto* w = p ? static_cast<DepthEstimatorWrapper*>(p) : nullptr;
+        if (!w || w->tag != kHostDepthEstimatorTag) {
+            return ev::throwTypeError("DepthEstimator.prototype.estimate: not a DepthEstimator instance");
+        }
+        if (!w->loaded || !w->estimator) {
+            return ev::throwError("DepthEstimator.estimate: model is not initialized/loaded");
+        }
+        if (args.empty()) {
+            return ev::throwTypeError("DepthEstimator.estimate: image argument required");
+        }
 
         const bool invert = args.size() > 1 && ev::isObject(args[1])
                                 ? ev::toBool(ev::getProperty(args[1], "invert"))
                                 : false;
 
         std::vector<uint8_t> rgba;
-        int width = 512, height = 512;
+        int width = 0, height = 0;
         std::string err;
+        if (!readImageInput(args[0], rgba, width, height, err)) {
+            return ev::throwTypeError(std::string("DepthEstimator.estimate: ") + err);
+        }
+
         std::vector<float> depth;
-        if (!args.empty() && readImageInput(args[0], rgba, width, height, err) && w && w->loaded && w->estimator) {
-            try {
-                brotensor::DeviceScope scope(w->device);
-                auto dm = w->estimator->estimate(rgba.data(), width, height, 4);
-                depth = std::move(dm.depth);
-                width = dm.width;
-                height = dm.height;
-            } catch (const std::exception& e) {
-                return ev::throwError(std::string("estimate failed: ") + e.what());
-            }
-        } else {
-            depth.assign(static_cast<size_t>(width) * height, 0.5f);
+        try {
+            brotensor::DeviceScope scope(w->device);
+            auto dm = w->estimator->estimate(rgba.data(), width, height, 4);
+            depth = std::move(dm.depth);
+            width = dm.width;
+            height = dm.height;
+        } catch (const std::exception& e) {
+            return ev::throwError(std::string("DepthEstimator estimate failed: ") + e.what());
         }
 
         float minV = 0.0f, maxV = 1.0f;
@@ -124,6 +133,15 @@ static void decorateNormalEstimatorProto(ObjectBuilder& proto) {
     proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
         void* p = g_normalEstimatorClass.unwrap(thisVal);
         auto* w = p ? static_cast<NormalEstimatorWrapper*>(p) : nullptr;
+        if (!w || w->tag != kHostNormalEstimatorTag) {
+            return ev::throwTypeError("NormalEstimator.prototype.estimate: not a NormalEstimator instance");
+        }
+        if (!w->loaded || !w->estimator) {
+            return ev::throwError("NormalEstimator.estimate: model is not initialized/loaded");
+        }
+        if (args.empty()) {
+            return ev::throwTypeError("NormalEstimator.estimate: image argument required");
+        }
 
         bool hasIntrinsics = false;
         float fx = 0.0f, fy = 0.0f, cx = 0.0f, cy = 0.0f;
@@ -143,24 +161,24 @@ static void decorateNormalEstimatorProto(ObjectBuilder& proto) {
         }
 
         std::vector<uint8_t> rgba;
-        int width = 512, height = 512;
+        int width = 0, height = 0;
         std::string err;
+        if (!readImageInput(args[0], rgba, width, height, err)) {
+            return ev::throwTypeError(std::string("NormalEstimator.estimate: ") + err);
+        }
+
         std::vector<float> normals;
-        if (!args.empty() && readImageInput(args[0], rgba, width, height, err) && w && w->loaded && w->estimator) {
-            try {
-                brotensor::DeviceScope scope(w->device);
-                auto nm = hasIntrinsics
-                              ? w->estimator->estimate(rgba.data(), width, height, 4,
-                                                       fx, fy, cx, cy)
-                              : w->estimator->estimate(rgba.data(), width, height, 4);
-                normals = std::move(nm.normals);
-                width = nm.width;
-                height = nm.height;
-            } catch (const std::exception& e) {
-                return ev::throwError(std::string("normal estimate failed: ") + e.what());
-            }
-        } else {
-            normals.assign(static_cast<size_t>(width) * height * 3, 0.0f);
+        try {
+            brotensor::DeviceScope scope(w->device);
+            auto nm = hasIntrinsics
+                          ? w->estimator->estimate(rgba.data(), width, height, 4,
+                                                   fx, fy, cx, cy)
+                          : w->estimator->estimate(rgba.data(), width, height, 4);
+            normals = std::move(nm.normals);
+            width = nm.width;
+            height = nm.height;
+        } catch (const std::exception& e) {
+            return ev::throwError(std::string("NormalEstimator estimate failed: ") + e.what());
         }
 
         ObjectBuilder res;

@@ -150,17 +150,7 @@ Value samSegment(Value thisVal, std::span<const Value> args) {
         return ev::throwTypeError("segment: opts.points or opts.boxes required");
     }
     if (!(w->loaded && w->sam)) {
-        // No weights: answer with the empty result the bronze port produced
-        // rather than throwing, so a surface probe still works.
-        const int outW = w->imageW > 0 ? w->imageW : 512;
-        const int outH = w->imageH > 0 ? w->imageH : 512;
-        ObjectBuilder res;
-        res.set("num", 0.0);
-        res.set("width", static_cast<double>(outW));
-        res.set("height", static_cast<double>(outH));
-        res.set("best", 0.0);
-        res.set("masks", makeEmptyArray());
-        return res.build();
+        return ev::throwError("Sam.segment: model is not initialized/loaded");
     }
     if (!w->sam->has_image()) {
         return ev::throwError("segment: call setImage() before segment()");
@@ -214,11 +204,7 @@ Value samSegmentEverything(Value thisVal, std::span<const Value> args) {
     }
 
     if (!(w->loaded && w->sam)) {
-        ObjectBuilder res;
-        res.set("width", static_cast<double>(inW));
-        res.set("height", static_cast<double>(inH));
-        res.set("masks", makeEmptyArray());
-        return res.build();
+        return ev::throwError("Sam.segmentEverything: model is not initialized/loaded");
     }
 
     std::vector<brovisionml::sam::GeneratedMask> masks;
