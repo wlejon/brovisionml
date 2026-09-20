@@ -291,7 +291,7 @@ static void decorateVisionModelProto(ObjectBuilder& proto) {
     proto.def("ocr", 2, [](Value thisVal, std::span<const Value> /*args*/) -> Value {
         void* p = g_visionModelClass.unwrap(thisVal);
         if (!p) return ev::throwTypeError("VisionModel.prototype.ocr: not a VisionModel");
-        return ev::throwError("VisionModel: model weights not loaded for task 'ocr'");
+        return ev::throwTypeError("VisionModel.prototype.ocr: OCR backend requires an OCR model checkpoint to be explicitly loaded");
     });
 
     proto.def("dispose", 0, [](Value thisVal, std::span<const Value>) -> Value {
