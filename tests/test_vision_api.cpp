@@ -112,6 +112,42 @@ int main() {
     assert(ev::toDouble(evalRes.value) == 2.0);
     std::cout << "  bro.vision.nms correctly suppressed overlapping box (kept 2)" << std::endl;
 
+    // Test NMS with flat Float32Array and returnIndices / asTypedArray options
+    auto nmsOptRes = bronze::eval::evalScript(
+        "(() => {"
+        "  const flat = new Float32Array(["
+        "    10, 10, 50, 50, 0.9, 0,"
+        "    12, 12, 48, 48, 0.8, 0,"
+        "    100, 100, 150, 150, 0.7, 1"
+        "  ]);"
+        "  const keptFlat = bro.vision.nms(flat, { iouThreshold: 0.5 });"
+        "  if (keptFlat.length !== 2) return 1;"
+        "  if (keptFlat[0].index !== 0 || keptFlat[1].index !== 2) return 2;"
+        "  const indices = bro.vision.nms(flat, { iouThreshold: 0.5, returnIndices: true });"
+        "  if (!Array.isArray(indices) || indices.length !== 2) return 3;"
+        "  if (indices[0] !== 0 || indices[1] !== 2) return 4;"
+        "  const typedIndices = bro.vision.nms(flat, { iouThreshold: 0.5, returnIndices: true, asTypedArray: true });"
+        "  if (!(typedIndices instanceof Int32Array) || typedIndices.length !== 2) return 7;"
+        "  if (typedIndices[0] !== 0 || typedIndices[1] !== 2) return 8;"
+        "  const keptTyped = bro.vision.nms(flat, { iouThreshold: 0.5, asTypedArray: true });"
+        "  if (!(keptTyped instanceof Float32Array) || keptTyped.length !== 12) return 5;"
+        "  const views = ["
+        "    new Float32Array([10, 10, 50, 50, 0.9, 0]),"
+        "    new Float32Array([12, 12, 48, 48, 0.8, 0]),"
+        "    new Float32Array([100, 100, 150, 150, 0.7, 1])"
+        "  ];"
+        "  const keptViews = bro.vision.nms(views, { iouThreshold: 0.5 });"
+        "  if (keptViews.length !== 2) return 6;"
+        "  return 0;"
+        "})()"
+    );
+    if (nmsOptRes.thrown) {
+        std::cerr << "nmsOptRes thrown: " << ev::toUtf8(nmsOptRes.value) << std::endl;
+    }
+    assert(!nmsOptRes.thrown);
+    assert(ev::toDouble(nmsOptRes.value) == 0.0);
+    std::cout << "  bro.vision.nms flat Float32Array and typed views passed" << std::endl;
+
     // 2. decodeBoxes
     auto decodeRes = bronze::eval::evalScript(
         "(() => {\n"

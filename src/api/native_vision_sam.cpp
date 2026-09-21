@@ -31,21 +31,36 @@ SamWrapper* samSelf(Value thisVal) {
 // per-point label, which the bronze port read but the array form did not.
 void readPointsAndLabels(Value v, std::vector<std::array<float, 2>>& points,
                          std::vector<int>& inlineLabels) {
+    if (auto tinfo = ev::typedArrayInfo(v)) {
+        if (tinfo.elementKind == ev::elements::Float32 && tinfo.data) {
+            const float* p = reinterpret_cast<const float*>(tinfo.data);
+            const size_t n = tinfo.elementCount / 2;
+            points.reserve(points.size() + n);
+            inlineLabels.reserve(inlineLabels.size() + n);
+            for (size_t i = 0; i < n; ++i) {
+                points.push_back({p[2 * i], p[2 * i + 1]});
+                inlineLabels.push_back(1);
+            }
+            return;
+        }
+    }
     if (!isJsArray(v)) return;
     ev::Persistent arr(v);
     const uint32_t n = getJsArrayLength(arr.get());
+    points.reserve(points.size() + n);
+    inlineLabels.reserve(inlineLabels.size() + n);
     for (uint32_t i = 0; i < n; ++i) {
-        ev::Persistent e(ev::getElement(arr.get(), i));
-        if (!ev::isObject(e.get())) continue;
-        if (isJsArray(e.get())) {
-            float x = static_cast<float>(ev::toDouble(ev::getElement(e.get(), 0)));
-            float y = static_cast<float>(ev::toDouble(ev::getElement(e.get(), 1)));
+        Value e = ev::getElement(arr.get(), i);
+        if (!ev::isObject(e)) continue;
+        if (isJsArray(e)) {
+            float x = static_cast<float>(ev::toDouble(ev::getElement(e, 0)));
+            float y = static_cast<float>(ev::toDouble(ev::getElement(e, 1)));
             points.push_back({x, y});
             inlineLabels.push_back(1);
         } else {
-            float x = static_cast<float>(ev::toDouble(ev::getProperty(e.get(), "x")));
-            float y = static_cast<float>(ev::toDouble(ev::getProperty(e.get(), "y")));
-            Value lv = ev::getProperty(e.get(), "label");
+            float x = static_cast<float>(ev::toDouble(ev::getProperty(e, "x")));
+            float y = static_cast<float>(ev::toDouble(ev::getProperty(e, "y")));
+            Value lv = ev::getProperty(e, "label");
             points.push_back({x, y});
             inlineLabels.push_back(ev::isNumber(lv) ? static_cast<int>(ev::toDouble(lv)) : 1);
         }
@@ -54,6 +69,13 @@ void readPointsAndLabels(Value v, std::vector<std::array<float, 2>>& points,
 
 std::vector<int> readInts(Value v) {
     std::vector<int> out;
+    if (auto tinfo = ev::typedArrayInfo(v)) {
+        if (tinfo.elementKind == ev::elements::Int32 && tinfo.data) {
+            const int32_t* p = reinterpret_cast<const int32_t*>(tinfo.data);
+            out.assign(p, p + tinfo.elementCount);
+            return out;
+        }
+    }
     if (!isJsArray(v)) return out;
     ev::Persistent arr(v);
     const uint32_t n = getJsArrayLength(arr.get());
@@ -67,22 +89,34 @@ std::vector<int> readInts(Value v) {
 // [[x1, y1, x2, y2], ...] or [{x1, y1, x2, y2}, ...].
 std::vector<std::array<float, 4>> readBoxes(Value v) {
     std::vector<std::array<float, 4>> out;
+    if (auto tinfo = ev::typedArrayInfo(v)) {
+        if (tinfo.elementKind == ev::elements::Float32 && tinfo.data) {
+            const float* p = reinterpret_cast<const float*>(tinfo.data);
+            const size_t n = tinfo.elementCount / 4;
+            out.reserve(out.size() + n);
+            for (size_t i = 0; i < n; ++i) {
+                out.push_back({p[4 * i], p[4 * i + 1], p[4 * i + 2], p[4 * i + 3]});
+            }
+            return out;
+        }
+    }
     if (!isJsArray(v)) return out;
     ev::Persistent arr(v);
     const uint32_t n = getJsArrayLength(arr.get());
+    out.reserve(n);
     for (uint32_t i = 0; i < n; ++i) {
-        ev::Persistent e(ev::getElement(arr.get(), i));
-        if (!ev::isObject(e.get())) continue;
+        Value e = ev::getElement(arr.get(), i);
+        if (!ev::isObject(e)) continue;
         std::array<float, 4> b{};
-        if (isJsArray(e.get())) {
+        if (isJsArray(e)) {
             for (uint32_t k = 0; k < 4; ++k) {
-                b[k] = static_cast<float>(ev::toDouble(ev::getElement(e.get(), k)));
+                b[k] = static_cast<float>(ev::toDouble(ev::getElement(e, k)));
             }
         } else {
             static const char* kKeys[4] = {"x1", "y1", "x2", "y2"};
             for (int k = 0; k < 4; ++k) {
                 b[static_cast<size_t>(k)] =
-                    static_cast<float>(ev::toDouble(ev::getProperty(e.get(), kKeys[k])));
+                    static_cast<float>(ev::toDouble(ev::getProperty(e, kKeys[k])));
             }
         }
         out.push_back(b);
@@ -224,27 +258,18 @@ static Value samSegmentEverythingDirect(SamWrapper* w, std::span<const Value> ar
     ev::Persistent arr(hostArrayOf(masks.size(), [&masks](size_t i) -> Value {
         const auto& gm = masks[i];
         ObjectBuilder mo;
-        {
-            ev::Persistent d(makeUint8Array(gm.mask.data(), gm.mask.size()));
-            mo.set("data", d.get());
-        }
+        mo.set("data", makeUint8Array(gm.mask.data(), gm.mask.size()));
         mo.set("width", static_cast<double>(gm.width));
         mo.set("height", static_cast<double>(gm.height));
-        {
-            ev::Persistent bbox(hostArrayOf(4, [&gm](size_t k) {
-                return ev::fromDouble(static_cast<double>(gm.bbox[k]));
-            }));
-            mo.set("bbox", bbox.get());
-        }
+        mo.set("bbox", hostArrayOf(4, [&gm](size_t k) {
+            return ev::fromDouble(static_cast<double>(gm.bbox[k]));
+        }));
         mo.set("area", static_cast<double>(gm.area));
         mo.set("predictedIou", static_cast<double>(gm.predicted_iou));
         mo.set("stabilityScore", static_cast<double>(gm.stability_score));
-        {
-            ev::Persistent pt(hostArrayOf(2, [&gm](size_t k) {
-                return ev::fromDouble(static_cast<double>(gm.point[k]));
-            }));
-            mo.set("point", pt.get());
-        }
+        mo.set("point", hostArrayOf(2, [&gm](size_t k) {
+            return ev::fromDouble(static_cast<double>(gm.point[k]));
+        }));
         return mo.build();
     }));
 
@@ -309,16 +334,10 @@ Value buildSegmentation(const brovisionml::sam::Segmentation& seg) {
         for (size_t i = 0; i < plane; ++i) bin[i] = lg[i] > 0.0f ? 1 : 0;
         ObjectBuilder mo;
         mo.set("iou", m < seg.iou.size() ? static_cast<double>(seg.iou[m]) : 0.0);
-        {
-            ev::Persistent d(makeUint8Array(bin.data(), bin.size()));
-            mo.set("data", d.get());
-        }
+        mo.set("data", makeUint8Array(bin.data(), bin.size()));
         // The raw per-mask logits, which the bronze port returned under
         // `masks`; keeping them means neither caller has to change.
-        {
-            ev::Persistent lo(makeFloat32Array(lg, plane));
-            mo.set("logits", lo.get());
-        }
+        mo.set("logits", makeFloat32Array(lg, plane));
         return mo.build();
     }));
 

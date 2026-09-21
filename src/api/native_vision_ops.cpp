@@ -158,6 +158,7 @@ struct BoundingBox {
     float y2 = 0.0f;
     float score = 0.0f;
     int classId = 0;
+    int index = 0;
 };
 
 static float computeIoU(const BoundingBox& a, const BoundingBox& b) {
@@ -376,18 +377,44 @@ static Value js_decodeBoxes(Value, std::span<const Value> args) {
     });
 }
 
+static void extractBoxesFromFlatFloats(const float* data, size_t totalFloats, size_t stride,
+                                       float scoreThreshold, std::vector<BoundingBox>& out) {
+    if (!data || totalFloats < 4) return;
+    if (stride < 4) {
+        if (totalFloats % 6 == 0) stride = 6;
+        else if (totalFloats % 5 == 0) stride = 5;
+        else stride = 4;
+    }
+    const size_t numBoxes = totalFloats / stride;
+    out.reserve(out.size() + numBoxes);
+    for (size_t b = 0; b < numBoxes; ++b) {
+        const float* row = data + b * stride;
+        BoundingBox box;
+        box.x1 = row[0];
+        box.y1 = row[1];
+        box.x2 = row[2];
+        box.y2 = row[3];
+        box.score = (stride >= 5) ? row[4] : 1.0f;
+        box.classId = (stride >= 6) ? static_cast<int>(row[5]) : 0;
+        box.index = static_cast<int>(b);
+        if (box.score >= scoreThreshold) {
+            out.push_back(box);
+        }
+    }
+}
+
 static Value js_nms(Value, std::span<const Value> args) {
     if (args.empty()) {
         return ev::throwTypeError("bro.vision.nms: boxes array is required");
-    }
-    if (!isJsArray(args[0])) {
-        return ev::throwTypeError("bro.vision.nms: first argument must be an Array of boxes");
     }
 
     float iouThreshold = 0.45f;
     int maxDetections = 100;
     bool perClass = false;
     float scoreThreshold = 0.0f;
+    int optStride = 0;
+    bool asTypedArray = false;
+    bool returnIndices = false;
 
     if (args.size() > 1 && ev::isObject(args[1])) {
         Value it = ev::getProperty(args[1], "iouThreshold");
@@ -401,37 +428,156 @@ static Value js_nms(Value, std::span<const Value> args) {
 
         Value st = ev::getProperty(args[1], "scoreThreshold");
         if (!ev::isUndefined(st)) scoreThreshold = static_cast<float>(ev::toDouble(st));
+
+        Value strVal = ev::getProperty(args[1], "stride");
+        if (!ev::isUndefined(strVal)) optStride = static_cast<int>(ev::toDouble(strVal));
+
+        Value ata = ev::getProperty(args[1], "asTypedArray");
+        if (!ev::isUndefined(ata)) asTypedArray = ev::toBool(ata);
+
+        Value idxVal = ev::getProperty(args[1], "returnIndices");
+        if (!ev::isUndefined(idxVal)) returnIndices = ev::toBool(idxVal);
     }
 
-    uint32_t len = getJsArrayLength(args[0]);
     std::vector<BoundingBox> boxes;
-    boxes.reserve(len);
+    Value input = args[0];
 
-    for (uint32_t i = 0; i < len; ++i) {
-        Value elem = ev::getElement(args[0], i);
-        if (!ev::isObject(elem)) continue;
-
-        BoundingBox b;
-        Value x1v = ev::getProperty(elem, "x1");
-        Value y1v = ev::getProperty(elem, "y1");
-        Value x2v = ev::getProperty(elem, "x2");
-        Value y2v = ev::getProperty(elem, "y2");
-        Value sv  = ev::getProperty(elem, "score");
-        Value cv  = ev::getProperty(elem, "classId");
-
-        b.x1 = ev::isUndefined(x1v) ? 0.0f : static_cast<float>(ev::toDouble(x1v));
-        b.y1 = ev::isUndefined(y1v) ? 0.0f : static_cast<float>(ev::toDouble(y1v));
-        b.x2 = ev::isUndefined(x2v) ? 0.0f : static_cast<float>(ev::toDouble(x2v));
-        b.y2 = ev::isUndefined(y2v) ? 0.0f : static_cast<float>(ev::toDouble(y2v));
-        b.score = ev::isUndefined(sv) ? 1.0f : static_cast<float>(ev::toDouble(sv));
-        b.classId = ev::isUndefined(cv) ? 0 : static_cast<int>(ev::toDouble(cv));
-
-        if (b.score >= scoreThreshold) {
-            boxes.push_back(b);
+    // Case 1: Direct TypedArray buffer view (Float32Array)
+    if (auto tinfo = ev::typedArrayInfo(input)) {
+        if (tinfo.elementKind == ev::elements::Float32 && tinfo.data) {
+            extractBoxesFromFlatFloats(reinterpret_cast<const float*>(tinfo.data),
+                                       tinfo.elementCount, static_cast<size_t>(optStride),
+                                       scoreThreshold, boxes);
         }
+    }
+    // Case 2: ArrayBuffer
+    else if (auto ab = ev::arrayBufferInfo(input)) {
+        if (ab.data) {
+            extractBoxesFromFlatFloats(reinterpret_cast<const float*>(ab.data),
+                                       ab.byteLength / sizeof(float), static_cast<size_t>(optStride),
+                                       scoreThreshold, boxes);
+        }
+    }
+    // Case 3: Object containing { data/boxes/buffer: TypedArray/ArrayBuffer }
+    else if (ev::isObject(input) && !isJsArray(input)) {
+        Value sub = ev::getProperty(input, "data");
+        if (ev::isUndefined(sub) || ev::isNull(sub)) sub = ev::getProperty(input, "boxes");
+        if (ev::isUndefined(sub) || ev::isNull(sub)) sub = ev::getProperty(input, "buffer");
+
+        if (auto subInfo = ev::typedArrayInfo(sub)) {
+            if (subInfo.elementKind == ev::elements::Float32 && subInfo.data) {
+                extractBoxesFromFlatFloats(reinterpret_cast<const float*>(subInfo.data),
+                                           subInfo.elementCount, static_cast<size_t>(optStride),
+                                           scoreThreshold, boxes);
+            }
+        } else if (auto subAb = ev::arrayBufferInfo(sub)) {
+            if (subAb.data) {
+                extractBoxesFromFlatFloats(reinterpret_cast<const float*>(subAb.data),
+                                           subAb.byteLength / sizeof(float), static_cast<size_t>(optStride),
+                                           scoreThreshold, boxes);
+            }
+        } else {
+            return ev::throwTypeError("bro.vision.nms: first argument must be an Array or TypedArray of boxes");
+        }
+    }
+    // Case 4: JS Array (elements may be typed array views, JS arrays, or box objects)
+    else if (isJsArray(input)) {
+        uint32_t len = getJsArrayLength(input);
+        boxes.reserve(len);
+
+        for (uint32_t i = 0; i < len; ++i) {
+            Value elem = ev::getElement(input, i);
+            if (!ev::isObject(elem)) continue;
+
+            // 4a. Element is a TypedArray view (e.g. new Float32Array([x1, y1, x2, y2, score?, classId?]))
+            if (auto eInfo = ev::typedArrayInfo(elem)) {
+                if (eInfo.elementKind == ev::elements::Float32 && eInfo.data) {
+                    const float* ep = reinterpret_cast<const float*>(eInfo.data);
+                    const uint32_t ec = eInfo.elementCount;
+                    BoundingBox b;
+                    b.x1 = ec > 0 ? ep[0] : 0.0f;
+                    b.y1 = ec > 1 ? ep[1] : 0.0f;
+                    b.x2 = ec > 2 ? ep[2] : 0.0f;
+                    b.y2 = ec > 3 ? ep[3] : 0.0f;
+                    b.score = ec > 4 ? ep[4] : 1.0f;
+                    b.classId = ec > 5 ? static_cast<int>(ep[5]) : 0;
+                    b.index = static_cast<int>(i);
+                    if (b.score >= scoreThreshold) {
+                        boxes.push_back(b);
+                    }
+                    continue;
+                }
+            }
+
+            // 4b. Element is a JS Array [x1, y1, x2, y2, score?, classId?]
+            if (isJsArray(elem)) {
+                const uint32_t elen = getJsArrayLength(elem);
+                BoundingBox b;
+                b.x1 = elen > 0 ? static_cast<float>(ev::toDouble(ev::getElement(elem, 0))) : 0.0f;
+                b.y1 = elen > 1 ? static_cast<float>(ev::toDouble(ev::getElement(elem, 1))) : 0.0f;
+                b.x2 = elen > 2 ? static_cast<float>(ev::toDouble(ev::getElement(elem, 2))) : 0.0f;
+                b.y2 = elen > 3 ? static_cast<float>(ev::toDouble(ev::getElement(elem, 3))) : 0.0f;
+                b.score = elen > 4 ? static_cast<float>(ev::toDouble(ev::getElement(elem, 4))) : 1.0f;
+                b.classId = elen > 5 ? static_cast<int>(ev::toDouble(ev::getElement(elem, 5))) : 0;
+                b.index = static_cast<int>(i);
+                if (b.score >= scoreThreshold) {
+                    boxes.push_back(b);
+                }
+                continue;
+            }
+
+            // 4c. Element is a JS Object: { x1, y1, x2, y2, score, classId }
+            BoundingBox b;
+            Value x1v = ev::getProperty(elem, "x1");
+            Value y1v = ev::getProperty(elem, "y1");
+            Value x2v = ev::getProperty(elem, "x2");
+            Value y2v = ev::getProperty(elem, "y2");
+            Value sv  = ev::getProperty(elem, "score");
+            Value cv  = ev::getProperty(elem, "classId");
+
+            b.x1 = ev::isUndefined(x1v) ? 0.0f : static_cast<float>(ev::toDouble(x1v));
+            b.y1 = ev::isUndefined(y1v) ? 0.0f : static_cast<float>(ev::toDouble(y1v));
+            b.x2 = ev::isUndefined(x2v) ? 0.0f : static_cast<float>(ev::toDouble(x2v));
+            b.y2 = ev::isUndefined(y2v) ? 0.0f : static_cast<float>(ev::toDouble(y2v));
+            b.score = ev::isUndefined(sv) ? 1.0f : static_cast<float>(ev::toDouble(sv));
+            b.classId = ev::isUndefined(cv) ? 0 : static_cast<int>(ev::toDouble(cv));
+            b.index = static_cast<int>(i);
+
+            if (b.score >= scoreThreshold) {
+                boxes.push_back(b);
+            }
+        }
+    } else {
+        return ev::throwTypeError("bro.vision.nms: first argument must be an Array or TypedArray of boxes");
     }
 
     std::vector<BoundingBox> filtered = runNMS(boxes, iouThreshold, maxDetections, perClass);
+
+    if (returnIndices) {
+        if (asTypedArray) {
+            std::vector<int32_t> idxs(filtered.size());
+            for (size_t i = 0; i < filtered.size(); ++i) {
+                idxs[i] = filtered[i].index;
+            }
+            return makeInt32Array(idxs.data(), idxs.size());
+        }
+        return hostArrayOf(filtered.size(), [&](size_t i) {
+            return ev::fromDouble(filtered[i].index);
+        });
+    }
+
+    if (asTypedArray) {
+        std::vector<float> flat(filtered.size() * 6);
+        for (size_t i = 0; i < filtered.size(); ++i) {
+            flat[i * 6 + 0] = filtered[i].x1;
+            flat[i * 6 + 1] = filtered[i].y1;
+            flat[i * 6 + 2] = filtered[i].x2;
+            flat[i * 6 + 3] = filtered[i].y2;
+            flat[i * 6 + 4] = filtered[i].score;
+            flat[i * 6 + 5] = static_cast<float>(filtered[i].classId);
+        }
+        return makeFloat32Array(flat.data(), flat.size());
+    }
 
     return hostArrayOf(filtered.size(), [&](size_t i) {
         ObjectBuilder boxObj;
@@ -441,6 +587,7 @@ static Value js_nms(Value, std::span<const Value> args) {
         boxObj.set("y2", filtered[i].y2);
         boxObj.set("score", filtered[i].score);
         boxObj.set("classId", filtered[i].classId);
+        boxObj.set("index", filtered[i].index);
         return boxObj.build();
     });
 }
