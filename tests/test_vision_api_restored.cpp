@@ -76,9 +76,9 @@ void brovisionmlTestRestoredSurface() {
 
         const mlsd = proto("Mlsd");
         needFn(mlsd, "Mlsd", "detect", 2);
-        const ml = mlsd.detect.call(undefined);
-        if (!Array.isArray(ml.segments)) fail("Mlsd.detect lost the 'segments' array");
-        if (!Array.isArray(ml.lines)) fail("Mlsd.detect lost the 'lines' array");
+        needFn(mlsd, "Mlsd", "estimate", 2);
+        needThrows(mlsd, "Mlsd", "detect", [img]);
+        needThrows(mlsd, "Mlsd", "estimate", [img]);
 
         const op = proto("Openpose");
         needFn(op, "Openpose", "detect", 2);

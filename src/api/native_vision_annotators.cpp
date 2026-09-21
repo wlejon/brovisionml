@@ -129,44 +129,45 @@ Value lineartDetect(Value thisVal, std::span<const Value> args) {
 // ─── MLSD ─────────────────────────────────────────────────────────────────
 
 Value runMlsdDetect(MlsdWrapper* w, std::span<const Value> args) {
-    std::vector<uint8_t> rgba;
-    int width = 512, height = 512;
-    std::string err;
-    if (!args.empty() && readImageInput(args[0], rgba, width, height, err) &&
-        w && w->loaded && w->detector) {
-        try {
-            brotensor::DeviceScope scope(w->device);
-            auto segs = w->detector->detect(rgba.data(), width, height, 4);
-            ev::Persistent arr(hostArrayOf(segs.segments.size(), [&segs](size_t i) {
-                ObjectBuilder o;
-                o.set("x1", static_cast<double>(segs.segments[i].x1));
-                o.set("y1", static_cast<double>(segs.segments[i].y1));
-                o.set("x2", static_cast<double>(segs.segments[i].x2));
-                o.set("y2", static_cast<double>(segs.segments[i].y2));
-                o.set("score", static_cast<double>(segs.segments[i].score));
-                return o.build();
-            }));
-            ObjectBuilder res;
-            res.set("width", static_cast<double>(segs.width));
-            res.set("height", static_cast<double>(segs.height));
-            res.set("segments", arr.get());
-            res.set("lines", arr.get());   // the port's name for the same array
-            return res.build();
-        } catch (const std::exception& e) {
-            return ev::throwError(std::string("MLSD detect failed: ") + e.what());
-        }
+    if (!w || !w->loaded || !w->detector) {
+        return ev::throwError("Mlsd: detector is uninitialized or model weights not loaded");
     }
-    ObjectBuilder res;
-    res.set("width", static_cast<double>(width));
-    res.set("height", static_cast<double>(height));
-    ev::Persistent empty(makeEmptyArray());
-    res.set("segments", empty.get());
-    res.set("lines", empty.get());
-    return res.build();
+    if (args.empty()) {
+        return ev::throwTypeError("Mlsd.detect: image argument required");
+    }
+
+    std::vector<uint8_t> rgba;
+    int width = 0, height = 0;
+    std::string err;
+    if (!readImageInput(args[0], rgba, width, height, err)) {
+        return ev::throwTypeError(std::string("Mlsd.detect: ") + err);
+    }
+    try {
+        brotensor::DeviceScope scope(w->device);
+        auto segs = w->detector->detect(rgba.data(), width, height, 4);
+        ev::Persistent arr(hostArrayOf(segs.segments.size(), [&segs](size_t i) {
+            ObjectBuilder o;
+            o.set("x1", static_cast<double>(segs.segments[i].x1));
+            o.set("y1", static_cast<double>(segs.segments[i].y1));
+            o.set("x2", static_cast<double>(segs.segments[i].x2));
+            o.set("y2", static_cast<double>(segs.segments[i].y2));
+            o.set("score", static_cast<double>(segs.segments[i].score));
+            return o.build();
+        }));
+        ObjectBuilder res;
+        res.set("width", static_cast<double>(segs.width));
+        res.set("height", static_cast<double>(segs.height));
+        res.set("segments", arr.get());
+        res.set("lines", arr.get());   // the port's name for the same array
+        return res.build();
+    } catch (const std::exception& e) {
+        return ev::throwError(std::string("MLSD detect failed: ") + e.what());
+    }
 }
 
 Value mlsdDetect(Value thisVal, std::span<const Value> args) {
     auto* w = selfOf<MlsdWrapper>(g_mlsdClass, thisVal, kHostMlsdTag);
+    if (!w) return ev::throwTypeError("Mlsd: not an Mlsd instance");
     return runMlsdDetect(w, args);
 }
 

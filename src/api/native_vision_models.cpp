@@ -554,6 +554,8 @@ Value makeVisionNamespace() {
                 w->birefnet = std::move(bw);
                 w->task = VisionTaskType::Birefnet;
                 w->loaded = true;
+            } else {
+                return ev::throwError("VisionModel: unrecognized task type: " + w->taskName);
             }
         } catch (const std::exception& e) {
             return ev::throwError(std::string("loadModel failed: ") + e.what());
