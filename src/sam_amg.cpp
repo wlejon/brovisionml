@@ -119,7 +119,7 @@ void rle_decode(const Rle& r, std::vector<uint8_t>& out) {
     }
 }
 
-long long rle_area(const Rle& r) {
+[[maybe_unused]] long long rle_area(const Rle& r) {
     long long a = 0;
     for (std::size_t i = 1; i < r.counts.size(); i += 2) a += r.counts[i];
     return a;
@@ -389,10 +389,12 @@ std::vector<GeneratedMask> AutomaticMaskGenerator::generate(const uint8_t* pixel
             // them.
             const float min_iou =
                 cfg_.pred_iou_thresh > 0.0f ? cfg_.pred_iou_thresh : -1.0f;
+            const float min_stab =
+                cfg_.stability_score_thresh > 0.0f ? cfg_.stability_score_thresh : -1.0f;
             const std::vector<BinarySegmentation> segs =
                 model_.segment_points_binary(chunk, /*multimask=*/true, min_iou,
                                              cfg_.stability_score_offset,
-                                             cfg_.stability_score_thresh);
+                                             min_stab);
 
             for (std::size_t si = 0; si < segs.size(); ++si) {
                 const BinarySegmentation& seg = segs[si];
