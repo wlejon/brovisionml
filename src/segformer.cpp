@@ -598,8 +598,9 @@ SegMap SegformerDetector::detect(const uint8_t* rgb, int w, int h,
                                 /*bilinear=*/1, up);
     Tensor seq;   // (h*w, C): one row per pixel, channels across the row
     brotensor::nchw_to_sequence(up, 1, C, h, w, seq);
-    Tensor idx;   // (h*w, 1) INT32; ties break to the smaller class id, same
-                  // as the previous host argmax
+    // (h*w, 1) INT32; ties break to the smaller class id. argmax_rows writes
+    // INT32 only when Idx arrives INT32-typed (any other Idx gets FP32 indices).
+    Tensor idx = Tensor::empty_on(seq.device, h * w, 1, brotensor::Dtype::INT32);
     brotensor::argmax_rows(seq, idx);
     detail::profile_mark(impl_->device, "upsample+argmax");
 

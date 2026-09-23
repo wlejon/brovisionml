@@ -22,7 +22,9 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "brovisionml/segformer.h"
+#include "brovisionml/segformer_preprocess.h"
 
+#include "brotensor/ops.h"
 #include "brotensor/runtime.h"
 #include "brotensor/tensor.h"
 
@@ -128,6 +130,60 @@ double agreement(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
     return (double)hit / (double)n;
 }
 
+// Host reference: bilinear (align_corners=False, border-clamped) upsample of
+// (C, gH, gW) logits to (h, w), then per-pixel argmax (ties -> lower class).
+std::vector<uint8_t> host_upsample_argmax(const std::vector<float>& lg, int C,
+                                          int gH, int gW, int h, int w) {
+    std::vector<uint8_t> out(static_cast<std::size_t>(h) * w);
+    const double sy = (double)gH / h, sx = (double)gW / w;
+    const std::size_t plane = static_cast<std::size_t>(gH) * gW;
+    for (int oy = 0; oy < h; ++oy) {
+        const double fy = std::max(0.0, (oy + 0.5) * sy - 0.5);
+        int y0 = (int)std::floor(fy);
+        const double wy = fy - y0;
+        int y1 = std::min(y0 + 1, gH - 1);
+        y0 = std::min(y0, gH - 1);
+        for (int ox = 0; ox < w; ++ox) {
+            const double fx = std::max(0.0, (ox + 0.5) * sx - 0.5);
+            int x0 = (int)std::floor(fx);
+            const double wx = fx - x0;
+            int x1 = std::min(x0 + 1, gW - 1);
+            x0 = std::min(x0, gW - 1);
+            double best = 0; int bc = 0;
+            for (int c = 0; c < C; ++c) {
+                const float* p = lg.data() + c * plane;
+                const double top = p[y0 * gW + x0] + (p[y0 * gW + x1] - p[y0 * gW + x0]) * wx;
+                const double bot = p[y1 * gW + x0] + (p[y1 * gW + x1] - p[y1 * gW + x0]) * wx;
+                const double v = top + (bot - top) * wy;
+                if (c == 0 || v > best) { best = v; bc = c; }
+            }
+            out[static_cast<std::size_t>(oy) * w + ox] = static_cast<uint8_t>(bc);
+        }
+    }
+    return out;
+}
+
+// The same upsample + argmax through the brotensor op chain detect() uses.
+std::vector<uint8_t> device_upsample_argmax(const std::vector<float>& lg, int C,
+                                            int gH, int gW, int h, int w,
+                                            brotensor::Device dev) {
+    brotensor::Tensor t = brotensor::Tensor::zeros_on(brotensor::Device::CPU, 1,
+                                                      C * gH * gW);
+    std::copy(lg.begin(), lg.end(), t.host_f32_mut());
+    if (dev != brotensor::Device::CPU) t = t.to(dev);
+    brotensor::Tensor up, seq;
+    brotensor::interp2d_forward(t, 1, C, gH, gW, h, w, /*bilinear=*/1, up);
+    brotensor::nchw_to_sequence(up, 1, C, h, w, seq);
+    brotensor::Tensor idx = brotensor::Tensor::empty_on(dev, h * w, 1,
+                                                        brotensor::Dtype::INT32);
+    brotensor::argmax_rows(seq, idx);
+    if (idx.device != brotensor::Device::CPU) idx = idx.to(brotensor::Device::CPU);
+    const int32_t* ip = static_cast<const int32_t*>(idx.data);
+    std::vector<uint8_t> out(static_cast<std::size_t>(h) * w);
+    for (std::size_t p = 0; p < out.size(); ++p) out[p] = static_cast<uint8_t>(ip[p]);
+    return out;
+}
+
 void run_case(const std::string& dir, const std::string& path) {
     Golden g;
     if (!load_golden(path, g)) {
@@ -158,6 +214,37 @@ void run_case(const std::string& dir, const std::string& path) {
         CHECK(mx < 5e-2);
     } else {
         CHECK(false);
+    }
+
+    // ── Gate 2 decomposition: pin a class-map failure to one step ──
+    // 2a: preprocess(resized bytes) reproduces the golden normalized input.
+    {
+        brovisionml::segformer::PreprocessedImage pp =
+            brovisionml::segformer::preprocess(g.resized.data(), g.W, g.H, 3, g.W);
+        std::vector<float> pv(pp.pixels.host_f32(),
+                              pp.pixels.host_f32() + pp.pixels.rows * pp.pixels.cols);
+        double pmx = 0, pmn = 0;
+        diff(pv, g.input, pmx, pmn);
+        std::printf("    Gate2a preprocess vs golden input: max-abs=%.3e\n", pmx);
+        CHECK(pv.size() == g.input.size());
+        CHECK(pmx < 1e-5);
+    }
+    // 2b: the golden logits, upsampled + argmaxed by a host reference, give the
+    // golden class map (fixture self-consistency, independent of the model).
+    // 2c: the on-device chain detect() uses (interp2d -> nchw_to_sequence ->
+    // argmax_rows) over the same golden logits gives the same class map.
+    std::vector<uint8_t> ref_map;
+    {
+        ref_map = host_upsample_argmax(g.logits, g.LC, g.LH, g.LW, g.CH, g.CW);
+        const double a = agreement(ref_map, g.classmap);
+        std::printf("    Gate2b host upsample+argmax(golden logits) vs golden map: %.4f\n", a);
+        CHECK(a >= 0.999);
+        const std::vector<uint8_t> dm =
+            device_upsample_argmax(g.logits, g.LC, g.LH, g.LW, g.CH, g.CW,
+                                   brotensor::Device::CPU);
+        const double b = agreement(dm, ref_map);
+        std::printf("    Gate2c CPU op chain vs host reference: %.4f\n", b);
+        CHECK(b >= 0.999);
     }
 
     // ── Gate 2 (CPU): end-to-end class map ──
@@ -204,6 +291,12 @@ void run_case(const std::string& dir, const std::string& path) {
         } else {
             CHECK(false);
         }
+
+        const std::vector<uint8_t> gdm =
+            device_upsample_argmax(g.logits, g.LC, g.LH, g.LW, g.CH, g.CW, gpu);
+        const double gc = agreement(gdm, ref_map);
+        std::printf("    %s Gate2c op chain vs host reference: %.4f\n", dev, gc);
+        CHECK(gc >= 0.999);
 
         SegMap gsm = det.detect(g.resized.data(), g.W, g.H, 3);
         double gagree = agreement(gsm.classes, g.classmap);
