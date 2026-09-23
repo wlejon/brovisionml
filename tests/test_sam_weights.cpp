@@ -23,6 +23,7 @@
 #define _CRT_SECURE_NO_WARNINGS  // std::getenv, matching tools/sam_segment.cpp
 
 #include "brovisionml/sam.h"
+#include "brovisionml/sam_preprocess.h"
 
 #include "brotensor/runtime.h"
 
@@ -64,13 +65,24 @@ bool all_finite(const std::vector<float>& v) {
 // fit — a transposed weight or wrong activation drops this to near 0.
 constexpr float kMinIoU = 0.90f;
 
-// Max allowed CPU-vs-CUDA difference in the upscaled mask logits. The GPU runs
-// FP16 and is not bitwise run-to-run deterministic, and the two bilinear
-// upscales to the original resolution amplify that noise; observed worst case
-// sits just over 1e-2. This is a sanity tripwire on a genuinely different
-// backend, not a precision bound — a real port bug shows up as a near-zero IoU,
-// not a sub-2e-2 logit wobble — so leave generous headroom over the noise floor.
-constexpr float kMaxLogitDiff = 1.5e-2f;
+// CPU-vs-GPU bounds, stage by stage (sam-vit-base, the disk image below).
+//
+// The production GPU path is mixed precision: the encoder's GEMMs and the mask
+// decoder's attention q/k/v/out projections run FP16 (the decoder's since
+// 59d79d6, 2026-06-11). The old single 1.5e-2 bound on the final logits dates
+// from when only the encoder was FP16 and was never met afterwards. Measured:
+// rounding every FP16-path operand of the decoder on the CPU (weights,
+// activations, projections) moves the low-res logits (|max| ~14.5) by 0.169
+// from FP32 — the same as the GPU FP16 decoder (0.17) — so ~0.17 is the
+// inherent cost of the FP16 decoder, not a fault. Hence:
+//   * kernel faults: the decoder kept FP32 on the GPU must match the CPU
+//     tightly (observed 5.6e-4);
+//   * the FP16 production path: 0.25 on low-res and final logits (~1.5x the
+//     measured FP16 cost). The FP16-score attention fault 422e4d7 fixed in
+//     brotensor sat at 0.70 low-res / 0.42 final, well outside it.
+constexpr float kMaxEmbedDiff    = 1.0e-2f;   // FP16 encoder; observed 1.7e-3
+constexpr float kMaxFp32DecDiff  = 5.0e-3f;   // FP32 decoder on GPU; observed 5.6e-4
+constexpr float kMaxLogitDiff    = 0.25f;     // FP16 decoder, low-res and final
 
 // A hard-edged filled disk (bright) over a gradient background — an unambiguous
 // "object" with an exactly-known ground-truth mask. Fills `gt` (W*H, 1 inside
@@ -171,8 +183,81 @@ void exercise(brovisionml::sam::Sam& cpu, const std::string& path,
         check(biou >= kMinIoU, "box: mask recovers the disk (IoU)");
     }
 
-    // CPU/GPU parity on the real weights.
+    // Encoder stage on its own: the dense image embedding must be run-to-run
+    // deterministic on the CPU and track the CPU on the GPU, so a parity
+    // failure below names the encoder or the decoder rather than "SAM".
     const brotensor::Device gpu = brovisionml_test::preferred_gpu();
+    {
+        ImageEncoder enc(make_cfg().encoder);
+        enc.load_file(path);
+        PreprocessedImage pp = preprocess(img.data(), W, H, 3, make_cfg().encoder.img_size);
+        brotensor::Tensor e1 = enc.encode(pp.pixels);
+        brotensor::Tensor e2 = enc.encode(pp.pixels);
+        float rr = 0.0f, scale = 0.0f;
+        for (int i = 0; i < e1.size(); ++i) {
+            rr = std::max(rr, std::fabs(e1.host_f32()[i] - e2.host_f32()[i]));
+            scale = std::max(scale, std::fabs(e1.host_f32()[i]));
+        }
+        std::printf("  %s: CPU embedding run-to-run max abs diff %g (max |e| %g)\n",
+                    label, rr, scale);
+        check(rr == 0.0f, "CPU image embedding is run-to-run deterministic");
+        if (gpu != brotensor::Device::CPU) {
+            enc.to(gpu);
+            brotensor::Tensor eg = enc.encode(pp.pixels.to(gpu)).to(brotensor::Device::CPU);
+            float gd = 0.0f;
+            for (int i = 0; i < e1.size() && i < eg.size(); ++i)
+                gd = std::max(gd, std::fabs(e1.host_f32()[i] - eg.host_f32()[i]));
+            std::printf("  %s: %s embedding vs CPU max abs diff %g\n", label,
+                        brovisionml_test::device_name(gpu), gd);
+            check(gd <= kMaxEmbedDiff, "GPU image embedding tracks the CPU");
+
+            // Decoder stage on the SAME (CPU) embedding: low-res mask logits.
+            PromptEncoder pe(make_cfg().prompt);
+            MaskDecoder md(make_cfg().decoder);
+            pe.load_file(path);
+            md.load_file(path);
+            PromptInput in;
+            in.labels = pt_labels;
+            float mx = 0, my = 0;
+            apply_coords(pp.transform, pt[0][0], pt[0][1], mx, my);
+            in.points.push_back({mx, my});
+            PromptEmbeddings pc = pe.encode(in);
+            DecodedMasks dc = md.decode(e1, pe.dense_pe(), pc.sparse, pc.dense, true);
+            pe.to(gpu);
+            md.to(gpu);
+            PromptEmbeddings pg = pe.encode(in);
+            DecodedMasks dg = md.decode(e1.to(gpu), pe.dense_pe(), pg.sparse, pg.dense, true);
+            brotensor::Tensor mc = dc.masks, mg = dg.masks.to(brotensor::Device::CPU);
+            float dd = 0.0f, ms = 0.0f;
+            for (int i = 0; i < mc.size() && i < mg.size(); ++i) {
+                dd = std::max(dd, std::fabs(mc.host_f32()[i] - mg.host_f32()[i]));
+                ms = std::max(ms, std::fabs(mc.host_f32()[i]));
+            }
+            std::printf("  %s: %s low-res mask logits vs CPU (same embedding) max abs diff %g"
+                        " (max |logit| %g)\n", label, brovisionml_test::device_name(gpu), dd, ms);
+            check(dd <= kMaxLogitDiff, "GPU FP16 decoder low-res logits within the FP16 bound");
+
+            // The same decoder kept FP32 on the GPU (migrated while the CPU is the
+            // default device, so compute_dtype() says FP32): separates FP16
+            // rounding from a kernel fault.
+            MaskDecoder md32(make_cfg().decoder);
+            md32.load_file(path);
+            {
+                brotensor::DeviceScope cpu_default(brotensor::Device::CPU);
+                md32.to(gpu);
+            }
+            DecodedMasks d32 = md32.decode(e1.to(gpu), pe.dense_pe(), pg.sparse, pg.dense, true);
+            brotensor::Tensor m32 = d32.masks.to(brotensor::Device::CPU);
+            float d32d = 0.0f;
+            for (int i = 0; i < mc.size() && i < m32.size(); ++i)
+                d32d = std::max(d32d, std::fabs(mc.host_f32()[i] - m32.host_f32()[i]));
+            std::printf("  %s: %s FP32 decoder low-res mask logits vs CPU max abs diff %g\n",
+                        label, brovisionml_test::device_name(gpu), d32d);
+            check(d32d <= kMaxFp32DecDiff, "GPU FP32 decoder matches the CPU");
+        }
+    }
+
+    // CPU/GPU parity on the real weights.
     if (gpu != brotensor::Device::CPU) {
         const char* dev = brovisionml_test::device_name(gpu);
         Sam gpu_sam(make_cfg());
