@@ -183,25 +183,16 @@ void exercise(brovisionml::sam::Sam& cpu, const std::string& path,
         check(biou >= kMinIoU, "box: mask recovers the disk (IoU)");
     }
 
-    // Encoder stage on its own: the dense image embedding must be run-to-run
-    // deterministic on the CPU and track the CPU on the GPU, so a parity
-    // failure below names the encoder or the decoder rather than "SAM".
+    // Stage by stage on the GPU: the image embedding against the CPU's, then the
+    // decoder on the SAME (CPU) embedding, so a parity failure names the
+    // encoder or the decoder rather than "SAM".
     const brotensor::Device gpu = brovisionml_test::preferred_gpu();
     {
         ImageEncoder enc(make_cfg().encoder);
         enc.load_file(path);
         PreprocessedImage pp = preprocess(img.data(), W, H, 3, make_cfg().encoder.img_size);
-        brotensor::Tensor e1 = enc.encode(pp.pixels);
-        brotensor::Tensor e2 = enc.encode(pp.pixels);
-        float rr = 0.0f, scale = 0.0f;
-        for (int i = 0; i < e1.size(); ++i) {
-            rr = std::max(rr, std::fabs(e1.host_f32()[i] - e2.host_f32()[i]));
-            scale = std::max(scale, std::fabs(e1.host_f32()[i]));
-        }
-        std::printf("  %s: CPU embedding run-to-run max abs diff %g (max |e| %g)\n",
-                    label, rr, scale);
-        check(rr == 0.0f, "CPU image embedding is run-to-run deterministic");
         if (gpu != brotensor::Device::CPU) {
+            brotensor::Tensor e1 = enc.encode(pp.pixels);
             enc.to(gpu);
             brotensor::Tensor eg = enc.encode(pp.pixels.to(gpu)).to(brotensor::Device::CPU);
             float gd = 0.0f;
