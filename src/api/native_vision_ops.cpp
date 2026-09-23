@@ -13,22 +13,53 @@ namespace brovisionml::api {
 // TypedArray & Device Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-brotensor::Device parseDevice(Value opts) {
-    if (!ev::isObject(opts)) return brotensor::Device::CPU;
-    Value devVal = ev::getProperty(opts, "device");
-    if (!ev::isString(devVal)) return brotensor::Device::CPU;
-    std::string s = ev::toUtf8(devVal);
-    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-    if (s == "cuda" || s == "gpu") {
-        if (brotensor::is_available(brotensor::Device::CUDA)) {
-            return brotensor::Device::CUDA;
-        }
-    } else if (s == "metal") {
-        if (brotensor::is_available(brotensor::Device::Metal)) {
-            return brotensor::Device::Metal;
-        }
+// The load device, the way the QuickJS binding resolved it: brotensor::init()
+// first (is_available answers false for every GPU until the backends are
+// probed, which is how the port ended up loading everything on the CPU), then
+// the best available backend, overridable by opts.device. An unknown or
+// non-string device is a TypeError, and a GPU that is asked for by name but
+// is not there is an Error — never a silent CPU run of a vision model.
+bool resolveDevice(const char* fnName, Value opts, brotensor::Device& dev, Value& thrown) {
+    try {
+        brotensor::init();
+    } catch (const std::exception& e) {
+        thrown = ev::throwError(std::string(fnName) + ": brotensor init failed: " + e.what());
+        return false;
     }
-    return brotensor::Device::CPU;
+    if (brotensor::is_available(brotensor::Device::CUDA)) {
+        dev = brotensor::Device::CUDA;
+    } else if (brotensor::is_available(brotensor::Device::Metal)) {
+        dev = brotensor::Device::Metal;
+    } else {
+        dev = brotensor::Device::CPU;
+    }
+    if (!ev::isObject(opts)) return true;
+    Value devVal = ev::getProperty(opts, "device");
+    if (ev::isUndefined(devVal) || ev::isNull(devVal)) return true;
+    if (!ev::isString(devVal)) {
+        thrown = ev::throwTypeError(std::string(fnName) +
+                                    ": opts.device must be a string ('cuda', 'gpu', 'metal' or 'cpu')");
+        return false;
+    }
+    std::string s = ev::toUtf8(devVal);
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    brotensor::Device want = brotensor::Device::CPU;
+    if (s == "cuda" || s == "gpu") {
+        want = brotensor::Device::CUDA;
+    } else if (s == "metal") {
+        want = brotensor::Device::Metal;
+    } else if (s != "cpu") {
+        thrown = ev::throwTypeError(std::string(fnName) + ": opts.device must be 'cuda', 'gpu', 'metal' or 'cpu' (got '" +
+                                    s + "')");
+        return false;
+    }
+    if (want != brotensor::Device::CPU && !brotensor::is_available(want)) {
+        thrown = ev::throwError(std::string(fnName) + ": device '" + s + "' is not available in this build or on this machine");
+        return false;
+    }
+    dev = want;
+    return true;
 }
 
 const char* deviceName(brotensor::Device dev) {
@@ -73,34 +104,45 @@ bool readInt32Array(Value val, const int32_t*& outData, size_t& outCount) {
 }
 
 bool readImageInput(Value val, std::vector<uint8_t>& rgba, int& w, int& h, std::string& err) {
-    if (ev::isString(val)) {
-        std::string path = resolvePath(ev::toUtf8(val));
-        broimage::Image img;
-        if (!broimage::decode_file(path, img, &err)) {
+    // Three property reads follow, each of which may move the image object:
+    // read it through a root, never through the copy we were handed.
+    ev::Persistent img(val);
+    if (ev::isString(img.get())) {
+        std::string path = resolvePath(ev::toUtf8(img.get()));
+        broimage::Image decoded;
+        if (!broimage::decode_file(path, decoded, &err)) {
             if (err.empty()) err = "Failed to decode image file: " + path;
             return false;
         }
-        w = img.width;
-        h = img.height;
-        rgba = std::move(img.pixels);
+        w = decoded.width;
+        h = decoded.height;
+        rgba = std::move(decoded.pixels);
         return true;
     }
 
-    if (ev::isObject(val)) {
-        Value wVal = ev::getProperty(val, "width");
-        Value hVal = ev::getProperty(val, "height");
-        if (!ev::isUndefined(wVal) && !ev::isUndefined(hVal)) {
-            w = static_cast<int>(ev::toDouble(wVal));
-            h = static_cast<int>(ev::toDouble(hVal));
+    if (ev::isObject(img.get())) {
+        double wd = 0.0, hd = 0.0;
+        {
+            Value wVal = ev::getProperty(img.get(), "width");
+            if (ev::isNumber(wVal)) wd = ev::toDouble(wVal);
         }
-        Value dataVal = ev::getProperty(val, "data");
+        {
+            Value hVal = ev::getProperty(img.get(), "height");
+            if (ev::isNumber(hVal)) hd = ev::toDouble(hVal);
+        }
+        // The last allocating call before the typed-array read: the data
+        // pointer is taken right after it and copied out before anything else.
+        Value dataVal = ev::getProperty(img.get(), "data");
         const uint8_t* u8Data = nullptr;
         size_t u8Count = 0;
         if (readUint8Array(dataVal, u8Data, u8Count) && u8Data) {
-            if (w <= 0 || h <= 0) {
-                err = "Image { width, height } must be positive";
+            // Both finite, positive and small enough that w*h*4 cannot wrap.
+            if (!(wd >= 1.0 && hd >= 1.0 && wd <= 65536.0 && hd <= 65536.0)) {
+                err = "Image { width, height } must be positive integers (at most 65536)";
                 return false;
             }
+            w = static_cast<int>(wd);
+            h = static_cast<int>(hd);
             const size_t need = static_cast<size_t>(w) * h * 4;
             if (u8Count < need) {
                 err = "image.data too small for width*height*4 RGBA";
@@ -263,13 +305,6 @@ static Value js_decodeBoxes(Value, std::span<const Value> args) {
         return ev::throwTypeError("bro.vision.decodeBoxes: predictions array is required");
     }
 
-    const float* preds = nullptr;
-    size_t count = 0;
-    if (!readFloat32Array(args[0], preds, count) || !preds) {
-        return ev::throwTypeError("bro.vision.decodeBoxes: first argument must be a Float32Array");
-    }
-
-    Value opts = args.size() > 1 ? args[1] : ev::undefined();
     int numClasses = 80;
     int numBoxes = 0;
     float confThreshold = 0.25f;
@@ -277,26 +312,38 @@ static Value js_decodeBoxes(Value, std::span<const Value> args) {
     bool doNms = true;
     bool transposed = false; // YOLOv8 [4+C, N] vs [N, 4+C]
 
-    if (ev::isObject(opts)) {
-        Value ncVal = ev::getProperty(opts, "numClasses");
-        if (!ev::isUndefined(ncVal)) numClasses = static_cast<int>(ev::toDouble(ncVal));
+    // Options first: every getProperty may allocate, and the predictions are
+    // a raw pointer into the moving heap that must be taken after the last
+    // allocating call and consumed before the next one.
+    if (args.size() > 1 && ev::isObject(args[1])) {
+        Value ncVal = ev::getProperty(args[1], "numClasses");
+        if (ev::isNumber(ncVal)) {
+            const double nc = ev::toDouble(ncVal);
+            numClasses = (nc >= 1.0 && nc <= 1.0e6) ? static_cast<int>(nc) : 0;
+        }
 
-        Value ctVal = ev::getProperty(opts, "confThreshold");
+        Value ctVal = ev::getProperty(args[1], "confThreshold");
         if (!ev::isUndefined(ctVal)) confThreshold = static_cast<float>(ev::toDouble(ctVal));
 
-        Value itVal = ev::getProperty(opts, "iouThreshold");
+        Value itVal = ev::getProperty(args[1], "iouThreshold");
         if (!ev::isUndefined(itVal)) iouThreshold = static_cast<float>(ev::toDouble(itVal));
 
-        Value nmsVal = ev::getProperty(opts, "nms");
+        Value nmsVal = ev::getProperty(args[1], "nms");
         if (!ev::isUndefined(nmsVal)) doNms = ev::toBool(nmsVal);
 
-        Value trVal = ev::getProperty(opts, "transposed");
+        Value trVal = ev::getProperty(args[1], "transposed");
         if (!ev::isUndefined(trVal)) transposed = ev::toBool(trVal);
     }
 
-    const int channels = 4 + numClasses;
-    if (channels <= 4) {
+    if (numClasses <= 0) {
         return ev::throwTypeError("decodeBoxes: numClasses must be > 0");
+    }
+    const int channels = 4 + numClasses;
+
+    const float* preds = nullptr;
+    size_t count = 0;
+    if (!readFloat32Array(args[0], preds, count) || !preds) {
+        return ev::throwTypeError("bro.vision.decodeBoxes: first argument must be a Float32Array");
     }
 
     std::vector<BoundingBox> candidates;
@@ -417,30 +464,26 @@ static Value js_nms(Value, std::span<const Value> args) {
     bool returnIndices = false;
 
     if (args.size() > 1 && ev::isObject(args[1])) {
-        Value it = ev::getProperty(args[1], "iouThreshold");
-        if (!ev::isUndefined(it)) iouThreshold = static_cast<float>(ev::toDouble(it));
-
-        Value md = ev::getProperty(args[1], "maxDetections");
-        if (!ev::isUndefined(md)) maxDetections = static_cast<int>(ev::toDouble(md));
-
-        Value pc = ev::getProperty(args[1], "perClass");
-        if (!ev::isUndefined(pc)) perClass = ev::toBool(pc);
-
-        Value st = ev::getProperty(args[1], "scoreThreshold");
-        if (!ev::isUndefined(st)) scoreThreshold = static_cast<float>(ev::toDouble(st));
-
-        Value strVal = ev::getProperty(args[1], "stride");
-        if (!ev::isUndefined(strVal)) optStride = static_cast<int>(ev::toDouble(strVal));
-
-        Value ata = ev::getProperty(args[1], "asTypedArray");
-        if (!ev::isUndefined(ata)) asTypedArray = ev::toBool(ata);
-
-        Value idxVal = ev::getProperty(args[1], "returnIndices");
-        if (!ev::isUndefined(idxVal)) returnIndices = ev::toBool(idxVal);
+        // args[1] is a rooted slot, re-read for every property.
+        iouThreshold = optFloat(args[1], "iouThreshold", iouThreshold);
+        maxDetections = optInt(args[1], "maxDetections", maxDetections);
+        perClass = optBool(args[1], "perClass", perClass);
+        scoreThreshold = optFloat(args[1], "scoreThreshold", scoreThreshold);
+        optStride = optInt(args[1], "stride", optStride);
+        asTypedArray = optBool(args[1], "asTypedArray", asTypedArray);
+        returnIndices = optBool(args[1], "returnIndices", returnIndices);
+        // The flat-float readers step by `stride` floats per box (below 4 =
+        // inferred from the length); a negative one would become a huge size_t.
+        if (optStride < 0 || optStride > 4096) {
+            return ev::throwRangeError("bro.vision.nms: opts.stride must be in 0..4096");
+        }
     }
 
     std::vector<BoundingBox> boxes;
-    Value input = args[0];
+    // args[0] is a rooted slot, but the object/array cases below read it
+    // across many allocating calls: go through a root, never a copy.
+    ev::Persistent inputRoot(args[0]);
+    const Value input = inputRoot.get();   // current until the first allocation
 
     // Case 1: Direct TypedArray buffer view (Float32Array)
     if (auto tinfo = ev::typedArrayInfo(input)) {
@@ -459,11 +502,13 @@ static Value js_nms(Value, std::span<const Value> args) {
         }
     }
     // Case 3: Object containing { data/boxes/buffer: TypedArray/ArrayBuffer }
-    else if (ev::isObject(input) && !isJsArray(input)) {
-        Value sub = ev::getProperty(input, "data");
-        if (ev::isUndefined(sub) || ev::isNull(sub)) sub = ev::getProperty(input, "boxes");
-        if (ev::isUndefined(sub) || ev::isNull(sub)) sub = ev::getProperty(input, "buffer");
+    else if (ev::isObject(input) && !isJsArray(inputRoot.get())) {
+        Value sub = ev::getProperty(inputRoot.get(), "data");
+        if (ev::isUndefined(sub) || ev::isNull(sub)) sub = ev::getProperty(inputRoot.get(), "boxes");
+        if (ev::isUndefined(sub) || ev::isNull(sub)) sub = ev::getProperty(inputRoot.get(), "buffer");
 
+        // `sub` is the result of the last allocating call; its buffer is read
+        // and consumed before the next one.
         if (auto subInfo = ev::typedArrayInfo(sub)) {
             if (subInfo.elementKind == ev::elements::Float32 && subInfo.data) {
                 extractBoxesFromFlatFloats(reinterpret_cast<const float*>(subInfo.data),
@@ -481,16 +526,16 @@ static Value js_nms(Value, std::span<const Value> args) {
         }
     }
     // Case 4: JS Array (elements may be typed array views, JS arrays, or box objects)
-    else if (isJsArray(input)) {
-        uint32_t len = getJsArrayLength(input);
-        boxes.reserve(len);
+    else if (isJsArray(inputRoot.get())) {
+        uint32_t len = getJsArrayLength(inputRoot.get());
+        boxes.reserve(std::min<uint32_t>(len, 1u << 20));
 
         for (uint32_t i = 0; i < len; ++i) {
-            Value elem = ev::getElement(input, i);
-            if (!ev::isObject(elem)) continue;
+            ev::Persistent elemRoot(ev::getElement(inputRoot.get(), i));
+            if (!ev::isObject(elemRoot.get())) continue;
 
             // 4a. Element is a TypedArray view (e.g. new Float32Array([x1, y1, x2, y2, score?, classId?]))
-            if (auto eInfo = ev::typedArrayInfo(elem)) {
+            if (auto eInfo = ev::typedArrayInfo(elemRoot.get())) {
                 if (eInfo.elementKind == ev::elements::Float32 && eInfo.data) {
                     const float* ep = reinterpret_cast<const float*>(eInfo.data);
                     const uint32_t ec = eInfo.elementCount;
@@ -510,15 +555,20 @@ static Value js_nms(Value, std::span<const Value> args) {
             }
 
             // 4b. Element is a JS Array [x1, y1, x2, y2, score?, classId?]
-            if (isJsArray(elem)) {
-                const uint32_t elen = getJsArrayLength(elem);
+            if (isJsArray(elemRoot.get())) {
+                const uint32_t elen = getJsArrayLength(elemRoot.get());
+                auto at = [&](uint32_t k, float def) -> float {
+                    if (k >= elen) return def;
+                    Value v = ev::getElement(elemRoot.get(), k);
+                    return ev::isNumber(v) ? static_cast<float>(ev::toDouble(v)) : def;
+                };
                 BoundingBox b;
-                b.x1 = elen > 0 ? static_cast<float>(ev::toDouble(ev::getElement(elem, 0))) : 0.0f;
-                b.y1 = elen > 1 ? static_cast<float>(ev::toDouble(ev::getElement(elem, 1))) : 0.0f;
-                b.x2 = elen > 2 ? static_cast<float>(ev::toDouble(ev::getElement(elem, 2))) : 0.0f;
-                b.y2 = elen > 3 ? static_cast<float>(ev::toDouble(ev::getElement(elem, 3))) : 0.0f;
-                b.score = elen > 4 ? static_cast<float>(ev::toDouble(ev::getElement(elem, 4))) : 1.0f;
-                b.classId = elen > 5 ? static_cast<int>(ev::toDouble(ev::getElement(elem, 5))) : 0;
+                b.x1 = at(0, 0.0f);
+                b.y1 = at(1, 0.0f);
+                b.x2 = at(2, 0.0f);
+                b.y2 = at(3, 0.0f);
+                b.score = at(4, 1.0f);
+                b.classId = static_cast<int>(at(5, 0.0f));
                 b.index = static_cast<int>(i);
                 if (b.score >= scoreThreshold) {
                     boxes.push_back(b);
@@ -527,20 +577,18 @@ static Value js_nms(Value, std::span<const Value> args) {
             }
 
             // 4c. Element is a JS Object: { x1, y1, x2, y2, score, classId }
+            // Each read is converted before the next one allocates.
+            auto prop = [&](const char* key, float def) -> float {
+                Value v = ev::getProperty(elemRoot.get(), key);
+                return ev::isNumber(v) ? static_cast<float>(ev::toDouble(v)) : def;
+            };
             BoundingBox b;
-            Value x1v = ev::getProperty(elem, "x1");
-            Value y1v = ev::getProperty(elem, "y1");
-            Value x2v = ev::getProperty(elem, "x2");
-            Value y2v = ev::getProperty(elem, "y2");
-            Value sv  = ev::getProperty(elem, "score");
-            Value cv  = ev::getProperty(elem, "classId");
-
-            b.x1 = ev::isUndefined(x1v) ? 0.0f : static_cast<float>(ev::toDouble(x1v));
-            b.y1 = ev::isUndefined(y1v) ? 0.0f : static_cast<float>(ev::toDouble(y1v));
-            b.x2 = ev::isUndefined(x2v) ? 0.0f : static_cast<float>(ev::toDouble(x2v));
-            b.y2 = ev::isUndefined(y2v) ? 0.0f : static_cast<float>(ev::toDouble(y2v));
-            b.score = ev::isUndefined(sv) ? 1.0f : static_cast<float>(ev::toDouble(sv));
-            b.classId = ev::isUndefined(cv) ? 0 : static_cast<int>(ev::toDouble(cv));
+            b.x1 = prop("x1", 0.0f);
+            b.y1 = prop("y1", 0.0f);
+            b.x2 = prop("x2", 0.0f);
+            b.y2 = prop("y2", 0.0f);
+            b.score = prop("score", 1.0f);
+            b.classId = static_cast<int>(prop("classId", 0.0f));
             b.index = static_cast<int>(i);
 
             if (b.score >= scoreThreshold) {
@@ -597,28 +645,29 @@ static Value js_rasterizeMask(Value, std::span<const Value> args) {
         return ev::throwTypeError("bro.vision.rasterizeMask: mask data is required");
     }
 
-    Value opts = args.size() > 1 ? args[1] : ev::undefined();
     int srcW = 0, srcH = 0;
     int targetW = 0, targetH = 0;
     float threshold = 0.0f;
 
-    if (ev::isObject(opts)) {
-        Value sw = ev::getProperty(opts, "width");
-        if (!ev::isUndefined(sw)) srcW = static_cast<int>(ev::toDouble(sw));
-        Value sh = ev::getProperty(opts, "height");
-        if (!ev::isUndefined(sh)) srcH = static_cast<int>(ev::toDouble(sh));
-        Value tw = ev::getProperty(opts, "targetWidth");
-        if (!ev::isUndefined(tw)) targetW = static_cast<int>(ev::toDouble(tw));
-        Value th = ev::getProperty(opts, "targetHeight");
-        if (!ev::isUndefined(th)) targetH = static_cast<int>(ev::toDouble(th));
-        Value tv = ev::getProperty(opts, "threshold");
-        if (!ev::isUndefined(tv)) threshold = static_cast<float>(ev::toDouble(tv));
+    // args[1] is a rooted slot: read it afresh for every property, since each
+    // getProperty may move it.
+    if (args.size() > 1 && ev::isObject(args[1])) {
+        srcW = optInt(args[1], "width", 0);
+        srcH = optInt(args[1], "height", 0);
+        targetW = optInt(args[1], "targetWidth", 0);
+        targetH = optInt(args[1], "targetHeight", 0);
+        threshold = optFloat(args[1], "threshold", 0.0f);
     }
 
     if (targetW <= 0) targetW = srcW > 0 ? srcW : 512;
     if (targetH <= 0) targetH = srcH > 0 ? srcH : 512;
     if (srcW <= 0) srcW = targetW;
     if (srcH <= 0) srcH = targetH;
+    constexpr int kMaxSide = 16384;
+    if (targetW > kMaxSide || targetH > kMaxSide || srcW > kMaxSide || srcH > kMaxSide) {
+        return ev::throwRangeError("bro.vision.rasterizeMask: width/height/targetWidth/targetHeight must be at most 16384");
+    }
+    const size_t srcPixels = static_cast<size_t>(srcW) * static_cast<size_t>(srcH);
 
     const float* f32Data = nullptr;
     const uint8_t* u8Data = nullptr;
@@ -626,7 +675,15 @@ static Value js_rasterizeMask(Value, std::span<const Value> args) {
 
     std::vector<uint8_t> outMask(static_cast<size_t>(targetW) * targetH, 0);
 
+    // A typed-array mask is sampled at srcW x srcH: it must actually hold
+    // that many elements (the default source size is the target size).
+    auto tooSmall = [&](size_t have) {
+        return ev::throwRangeError("bro.vision.rasterizeMask: mask holds " + std::to_string(have) +
+                                   " elements, width*height needs " + std::to_string(srcPixels));
+    };
+
     if (readFloat32Array(args[0], f32Data, count) && f32Data) {
+        if (count < srcPixels) return tooSmall(count);
         // Bilinear sample or nearest neighbor threshold
         for (int y = 0; y < targetH; ++y) {
             float sy = (static_cast<float>(y) + 0.5f) * srcH / targetH - 0.5f;
@@ -639,6 +696,7 @@ static Value js_rasterizeMask(Value, std::span<const Value> args) {
             }
         }
     } else if (readUint8Array(args[0], u8Data, count) && u8Data) {
+        if (count < srcPixels) return tooSmall(count);
         for (int y = 0; y < targetH; ++y) {
             int iy = std::clamp(y * srcH / targetH, 0, srcH - 1);
             for (int x = 0; x < targetW; ++x) {
@@ -653,10 +711,14 @@ static Value js_rasterizeMask(Value, std::span<const Value> args) {
         std::vector<std::pair<float, float>> poly;
         poly.reserve(polyLen);
         for (uint32_t i = 0; i < polyLen; ++i) {
-            Value p = ev::getElement(args[0], i);
-            if (ev::isObject(p)) {
-                float px = static_cast<float>(ev::toDouble(ev::getProperty(p, "x")));
-                float py = static_cast<float>(ev::toDouble(ev::getProperty(p, "y")));
+            // Two reads off each point: the second must not go through a
+            // copy the first may have moved.
+            ev::Persistent p(ev::getElement(args[0], i));
+            if (ev::isObject(p.get())) {
+                Value xv = ev::getProperty(p.get(), "x");
+                const float px = ev::isNumber(xv) ? static_cast<float>(ev::toDouble(xv)) : 0.0f;
+                Value yv = ev::getProperty(p.get(), "y");
+                const float py = ev::isNumber(yv) ? static_cast<float>(ev::toDouble(yv)) : 0.0f;
                 poly.emplace_back(px, py);
             }
         }
@@ -696,23 +758,29 @@ static Value js_colorMap(Value, std::span<const Value> args) {
         return ev::throwTypeError("bro.vision.colorMap: input data is required");
     }
 
-    Value opts = args.size() > 1 ? args[1] : ev::undefined();
     int width = 512, height = 512;
     std::string mapType = "turbo";
     float minVal = 0.0f, maxVal = 1.0f;
     bool autoRange = true;
 
-    if (ev::isObject(opts)) {
-        Value wv = ev::getProperty(opts, "width");
-        if (!ev::isUndefined(wv)) width = static_cast<int>(ev::toDouble(wv));
-        Value hv = ev::getProperty(opts, "height");
-        if (!ev::isUndefined(hv)) height = static_cast<int>(ev::toDouble(hv));
-        Value mv = ev::getProperty(opts, "map");
-        if (ev::isString(mv)) mapType = ev::toUtf8(mv);
-        Value minv = ev::getProperty(opts, "min");
-        if (!ev::isUndefined(minv)) { minVal = static_cast<float>(ev::toDouble(minv)); autoRange = false; }
-        Value maxv = ev::getProperty(opts, "max");
-        if (!ev::isUndefined(maxv)) { maxVal = static_cast<float>(ev::toDouble(maxv)); autoRange = false; }
+    if (args.size() > 1 && ev::isObject(args[1])) {
+        width = optInt(args[1], "width", width);
+        height = optInt(args[1], "height", height);
+        {
+            Value mv = ev::getProperty(args[1], "map");
+            if (ev::isString(mv)) mapType = ev::toUtf8(mv);
+        }
+        {
+            Value minv = ev::getProperty(args[1], "min");
+            if (ev::isNumber(minv)) { minVal = static_cast<float>(ev::toDouble(minv)); autoRange = false; }
+        }
+        {
+            Value maxv = ev::getProperty(args[1], "max");
+            if (ev::isNumber(maxv)) { maxVal = static_cast<float>(ev::toDouble(maxv)); autoRange = false; }
+        }
+    }
+    if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
+        return ev::throwRangeError("bro.vision.colorMap: width and height must be in [1, 16384]");
     }
 
     const size_t totalPixels = static_cast<size_t>(width) * height;

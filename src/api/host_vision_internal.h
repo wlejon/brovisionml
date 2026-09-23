@@ -212,7 +212,11 @@ extern HostClass g_dinov2Class;
 extern HostClass g_dinov3Class;
 extern HostClass g_visionModelClass;
 
-brotensor::Device parseDevice(Value opts);
+// Resolve a loader's device from opts.device (see native_vision_ops.cpp):
+// init() + best available backend by default; false with a pending JS
+// exception in `thrown` on a bad or unavailable device. `opts` must be
+// current at the call (a rooted slot or a Persistent read).
+bool resolveDevice(const char* fnName, Value opts, brotensor::Device& dev, Value& thrown);
 const char* deviceName(brotensor::Device dev);
 
 bool readFloat32Array(Value val, const float*& outData, size_t& outCount);
@@ -251,6 +255,62 @@ inline Value hostArrayOf(size_t count, const std::function<Value(size_t)>& make)
     return arr.get();
 }
 
+// ── option reads ──────────────────────────────────────────────────────────
+//
+// THE GC RULE these exist for (bronze/src/embed/embed.h): getProperty may
+// allocate, and any allocation may move every heap value, so a `Value opts`
+// copied out of the argument span is stale after its first property read.
+// Pass these a value that is current at the call — a slot of the rooted
+// `args` span (`args[1]`) or a `Persistent::get()` — and read one property
+// per call; never cache the receiver in a local across two of them.
+
+// obj[key] as an int when it is a finite number in int range, else `def`.
+inline int optInt(Value obj, const char* key, int def) {
+    if (!ev::isObject(obj)) return def;
+    Value v = ev::getProperty(obj, key);
+    if (!ev::isNumber(v)) return def;
+    const double d = ev::toDouble(v);
+    if (!(d >= -2147483648.0 && d <= 2147483647.0)) return def;   // NaN, ±inf, out of range
+    return static_cast<int>(d);
+}
+
+// obj[key] as a float when it is a number, else `def`.
+inline float optFloat(Value obj, const char* key, float def) {
+    if (!ev::isObject(obj)) return def;
+    Value v = ev::getProperty(obj, key);
+    return ev::isNumber(v) ? static_cast<float>(ev::toDouble(v)) : def;
+}
+
+// obj[key] as a double when it is a number, else `def`.
+inline double optDouble(Value obj, const char* key, double def) {
+    if (!ev::isObject(obj)) return def;
+    Value v = ev::getProperty(obj, key);
+    return ev::isNumber(v) ? ev::toDouble(v) : def;
+}
+
+// arr[i] as a float when it is a number, else 0.
+inline float numElem(Value arr, uint32_t i) {
+    Value v = ev::getElement(arr, i);
+    return ev::isNumber(v) ? static_cast<float>(ev::toDouble(v)) : 0.0f;
+}
+
+// obj[key] truthiness; undefined / null / absent give `def`.
+inline bool optBool(Value obj, const char* key, bool def) {
+    if (!ev::isObject(obj)) return def;
+    Value v = ev::getProperty(obj, key);
+    if (ev::isUndefined(v) || ev::isNull(v)) return def;
+    return ev::toBool(v);
+}
+
+// obj[key] as a string when it is a string, else `def`.
+inline std::string optString(Value obj, const char* key, const std::string& def) {
+    if (!ev::isObject(obj)) return def;
+    Value v = ev::getProperty(obj, key);
+    return ev::isString(v) ? ev::toUtf8(v) : def;
+}
+
+// Both of these read `length` (an allocating call) and so leave `v` stale:
+// the caller must hold `v` in a Persistent or a rooted slot and re-read it.
 inline bool isJsArray(Value v) {
     if (!ev::isObject(v)) return false;
     Value lenV = ev::getProperty(v, "length");

@@ -55,9 +55,7 @@ bool readFloatsProp(Value obj, const char* key, std::vector<float>& out) {
 }
 
 void intProp(Value obj, const char* key, int& dst) {
-    if (!ev::isObject(obj)) return;
-    Value v = ev::getProperty(obj, key);
-    if (ev::isNumber(v)) dst = static_cast<int>(ev::toDouble(v));
+    dst = optInt(obj, key, dst);
 }
 
 void floatProp(Value obj, const char* key, float& dst) {
@@ -131,17 +129,18 @@ Value sgGenerate(Value thisVal, std::span<const Value> args) {
         return ev::throwError("StyleGAN3: generator is uninitialized or model weights not loaded");
     }
 
-    Value opts = args.empty() ? ev::undefined() : args[0];
+    // Rooted: every helper below does a getProperty, which may move it.
+    ev::Persistent opts(args.empty() ? ev::undefined() : args[0]);
     float psi = 1.0f;
     int cutoff = -1;
-    floatProp(opts, "truncation", psi);
-    intProp(opts, "truncationCutoff", cutoff);
-    const bool returnLatents = boolProp(opts, "returnLatents", false);
+    floatProp(opts.get(), "truncation", psi);
+    intProp(opts.get(), "truncationCutoff", cutoff);
+    const bool returnLatents = boolProp(opts.get(), "returnLatents", false);
 
     // An explicit z wins over a seed.
     std::vector<float> z;
     bool gotZ = false;
-    if (readFloatsProp(opts, "z", z)) {
+    if (readFloatsProp(opts.get(), "z", z)) {
         if (static_cast<int>(z.size()) == w->zDim) {
             gotZ = true;
         } else if (!z.empty()) {
@@ -150,11 +149,9 @@ Value sgGenerate(Value thisVal, std::span<const Value> args) {
     }
     int64_t seed = -1;
     if (!gotZ) {
-        seed = 0;
-        if (ev::isObject(opts)) {
-            Value sv = ev::getProperty(opts, "seed");
-            if (ev::isNumber(sv)) seed = static_cast<int64_t>(ev::toDouble(sv));
-        }
+        const double sd = optDouble(opts.get(), "seed", 0.0);
+        // Converting a double outside int64 range (or NaN) is UB.
+        seed = (sd >= -9.0e18 && sd <= 9.0e18) ? static_cast<int64_t>(sd) : 0;
         z.resize(static_cast<size_t>(w->zDim));
         std::mt19937_64 rng(static_cast<unsigned long long>(seed));
         std::normal_distribution<float> nd(0.0f, 1.0f);
@@ -249,22 +246,20 @@ Value sgInvert(Value thisVal, std::span<const Value> args) {
             "resize the source first");
     }
 
-    Value opts = args.size() > 1 ? args[1] : ev::undefined();
+    // Rooted: every helper below does a getProperty, which may move it.
+    ev::Persistent opts(args.size() > 1 ? args[1] : ev::undefined());
     int steps = 350;
     float lr = 0.05f, regW = 0.0f, initNoise = 0.0f;
-    int64_t seed = 0;
-    intProp(opts, "steps", steps);
-    floatProp(opts, "lr", lr);
-    floatProp(opts, "regW", regW);
-    floatProp(opts, "initNoise", initNoise);
-    if (ev::isObject(opts)) {
-        Value sv = ev::getProperty(opts, "seed");
-        if (ev::isNumber(sv)) seed = static_cast<int64_t>(ev::toDouble(sv));
-    }
+    intProp(opts.get(), "steps", steps);
+    floatProp(opts.get(), "lr", lr);
+    floatProp(opts.get(), "regW", regW);
+    floatProp(opts.get(), "initNoise", initNoise);
+    const double sd = optDouble(opts.get(), "seed", 0.0);
+    const int64_t seed = (sd >= -9.0e18 && sd <= 9.0e18) ? static_cast<int64_t>(sd) : 0;
     if (steps < 1) steps = 1;
 
     std::vector<float> initW;
-    if (readFloatsProp(opts, "initW", initW) && !initW.empty() &&
+    if (readFloatsProp(opts.get(), "initW", initW) && !initW.empty() &&
         static_cast<int>(initW.size()) != w->numWs * w->wDim) {
         return ev::throwTypeError("invert: opts.initW must have length numWs*wDim");
     }
@@ -339,10 +334,17 @@ Value runBirefnet(BirefnetWrapper* w, std::span<const Value> args) {
 
     int modelSize = w->modelSize;
     if (args.size() > 1) intProp(args[1], "modelSize", modelSize);
+    if (modelSize <= 0 || modelSize % 32 != 0 || modelSize > 4096) {
+        return ev::throwTypeError("removeBackground: opts.modelSize must be a positive multiple of 32 (at most 4096)");
+    }
+    // A disposed model is not a zero matte: say so, like every other op.
+    if (!(w->loaded && w->net)) {
+        return ev::throwError("BiRefNet.removeBackground: model is disposed or its weights are not loaded");
+    }
 
     std::vector<float> alpha;
     int outW = inW, outH = inH;
-    if (w->loaded && w->net) {
+    {
         try {
             // removeBackground() consumes interleaved float RGB; the decoded
             // alpha plane does not participate in matting.
@@ -362,8 +364,6 @@ Value runBirefnet(BirefnetWrapper* w, std::span<const Value> args) {
         } catch (const std::exception& e) {
             return ev::throwError(std::string("removeBackground failed: ") + e.what());
         }
-    } else {
-        alpha.assign(static_cast<size_t>(inW) * inH, 0.0f);
     }
 
     std::vector<uint8_t> bytes(alpha.size());
@@ -406,17 +406,19 @@ Value brRemoveBackground(Value thisVal, std::span<const Value> args) {
     return runBirefnet(w, args);
 }
 
-bool loadStyleGAN3Generator(const std::string& path, Value opts,
+bool loadStyleGAN3Generator(const std::string& path, Value optsIn,
                             StyleGAN3Wrapper& w, std::string& err) {
+    // Two property reads: the second must not go through a moved copy.
+    ev::Persistent opts(optsIn);
     int res = 256;
-    intProp(opts, "resolution", res);
+    intProp(opts.get(), "resolution", res);
     if (res != 256 && res != 512 && res != 1024) {
         err = "loadStyleGAN3: resolution must be 256, 512, or 1024";
         return false;
     }
     std::string variant = "r";
-    if (ev::isObject(opts)) {
-        Value v = ev::getProperty(opts, "variant");
+    if (ev::isObject(opts.get())) {
+        Value v = ev::getProperty(opts.get(), "variant");
         if (!ev::isUndefined(v) && !ev::isNull(v) && !ev::isObject(v)) {
             variant = ev::toUtf8(v);
         }

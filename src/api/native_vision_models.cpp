@@ -47,9 +47,7 @@ static Value runDepthEstimator(DepthEstimatorWrapper* w, std::span<const Value> 
         return ev::throwTypeError("DepthEstimator.estimate: image argument required");
     }
 
-    const bool invert = args.size() > 1 && ev::isObject(args[1])
-                            ? ev::toBool(ev::getProperty(args[1], "invert"))
-                            : false;
+    const bool invert = args.size() > 1 && optBool(args[1], "invert", false);
 
     std::vector<uint8_t> rgba;
     int width = 0, height = 0;
@@ -134,17 +132,15 @@ static Value runNormalEstimator(NormalEstimatorWrapper* w, std::span<const Value
     bool hasIntrinsics = false;
     float fx = 0.0f, fy = 0.0f, cx = 0.0f, cy = 0.0f;
     if (args.size() > 1 && ev::isObject(args[1])) {
-        Value opts = args[1];
-        Value fxv = ev::getProperty(opts, "fx");
+        // Read straight off the rooted slot: a local copy of args[1] would be
+        // stale after the first getProperty.
+        Value fxv = ev::getProperty(args[1], "fx");
         if (ev::isNumber(fxv)) {
             hasIntrinsics = true;
             fx = static_cast<float>(ev::toDouble(fxv));
-            Value v = ev::getProperty(opts, "fy");
-            if (ev::isNumber(v)) fy = static_cast<float>(ev::toDouble(v));
-            v = ev::getProperty(opts, "cx");
-            if (ev::isNumber(v)) cx = static_cast<float>(ev::toDouble(v));
-            v = ev::getProperty(opts, "cy");
-            if (ev::isNumber(v)) cy = static_cast<float>(ev::toDouble(v));
+            fy = optFloat(args[1], "fy", fy);
+            cx = optFloat(args[1], "cx", cx);
+            cy = optFloat(args[1], "cy", cy);
         }
     }
 
@@ -348,11 +344,22 @@ static bool validateLoaderPath(const char* name, std::span<const Value> args, st
         return false;
     }
     path = resolvePath(ev::toUtf8(args[0]));
-    if (!std::filesystem::exists(path)) {
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) {
         outError = ev::throwError(std::string(name) + " failed: model dir not found: " + path);
         return false;
     }
     return true;
+}
+
+// Every loader's prologue: the path argument, then the device (after the
+// path, so a bad path is reported as such whatever opts says). args[1] is
+// read straight from the rooted span at the call.
+static bool loaderPrologue(const char* name, std::span<const Value> args, std::string& path,
+                           brotensor::Device& dev, Value& outError) {
+    if (!validateLoaderPath(name, args, path, outError)) return false;
+    return resolveDevice((std::string("bro.vision.") + name).c_str(),
+                         args.size() > 1 ? args[1] : ev::undefined(), dev, outError);
 }
 
 // Template loader helper for detector classes
@@ -360,10 +367,9 @@ template <typename WrapperT, typename NetT>
 static Value loadVisionDetector(const char* name, const HostClass& hostCls, std::span<const Value> args) {
     std::string path;
     Value errVal;
-    if (!validateLoaderPath(name, args, path, errVal)) return errVal;
+    brotensor::Device dev = brotensor::Device::CPU;
+    if (!loaderPrologue(name, args, path, dev, errVal)) return errVal;
 
-    Value opts = args.size() > 1 ? args[1] : ev::undefined();
-    auto dev = parseDevice(opts);
     auto w = std::make_unique<WrapperT>();
     w->path = path;
     w->device = dev;
@@ -404,21 +410,18 @@ Value makeVisionNamespace() {
     vision.def("loadModel", 2, [](Value, std::span<const Value> args) -> Value {
         std::string path;
         Value errVal;
-        if (!validateLoaderPath("loadModel", args, path, errVal)) return errVal;
+        brotensor::Device dev = brotensor::Device::CPU;
+        if (!loaderPrologue("loadModel", args, path, dev, errVal)) return errVal;
 
-        Value opts = args.size() > 1 ? args[1] : ev::undefined();
         auto w = std::make_unique<VisionModelWrapper>();
         w->modelPath = path;
-        w->device = parseDevice(opts);
+        w->device = dev;
         w->loaded = false;
 
-        if (ev::isObject(opts)) {
-            Value tv = ev::getProperty(opts, "type");
-            if (ev::isString(tv)) w->taskName = ev::toUtf8(tv);
-            Value cv = ev::getProperty(opts, "confThreshold");
-            if (!ev::isUndefined(cv)) w->confThreshold = static_cast<float>(ev::toDouble(cv));
-            Value iv = ev::getProperty(opts, "iouThreshold");
-            if (!ev::isUndefined(iv)) w->iouThreshold = static_cast<float>(ev::toDouble(iv));
+        if (args.size() > 1 && ev::isObject(args[1])) {
+            w->taskName = optString(args[1], "type", w->taskName);
+            w->confThreshold = optFloat(args[1], "confThreshold", w->confThreshold);
+            w->iouThreshold = optFloat(args[1], "iouThreshold", w->iouThreshold);
         }
 
         try {
@@ -569,10 +572,8 @@ Value makeVisionNamespace() {
     vision.def("loadDepth", 2, [](Value, std::span<const Value> args) -> Value {
         std::string path;
         Value errVal;
-        if (!validateLoaderPath("loadDepth", args, path, errVal)) return errVal;
-
-        Value opts = args.size() > 1 ? args[1] : ev::undefined();
-        auto dev = parseDevice(opts);
+        brotensor::Device dev = brotensor::Device::CPU;
+        if (!loaderPrologue("loadDepth", args, path, dev, errVal)) return errVal;
         auto w = std::make_unique<DepthEstimatorWrapper>();
         w->path = path;
         w->device = dev;
@@ -597,10 +598,8 @@ Value makeVisionNamespace() {
     vision.def("loadSam", 2, [](Value, std::span<const Value> args) -> Value {
         std::string path;
         Value errVal;
-        if (!validateLoaderPath("loadSam", args, path, errVal)) return errVal;
-
-        Value opts = args.size() > 1 ? args[1] : ev::undefined();
-        auto dev = parseDevice(opts);
+        brotensor::Device dev = brotensor::Device::CPU;
+        if (!loaderPrologue("loadSam", args, path, dev, errVal)) return errVal;
         auto w = std::make_unique<SamWrapper>();
         w->path = path;
         w->device = dev;
@@ -624,10 +623,8 @@ Value makeVisionNamespace() {
     vision.def("loadNormal", 2, [](Value, std::span<const Value> args) -> Value {
         std::string path;
         Value errVal;
-        if (!validateLoaderPath("loadNormal", args, path, errVal)) return errVal;
-
-        Value opts = args.size() > 1 ? args[1] : ev::undefined();
-        auto dev = parseDevice(opts);
+        brotensor::Device dev = brotensor::Device::CPU;
+        if (!loaderPrologue("loadNormal", args, path, dev, errVal)) return errVal;
         auto w = std::make_unique<NormalEstimatorWrapper>();
         w->path = path;
         w->device = dev;
@@ -676,16 +673,15 @@ Value makeVisionNamespace() {
     vision.def("loadBirefnet", 2, [](Value, std::span<const Value> args) -> Value {
         std::string path;
         Value errVal;
-        if (!validateLoaderPath("loadBirefnet", args, path, errVal)) return errVal;
+        brotensor::Device dev = brotensor::Device::CPU;
+        if (!loaderPrologue("loadBirefnet", args, path, dev, errVal)) return errVal;
 
-        Value opts = args.size() > 1 ? args[1] : ev::undefined();
-        auto dev = parseDevice(opts);
         auto w = std::make_unique<BirefnetWrapper>();
         w->path = path;
         w->device = dev;
-        if (ev::isObject(opts)) {
-            Value msv = ev::getProperty(opts, "modelSize");
-            if (ev::isNumber(msv)) w->modelSize = static_cast<int>(ev::toDouble(msv));
+        if (args.size() > 1) w->modelSize = optInt(args[1], "modelSize", w->modelSize);
+        if (w->modelSize <= 0 || w->modelSize % 32 != 0 || w->modelSize > 4096) {
+            return ev::throwTypeError("loadBirefnet: opts.modelSize must be a positive multiple of 32 (at most 4096)");
         }
         try {
             w->net = std::make_unique<brovisionml::birefnet::BiRefNet>();
@@ -703,17 +699,16 @@ Value makeVisionNamespace() {
     vision.def("loadStyleGAN3", 2, [](Value, std::span<const Value> args) -> Value {
         std::string path;
         Value errVal;
-        if (!validateLoaderPath("loadStyleGAN3", args, path, errVal)) return errVal;
+        brotensor::Device dev = brotensor::Device::CPU;
+        if (!loaderPrologue("loadStyleGAN3", args, path, dev, errVal)) return errVal;
 
-        Value opts = args.size() > 1 ? args[1] : ev::undefined();
-        auto dev = parseDevice(opts);
         auto w = std::make_unique<StyleGAN3Wrapper>();
         w->path = path;
         w->device = dev;
         // Actually construct and load the Generator: the bronze port only
         // recorded the path, which is why generate() could not do anything.
         std::string loadErr;
-        if (!loadStyleGAN3Generator(path, opts, *w, loadErr)) {
+        if (!loadStyleGAN3Generator(path, args.size() > 1 ? args[1] : ev::undefined(), *w, loadErr)) {
             return ev::throwError(loadErr);
         }
         return g_stylegan3Class.createInstance(std::move(w));
@@ -722,15 +717,14 @@ Value makeVisionNamespace() {
     vision.def("loadDinov2", 2, [](Value, std::span<const Value> args) -> Value {
         std::string path;
         Value errVal;
-        if (!validateLoaderPath("loadDinov2", args, path, errVal)) return errVal;
+        brotensor::Device dev = brotensor::Device::CPU;
+        if (!loaderPrologue("loadDinov2", args, path, dev, errVal)) return errVal;
 
-        Value opts = args.size() > 1 ? args[1] : ev::undefined();
-        auto dev = parseDevice(opts);
         auto w = std::make_unique<Dinov2Wrapper>();
         w->path = path;
         w->device = dev;
         std::string loadErr;
-        if (!loadDinov2Backbone(path, opts, *w, loadErr)) {
+        if (!loadDinov2Backbone(path, args.size() > 1 ? args[1] : ev::undefined(), *w, loadErr)) {
             return ev::throwError("loadDinov2 failed: " + loadErr);
         }
         return g_dinov2Class.createInstance(std::move(w));
@@ -739,10 +733,8 @@ Value makeVisionNamespace() {
     vision.def("loadDinov3", 2, [](Value, std::span<const Value> args) -> Value {
         std::string path;
         Value errVal;
-        if (!validateLoaderPath("loadDinov3", args, path, errVal)) return errVal;
-
-        Value opts = args.size() > 1 ? args[1] : ev::undefined();
-        auto dev = parseDevice(opts);
+        brotensor::Device dev = brotensor::Device::CPU;
+        if (!loaderPrologue("loadDinov3", args, path, dev, errVal)) return errVal;
         auto w = std::make_unique<Dinov3Wrapper>();
         w->path = path;
         w->device = dev;

@@ -24,34 +24,34 @@ void setPathResolver(std::function<std::string(const std::string&)> resolver) {
 void installVision() {
     ensureVisionClassesInstalled();
 
-    Value globalThisVal = ev::undefined();
-    auto gt = ev::globalValue("globalThis");
-    if (gt.found && ev::isObject(gt.value)) {
-        globalThisVal = gt.value;
+    // Everything below allocates (getProperty, createObject, setProperty), so
+    // both roots live in Persistents and are re-read at every use.
+    ev::Persistent globalThisP(ev::undefined());
+    {
+        auto gt = ev::globalValue("globalThis");
+        if (gt.found && ev::isObject(gt.value)) globalThisP.set(gt.value);
     }
 
-    Value broVal = ev::globalValue("bro").found ? ev::globalValue("bro").value : ev::undefined();
-    if (!ev::isObject(broVal)) {
-        if (!ev::isUndefined(globalThisVal)) {
-            Value candidate = ev::getProperty(globalThisVal, "bro");
-            if (ev::isObject(candidate)) {
-                broVal = candidate;
-            }
+    ev::Persistent broP(ev::undefined());
+    {
+        auto g = ev::globalValue("bro");
+        if (g.found && ev::isObject(g.value)) broP.set(g.value);
+    }
+    if (!ev::isObject(broP.get()) && ev::isObject(globalThisP.get())) {
+        Value candidate = ev::getProperty(globalThisP.get(), "bro");
+        if (ev::isObject(candidate)) broP.set(candidate);
+    }
+    if (!ev::isObject(broP.get())) {
+        broP.set(ev::createObject());
+        ev::registerGlobal("bro", broP.get());
+        if (ev::isObject(globalThisP.get())) {
+            globalThisP.set(ev::setProperty(globalThisP.get(), "bro", broP.get()));
         }
     }
-    if (!ev::isObject(broVal)) {
-        broVal = ev::createObject();
-        ev::registerGlobal("bro", broVal);
-        if (!ev::isUndefined(globalThisVal)) {
-            ev::setProperty(globalThisVal, "bro", broVal);
-        }
-    }
-
-    ev::Persistent broP(broVal);
 
     // Mount bro.vision
-    Value visionVal = makeVisionNamespace();
-    broP.set(ev::setProperty(broP.get(), "vision", visionVal));
+    ev::Persistent visionP(makeVisionNamespace());
+    broP.set(ev::setProperty(broP.get(), "vision", visionP.get()));
 }
 
 } // namespace brovisionml::api

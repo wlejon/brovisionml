@@ -1,10 +1,19 @@
+// brovisionml_test_api — boots a bronze realm, installs bro.vision the way
+// bro's host does, and checks the weights-free surface from JavaScript.
+//
+// Every check is a JS block that answers "OK" or a description of what went
+// wrong: the harness holds no bronze Value across an allocating call (the
+// test runs a second time under BRONZE_GC_STRESS=1, where a collection at
+// every allocation moves every heap value, so a Value cached in C++ would be
+// read after it moved). Failures are counted, never assert()ed — assert is a
+// no-op in the Release configuration this runs in.
+
 #include <brovisionml/version.h>
 #include "../src/api/api.h"
 #include <eval/eval.h>
-#include <cassert>
-#include <iostream>
+
+#include <cstdio>
 #include <string>
-#include <vector>
 
 // tests/test_vision_api_restored.cpp — the bro.vision members the bronze port
 // dropped or renamed (bro's docs/transition-drift.md row H7).
@@ -14,204 +23,209 @@ void brovisionmlTestRestoredSurface();
 // consulted for every model path the loaders take.
 void brovisionmlTestPathResolver();
 
-int main() {
-    namespace ev = bronze::embed;
+namespace {
 
-    std::cout << "Installing Vision API into Bronze realm..." << std::endl;
+namespace ev = bronze::embed;
+
+int g_failures = 0;
+
+void runJs(const char* name, const std::string& script) {
+    std::printf("  %s...\n", name);
+    ev::CallResult r = bronze::eval::evalScript(script);
+    if (r.thrown) {
+        std::printf("    FAIL: threw %s\n", ev::toUtf8(r.value).c_str());
+        ++g_failures;
+        return;
+    }
+    const std::string out = ev::isString(r.value) ? ev::toUtf8(r.value) : std::string("<non-string>");
+    if (out != "OK") {
+        std::printf("    FAIL: %s\n", out.c_str());
+        ++g_failures;
+    }
+}
+
+// Shared prelude for every block: a throw-expectation helper.
+const char* kPrelude = R"JS(
+    const V = bro.vision;
+    const throwsWith = (f, pred) => {
+        try { f(); } catch (e) { return pred(e) ? null : ("wrong error: " + e); }
+        return "did not throw";
+    };
+)JS";
+
+std::string block(const char* body) {
+    return std::string("(() => {") + kPrelude + body + "\n})()";
+}
+
+} // namespace
+
+int main() {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::printf("Installing Vision API into Bronze realm...\n");
     brovisionml::api::installVision();
 
-    auto g = ev::globalValue("bro");
-    assert(g.found);
-    assert(ev::isObject(g.value));
+    runJs("namespace, version, init", block(R"JS(
+        if (typeof bro !== "object" || typeof V !== "object") return "bro.vision missing";
+        if (typeof V.version !== "string" || V.version.length === 0) return "version: " + V.version;
+        if (V.init() !== undefined) return "init() did not return undefined";
+        return "OK";
+    )JS"));
 
-    // Check bro.vision namespace
-    auto vision = ev::getProperty(g.value, "vision");
-    assert(ev::isObject(vision));
+    runJs("loaders validate their path", block(R"JS(
+        const loaders = ["loadDepth", "loadSam", "loadNormal", "loadHed", "loadLineart",
+                         "loadMlsd", "loadOpenpose", "loadSegformer", "loadBirefnet",
+                         "loadStyleGAN3", "loadDinov2", "loadDinov3", "loadModel"];
+        for (const name of loaders) {
+            if (typeof V[name] !== "function") return name + " is not a function";
+            let r = throwsWith(() => V[name](),
+                               (e) => e instanceof TypeError && String(e.message).includes("path"));
+            if (r) return name + "(): " + r;
+            r = throwsWith(() => V[name]("tests/vision/__no_such_dir__"),
+                           (e) => !(e instanceof TypeError) && String(e.message).includes(name));
+            if (r) return name + "(missing dir): " + r;
+        }
+        return "OK";
+    )JS"));
 
-    // Check version
-    auto ver = ev::getProperty(vision, "version");
-    assert(ev::isString(ver));
-    assert(!ev::toUtf8(ver).empty());
-    std::cout << "  bro.vision.version = " << ev::toUtf8(ver) << std::endl;
+    // The device is resolved after the path, so these use a directory that
+    // exists (".") and fail on the device before any weights are read.
+    runJs("loaders validate opts.device", block(R"JS(
+        for (const name of ["loadDepth", "loadSam", "loadHed", "loadBirefnet", "loadModel"]) {
+            let r = throwsWith(() => V[name](".", { device: "tpu" }),
+                               (e) => e instanceof TypeError && String(e.message).includes("opts.device"));
+            if (r) return name + "({device:'tpu'}): " + r;
+            r = throwsWith(() => V[name](".", { device: 3 }),
+                           (e) => e instanceof TypeError && String(e.message).includes("opts.device"));
+            if (r) return name + "({device:3}): " + r;
+        }
+        // An explicit CPU request is honoured: the load gets as far as the
+        // missing checkpoint and says which loader failed.
+        const r = throwsWith(() => V.loadDepth(".", { device: "cpu" }),
+                             (e) => !(e instanceof TypeError) && String(e.message).includes("loadDepth failed"));
+        if (r) return "loadDepth({device:'cpu'}) on a weightless dir: " + r;
+        return "OK";
+    )JS"));
 
-    // Check init()
-    auto visionInit = ev::getProperty(vision, "init");
-    assert(ev::isObject(visionInit));
-    auto initRes = ev::call(visionInit, vision, {});
-    assert(!initRes.thrown);
-    assert(ev::isUndefined(initRes.value));
+    runJs("loadBirefnet validates modelSize", block(R"JS(
+        const r = throwsWith(() => V.loadBirefnet(".", { device: "cpu", modelSize: 1000 }),
+                             (e) => e instanceof TypeError && String(e.message).includes("modelSize"));
+        return r ? "modelSize 1000: " + r : "OK";
+    )JS"));
 
-    // Verify all loaders exist and are functions
-    const std::vector<std::string> loaders = {
-        "loadDepth", "loadSam", "loadNormal", "loadHed", "loadLineart",
-        "loadMlsd", "loadOpenpose", "loadSegformer", "loadBirefnet",
-        "loadStyleGAN3", "loadDinov2", "loadDinov3", "loadModel"
-    };
+    runJs("host class constructors refuse construction", block(R"JS(
+        const classes = ["DepthEstimator", "Sam", "NormalEstimator", "Hed", "Lineart", "Mlsd",
+                         "Openpose", "Segformer", "Birefnet", "StyleGAN3", "Dinov2", "Dinov3",
+                         "VisionModel"];
+        for (const name of classes) {
+            if (typeof V[name] !== "function") return name + " constructor missing";
+            const r = throwsWith(() => V[name](),
+                                 (e) => String(e.message).includes("is not a constructor") ||
+                                        String(e).includes("TypeError"));
+            if (r) return name + "(): " + r;
+        }
+        return "OK";
+    )JS"));
 
-    for (const auto& name : loaders) {
-        auto fn = ev::getProperty(vision, name.c_str());
-        assert(ev::isObject(fn));
+    runJs("nms over box objects", block(R"JS(
+        const boxes = [
+            { x1: 10, y1: 10, x2: 50, y2: 50, score: 0.9, classId: 0 },
+            { x1: 12, y1: 12, x2: 48, y2: 48, score: 0.8, classId: 0 },
+            { x1: 100, y1: 100, x2: 150, y2: 150, score: 0.7, classId: 1 },
+        ];
+        const kept = V.nms(boxes, { iouThreshold: 0.5 });
+        if (kept.length !== 2) return "kept " + kept.length;
+        if (kept[0].x1 !== 10 || kept[1].x1 !== 100) return "kept the wrong boxes";
+        return "OK";
+    )JS"));
 
-        // Calling with no args must throw TypeError mentioning 'path'
-        auto badCall = ev::call(fn, vision, {});
-        assert(badCall.thrown);
-        std::string err = ev::toUtf8(badCall.value);
-        assert(err.find("path") != std::string::npos);
+    runJs("nms over flat / typed / array-of-array inputs", block(R"JS(
+        const flat = new Float32Array([
+            10, 10, 50, 50, 0.9, 0,
+            12, 12, 48, 48, 0.8, 0,
+            100, 100, 150, 150, 0.7, 1,
+        ]);
+        const keptFlat = V.nms(flat, { iouThreshold: 0.5 });
+        if (keptFlat.length !== 2) return "flat kept " + keptFlat.length;
+        if (keptFlat[0].index !== 0 || keptFlat[1].index !== 2) return "flat indices";
+        const indices = V.nms(flat, { iouThreshold: 0.5, returnIndices: true });
+        if (!Array.isArray(indices) || indices.length !== 2 || indices[0] !== 0 || indices[1] !== 2) return "returnIndices";
+        const typedIdx = V.nms(flat, { iouThreshold: 0.5, returnIndices: true, asTypedArray: true });
+        if (!(typedIdx instanceof Int32Array) || typedIdx.length !== 2 || typedIdx[1] !== 2) return "typed returnIndices";
+        const keptTyped = V.nms(flat, { iouThreshold: 0.5, asTypedArray: true });
+        if (!(keptTyped instanceof Float32Array) || keptTyped.length !== 12) return "asTypedArray";
+        const views = [
+            new Float32Array([10, 10, 50, 50, 0.9, 0]),
+            new Float32Array([12, 12, 48, 48, 0.8, 0]),
+            new Float32Array([100, 100, 150, 150, 0.7, 1]),
+        ];
+        if (V.nms(views, { iouThreshold: 0.5 }).length !== 2) return "typed views";
+        const arrays = [[10, 10, 50, 50, 0.9, 0], [12, 12, 48, 48, 0.8, 0], [100, 100, 150, 150, 0.7, 1]];
+        const keptArr = V.nms(arrays, { iouThreshold: 0.5 });
+        if (keptArr.length !== 2 || keptArr[1].x2 !== 150) return "array of arrays";
+        const wrapped = V.nms({ boxes: flat }, { iouThreshold: 0.5 });
+        if (wrapped.length !== 2) return "{ boxes } wrapper";
+        const r = throwsWith(() => V.nms(flat, { stride: -1 }), (e) => e instanceof RangeError);
+        if (r) return "negative stride: " + r;
+        return "OK";
+    )JS"));
 
-        // Calling with nonexistent dir must throw runtime Error (not TypeError) with loader name
-        ev::Persistent bogusArg(ev::fromUtf8("tests/vision/__no_such_dir__"));
-        const ev::Value callArgs[1] = {bogusArg.get()};
-        auto missingCall = ev::call(fn, vision, std::span<const ev::Value>(callArgs, 1));
-        assert(missingCall.thrown);
-        std::string missErr = ev::toUtf8(missingCall.value);
-        assert(missErr.find(name) != std::string::npos);
-    }
-    std::cout << "  All loaders validated successfully (TypeError on empty, runtime Error on nonexistent path)" << std::endl;
+    runJs("decodeBoxes", block(R"JS(
+        const preds = new Float32Array([100, 100, 40, 40, 0.1, 0.85]);
+        const boxes = V.decodeBoxes(preds, { numClasses: 2, confThreshold: 0.5 });
+        if (boxes.length !== 1 || boxes[0].x1 !== 80 || boxes[0].classId !== 1) return "decode: " + JSON.stringify(boxes);
+        const r = throwsWith(() => V.decodeBoxes(preds, { numClasses: 0 }), (e) => e instanceof TypeError);
+        if (r) return "numClasses 0: " + r;
+        return "OK";
+    )JS"));
 
-    // Verify constructors exist on bro.vision
-    const std::vector<std::string> constructors = {
-        "DepthEstimator", "Sam", "NormalEstimator", "Hed", "Lineart",
-        "Mlsd", "Openpose", "Segformer", "Birefnet", "StyleGAN3",
-        "Dinov2", "Dinov3", "VisionModel"
-    };
+    runJs("rasterizeMask", block(R"JS(
+        const poly = [{ x: 10, y: 10 }, { x: 50, y: 10 }, { x: 50, y: 50 }, { x: 10, y: 50 }];
+        const mask = V.rasterizeMask(poly, { width: 64, height: 64 });
+        if (mask.width !== 64 || mask.height !== 64 || !(mask.data instanceof Uint8Array)) return "polygon result shape";
+        if (mask.data[30 * 64 + 30] !== 255 || mask.data[5 * 64 + 5] !== 0) return "polygon fill";
+        const logits = new Float32Array(4 * 4); logits[5] = 1;
+        const up = V.rasterizeMask(logits, { width: 4, height: 4, targetWidth: 8, targetHeight: 8 });
+        // Source pixel (1, 1) covers target rows/cols 3..4 at 2x.
+        if (up.data.length !== 64 || up.data[3 * 8 + 3] !== 255 || up.data[0] !== 0) return "logit upsample";
+        // A typed mask smaller than width*height is refused, not over-read.
+        let r = throwsWith(() => V.rasterizeMask(new Float32Array(4), { width: 64, height: 64 }),
+                           (e) => e instanceof RangeError);
+        if (r) return "undersized Float32Array: " + r;
+        r = throwsWith(() => V.rasterizeMask(new Uint8Array(10), { targetWidth: 32, targetHeight: 32 }),
+                       (e) => e instanceof RangeError);
+        if (r) return "undersized Uint8Array: " + r;
+        r = throwsWith(() => V.rasterizeMask(poly, { width: 1e9, height: 1e9 }), (e) => e instanceof RangeError);
+        if (r) return "huge size: " + r;
+        return "OK";
+    )JS"));
 
-    for (const auto& name : constructors) {
-        auto ctor = ev::getProperty(vision, name.c_str());
-        assert(ev::isObject(ctor));
+    runJs("colorMap", block(R"JS(
+        const depth = new Float32Array([0.1, 0.5, 0.9, 0.2]);
+        const colored = V.colorMap(depth, { width: 2, height: 2, map: "turbo" });
+        if (colored.width !== 2 || colored.height !== 2 || colored.data.length !== 16) return "shape";
+        const gray = V.colorMap(depth, { width: 2, height: 2, map: "grayscale", min: 0, max: 1 });
+        if (gray.data[8] !== 229 || gray.data[3] !== 255) return "grayscale " + Array.from(gray.data);
+        let r = throwsWith(() => V.colorMap(depth, { width: -2, height: 2 }), (e) => e instanceof RangeError);
+        if (r) return "negative width: " + r;
+        r = throwsWith(() => V.colorMap(depth, { width: 100000, height: 100000 }), (e) => e instanceof RangeError);
+        if (r) return "huge size: " + r;
+        return "OK";
+    )JS"));
 
-        // Calling constructor directly should throw TypeError
-        auto badCtor = ev::call(ctor, ev::undefined(), {});
-        assert(badCtor.thrown);
-        std::string ctorErr = ev::toUtf8(badCtor.value);
-        assert(ctorErr.find("is not a constructor") != std::string::npos ||
-               ctorErr.find("TypeError") != std::string::npos);
-    }
-    std::cout << "  All host class constructors verified" << std::endl;
-
-    // ── Test Vision Ops: decodeBoxes, NMS, rasterizeMask, colorMap ─────────
-    auto ops = ev::getProperty(vision, "ops");
-    assert(ev::isObject(ops));
-
-    // 1. NMS
-    auto nmsFn = ev::getProperty(vision, "nms");
-    assert(ev::isObject(nmsFn));
-
-    // Test NMS through Bronze eval
-    auto evalRes = bronze::eval::evalScript(
-        "(() => {"
-        "  const boxes = ["
-        "    { x1: 10, y1: 10, x2: 50, y2: 50, score: 0.9, classId: 0 },"
-        "    { x1: 12, y1: 12, x2: 48, y2: 48, score: 0.8, classId: 0 }," // highly overlapping -> should suppress
-        "    { x1: 100, y1: 100, x2: 150, y2: 150, score: 0.7, classId: 1 }" // far away -> should keep
-        "  ];"
-        "  const kept = bro.vision.nms(boxes, { iouThreshold: 0.5 });"
-        "  return kept.length;"
-        "})()"
-    );
-    assert(!evalRes.thrown);
-    assert(ev::toDouble(evalRes.value) == 2.0);
-    std::cout << "  bro.vision.nms correctly suppressed overlapping box (kept 2)" << std::endl;
-
-    // Test NMS with flat Float32Array and returnIndices / asTypedArray options
-    auto nmsOptRes = bronze::eval::evalScript(
-        "(() => {"
-        "  const flat = new Float32Array(["
-        "    10, 10, 50, 50, 0.9, 0,"
-        "    12, 12, 48, 48, 0.8, 0,"
-        "    100, 100, 150, 150, 0.7, 1"
-        "  ]);"
-        "  const keptFlat = bro.vision.nms(flat, { iouThreshold: 0.5 });"
-        "  if (keptFlat.length !== 2) return 1;"
-        "  if (keptFlat[0].index !== 0 || keptFlat[1].index !== 2) return 2;"
-        "  const indices = bro.vision.nms(flat, { iouThreshold: 0.5, returnIndices: true });"
-        "  if (!Array.isArray(indices) || indices.length !== 2) return 3;"
-        "  if (indices[0] !== 0 || indices[1] !== 2) return 4;"
-        "  const typedIndices = bro.vision.nms(flat, { iouThreshold: 0.5, returnIndices: true, asTypedArray: true });"
-        "  if (!(typedIndices instanceof Int32Array) || typedIndices.length !== 2) return 7;"
-        "  if (typedIndices[0] !== 0 || typedIndices[1] !== 2) return 8;"
-        "  const keptTyped = bro.vision.nms(flat, { iouThreshold: 0.5, asTypedArray: true });"
-        "  if (!(keptTyped instanceof Float32Array) || keptTyped.length !== 12) return 5;"
-        "  const views = ["
-        "    new Float32Array([10, 10, 50, 50, 0.9, 0]),"
-        "    new Float32Array([12, 12, 48, 48, 0.8, 0]),"
-        "    new Float32Array([100, 100, 150, 150, 0.7, 1])"
-        "  ];"
-        "  const keptViews = bro.vision.nms(views, { iouThreshold: 0.5 });"
-        "  if (keptViews.length !== 2) return 6;"
-        "  return 0;"
-        "})()"
-    );
-    if (nmsOptRes.thrown) {
-        std::cerr << "nmsOptRes thrown: " << ev::toUtf8(nmsOptRes.value) << std::endl;
-    }
-    assert(!nmsOptRes.thrown);
-    assert(ev::toDouble(nmsOptRes.value) == 0.0);
-    std::cout << "  bro.vision.nms flat Float32Array and typed views passed" << std::endl;
-
-    // 2. decodeBoxes
-    auto decodeRes = bronze::eval::evalScript(
-        "(() => {\n"
-        "  const preds = new Float32Array([100, 100, 40, 40, 0.1, 0.85]);\n"
-        "  const boxes = bro.vision.decodeBoxes(preds, { numClasses: 2, confThreshold: 0.5 });\n"
-        "  return { len: boxes.length, x1: boxes[0].x1, classId: boxes[0].classId };\n"
-        "})()"
-    );
-    if (decodeRes.thrown) {
-        std::cerr << "decodeRes thrown: " << ev::toUtf8(decodeRes.value) << std::endl;
-    }
-    assert(!decodeRes.thrown);
-    assert(ev::isObject(decodeRes.value));
-    auto decLen = ev::getProperty(decodeRes.value, "len");
-    auto decX1 = ev::getProperty(decodeRes.value, "x1");
-    auto decClass = ev::getProperty(decodeRes.value, "classId");
-    assert(ev::toDouble(decLen) == 1.0);
-    assert(ev::toDouble(decX1) == 80.0); // 100 - 40/2 = 80
-    assert(ev::toDouble(decClass) == 1.0);
-    std::cout << "  bro.vision.decodeBoxes decoded YOLO format correctly" << std::endl;
-
-    // 3. rasterizeMask
-    auto maskRes = bronze::eval::evalScript(
-        "(() => {"
-        "  const poly = [{x: 10, y: 10}, {x: 50, y: 10}, {x: 50, y: 50}, {x: 10, y: 50}];"
-        "  const mask = bro.vision.rasterizeMask(poly, { width: 64, height: 64 });"
-        "  return { w: mask.width, h: mask.height, hasData: mask.data instanceof Uint8Array };"
-        "})()"
-    );
-    assert(!maskRes.thrown);
-    assert(ev::isObject(maskRes.value));
-    assert(ev::toDouble(ev::getProperty(maskRes.value, "w")) == 64.0);
-    assert(ev::toDouble(ev::getProperty(maskRes.value, "h")) == 64.0);
-    assert(ev::toBool(ev::getProperty(maskRes.value, "hasData")) == true);
-    std::cout << "  bro.vision.rasterizeMask generated binary mask" << std::endl;
-
-    // 4. colorMap
-    auto colorRes = bronze::eval::evalScript(
-        "(() => {"
-        "  const depth = new Float32Array([0.1, 0.5, 0.9, 0.2]);"
-        "  const colored = bro.vision.colorMap(depth, { width: 2, height: 2, map: 'turbo' });"
-        "  return { w: colored.width, h: colored.height, len: colored.data.length };"
-        "})()"
-    );
-    assert(!colorRes.thrown);
-    assert(ev::isObject(colorRes.value));
-    assert(ev::toDouble(ev::getProperty(colorRes.value, "w")) == 2.0);
-    assert(ev::toDouble(ev::getProperty(colorRes.value, "len")) == 16.0); // 2 * 2 * 4 bytes RGBA
-    std::cout << "  bro.vision.colorMap colored depth map to RGBA" << std::endl;
-
-    // 5. Check ops sub-namespace equivalence
-    auto opsCheck = bronze::eval::evalScript(
-        "typeof bro.vision.ops.nms === 'function' && "
-        "typeof bro.vision.ops.decodeBoxes === 'function' && "
-        "typeof bro.vision.ops.rasterizeMask === 'function' && "
-        "typeof bro.vision.ops.colorMap === 'function'"
-    );
-    assert(!opsCheck.thrown);
-    assert(ev::toBool(opsCheck.value) == true);
-    std::cout << "  bro.vision.ops sub-namespace fully populated" << std::endl;
+    runJs("ops sub-namespace", block(R"JS(
+        for (const n of ["nms", "decodeBoxes", "rasterizeMask", "colorMap", "colorizeDepth", "colorizeSegmentation"]) {
+            if (typeof V.ops[n] !== "function") return "ops." + n + " missing";
+        }
+        return "OK";
+    )JS"));
 
     brovisionmlTestRestoredSurface();
     brovisionmlTestPathResolver();
 
-    std::cout << "All brovisionml_api standalone tests passed successfully!" << std::endl;
+    if (g_failures > 0) {
+        std::printf("FAILED: %d check(s) failed\n", g_failures);
+        return 1;
+    }
+    std::printf("All brovisionml_api standalone tests passed successfully!\n");
     return 0;
 }

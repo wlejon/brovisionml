@@ -216,9 +216,21 @@ if(BROVISIONML_ENABLE_API)
         message(STATUS "brovisionml: brovisionml_test_api not registered (brass has no code generator for this target)")
     else()
         add_test(NAME brovisionml_test_api COMMAND brovisionml_test_api)
+        # The same run with a collection at every allocation and freed space
+        # poisoned: a binding that holds a raw Value (or a typed-array pointer)
+        # across an allocating call reads garbage here instead of passing by
+        # luck. `ctest -LE gcstress` skips it.
+        add_test(NAME brovisionml_test_api_gcstress COMMAND brovisionml_test_api)
         if(WIN32)
             set_tests_properties(brovisionml_test_api PROPERTIES
                 ENVIRONMENT "PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:brovisionml_test_api>;$ENV{PATH}")
+            set_tests_properties(brovisionml_test_api_gcstress PROPERTIES
+                ENVIRONMENT "BRONZE_GC_STRESS=1;BRONZE_GC_POISON=1;PATH=$<TARGET_FILE_DIR:bronze_runtime_shared>;$<TARGET_FILE_DIR:brovisionml_test_api>;$ENV{PATH}"
+                LABELS gcstress)
+        else()
+            set_tests_properties(brovisionml_test_api_gcstress PROPERTIES
+                ENVIRONMENT "BRONZE_GC_STRESS=1;BRONZE_GC_POISON=1"
+                LABELS gcstress)
         endif()
     endif()
 endif()

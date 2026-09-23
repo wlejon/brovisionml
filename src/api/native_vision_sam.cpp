@@ -29,9 +29,12 @@ SamWrapper* samSelf(Value thisVal) {
 
 // [[x, y], ...] or [{x, y, label?}, ...]. The object form also carries the
 // per-point label, which the bronze port read but the array form did not.
+// Every reader below roots its argument before the first allocating call
+// (isJsArray reads `length`), and each element before its second read.
 void readPointsAndLabels(Value v, std::vector<std::array<float, 2>>& points,
                          std::vector<int>& inlineLabels) {
-    if (auto tinfo = ev::typedArrayInfo(v)) {
+    ev::Persistent arr(v);
+    if (auto tinfo = ev::typedArrayInfo(arr.get())) {
         if (tinfo.elementKind == ev::elements::Float32 && tinfo.data) {
             const float* p = reinterpret_cast<const float*>(tinfo.data);
             const size_t n = tinfo.elementCount / 2;
@@ -44,44 +47,43 @@ void readPointsAndLabels(Value v, std::vector<std::array<float, 2>>& points,
             return;
         }
     }
-    if (!isJsArray(v)) return;
-    ev::Persistent arr(v);
+    if (!isJsArray(arr.get())) return;
     const uint32_t n = getJsArrayLength(arr.get());
-    points.reserve(points.size() + n);
-    inlineLabels.reserve(inlineLabels.size() + n);
+    points.reserve(points.size() + std::min<uint32_t>(n, 1u << 16));
+    inlineLabels.reserve(inlineLabels.size() + std::min<uint32_t>(n, 1u << 16));
     for (uint32_t i = 0; i < n; ++i) {
-        Value e = ev::getElement(arr.get(), i);
-        if (!ev::isObject(e)) continue;
-        if (isJsArray(e)) {
-            float x = static_cast<float>(ev::toDouble(ev::getElement(e, 0)));
-            float y = static_cast<float>(ev::toDouble(ev::getElement(e, 1)));
+        ev::Persistent e(ev::getElement(arr.get(), i));
+        if (!ev::isObject(e.get())) continue;
+        if (isJsArray(e.get())) {
+            const float x = numElem(e.get(), 0);
+            const float y = numElem(e.get(), 1);
             points.push_back({x, y});
             inlineLabels.push_back(1);
         } else {
-            float x = static_cast<float>(ev::toDouble(ev::getProperty(e, "x")));
-            float y = static_cast<float>(ev::toDouble(ev::getProperty(e, "y")));
-            Value lv = ev::getProperty(e, "label");
+            const float x = optFloat(e.get(), "x", 0.0f);
+            const float y = optFloat(e.get(), "y", 0.0f);
+            const int label = optInt(e.get(), "label", 1);
             points.push_back({x, y});
-            inlineLabels.push_back(ev::isNumber(lv) ? static_cast<int>(ev::toDouble(lv)) : 1);
+            inlineLabels.push_back(label);
         }
     }
 }
 
 std::vector<int> readInts(Value v) {
     std::vector<int> out;
-    if (auto tinfo = ev::typedArrayInfo(v)) {
+    ev::Persistent arr(v);
+    if (auto tinfo = ev::typedArrayInfo(arr.get())) {
         if (tinfo.elementKind == ev::elements::Int32 && tinfo.data) {
             const int32_t* p = reinterpret_cast<const int32_t*>(tinfo.data);
             out.assign(p, p + tinfo.elementCount);
             return out;
         }
     }
-    if (!isJsArray(v)) return out;
-    ev::Persistent arr(v);
+    if (!isJsArray(arr.get())) return out;
     const uint32_t n = getJsArrayLength(arr.get());
-    out.reserve(n);
+    out.reserve(std::min<uint32_t>(n, 1u << 16));
     for (uint32_t i = 0; i < n; ++i) {
-        out.push_back(static_cast<int>(ev::toDouble(ev::getElement(arr.get(), i))));
+        out.push_back(static_cast<int>(numElem(arr.get(), i)));
     }
     return out;
 }
@@ -89,7 +91,8 @@ std::vector<int> readInts(Value v) {
 // [[x1, y1, x2, y2], ...] or [{x1, y1, x2, y2}, ...].
 std::vector<std::array<float, 4>> readBoxes(Value v) {
     std::vector<std::array<float, 4>> out;
-    if (auto tinfo = ev::typedArrayInfo(v)) {
+    ev::Persistent arr(v);
+    if (auto tinfo = ev::typedArrayInfo(arr.get())) {
         if (tinfo.elementKind == ev::elements::Float32 && tinfo.data) {
             const float* p = reinterpret_cast<const float*>(tinfo.data);
             const size_t n = tinfo.elementCount / 4;
@@ -100,23 +103,21 @@ std::vector<std::array<float, 4>> readBoxes(Value v) {
             return out;
         }
     }
-    if (!isJsArray(v)) return out;
-    ev::Persistent arr(v);
+    if (!isJsArray(arr.get())) return out;
     const uint32_t n = getJsArrayLength(arr.get());
-    out.reserve(n);
+    out.reserve(std::min<uint32_t>(n, 1u << 16));
     for (uint32_t i = 0; i < n; ++i) {
-        Value e = ev::getElement(arr.get(), i);
-        if (!ev::isObject(e)) continue;
+        ev::Persistent e(ev::getElement(arr.get(), i));
+        if (!ev::isObject(e.get())) continue;
         std::array<float, 4> b{};
-        if (isJsArray(e)) {
+        if (isJsArray(e.get())) {
             for (uint32_t k = 0; k < 4; ++k) {
-                b[k] = static_cast<float>(ev::toDouble(ev::getElement(e, k)));
+                b[k] = numElem(e.get(), k);
             }
         } else {
             static const char* kKeys[4] = {"x1", "y1", "x2", "y2"};
             for (int k = 0; k < 4; ++k) {
-                b[static_cast<size_t>(k)] =
-                    static_cast<float>(ev::toDouble(ev::getProperty(e, kKeys[k])));
+                b[static_cast<size_t>(k)] = optFloat(e.get(), kKeys[k], 0.0f);
             }
         }
         out.push_back(b);
@@ -221,21 +222,22 @@ static Value samSegmentEverythingDirect(SamWrapper* w, std::span<const Value> ar
 
     brovisionml::sam::AmgConfig cfg;
     if (args.size() > 1 && ev::isObject(args[1])) {
-        ev::Persistent o(args[1]);
-        Value v = ev::getProperty(o.get(), "pointsPerSide");
-        if (ev::isNumber(v)) cfg.points_per_side = static_cast<int>(ev::toDouble(v));
-        v = ev::getProperty(o.get(), "pointsPerBatch");
-        if (ev::isNumber(v)) cfg.points_per_batch = static_cast<int>(ev::toDouble(v));
-        v = ev::getProperty(o.get(), "predIouThresh");
-        if (ev::isNumber(v)) cfg.pred_iou_thresh = static_cast<float>(ev::toDouble(v));
-        v = ev::getProperty(o.get(), "stabilityThresh");
-        if (ev::isNumber(v)) cfg.stability_score_thresh = static_cast<float>(ev::toDouble(v));
-        v = ev::getProperty(o.get(), "boxNmsThresh");
-        if (ev::isNumber(v)) cfg.box_nms_thresh = static_cast<float>(ev::toDouble(v));
-        v = ev::getProperty(o.get(), "cropNLayers");
-        if (ev::isNumber(v)) cfg.crop_n_layers = static_cast<int>(ev::toDouble(v));
-        v = ev::getProperty(o.get(), "minMaskRegionArea");
-        if (ev::isNumber(v)) cfg.min_mask_region_area = static_cast<int>(ev::toDouble(v));
+        cfg.points_per_side = optInt(args[1], "pointsPerSide", cfg.points_per_side);
+        cfg.points_per_batch = optInt(args[1], "pointsPerBatch", cfg.points_per_batch);
+        cfg.pred_iou_thresh = optFloat(args[1], "predIouThresh", cfg.pred_iou_thresh);
+        cfg.stability_score_thresh = optFloat(args[1], "stabilityThresh", cfg.stability_score_thresh);
+        cfg.box_nms_thresh = optFloat(args[1], "boxNmsThresh", cfg.box_nms_thresh);
+        cfg.crop_n_layers = optInt(args[1], "cropNLayers", cfg.crop_n_layers);
+        cfg.min_mask_region_area = optInt(args[1], "minMaskRegionArea", cfg.min_mask_region_area);
+    }
+    // The grid is pointsPerSide^2 prompts per crop and there are up to
+    // 4^cropNLayers crops per layer: bound both before the generator sizes
+    // anything from them.
+    if (cfg.points_per_side < 1 || cfg.points_per_side > 256 || cfg.points_per_batch < 1 ||
+        cfg.crop_n_layers < 0 || cfg.crop_n_layers > 4 || cfg.min_mask_region_area < 0) {
+        return ev::throwRangeError(
+            "segmentEverything: pointsPerSide must be in [1, 256], pointsPerBatch >= 1, "
+            "cropNLayers in [0, 4] and minMaskRegionArea >= 0");
     }
 
     if (!(w->loaded && w->sam)) {
@@ -303,9 +305,17 @@ Value runSamSegment(SamWrapper* w, std::span<const Value> args) {
     std::string err;
     if (readImageInput(args[0], rgba, inW, inH, err)) {
         if (args.size() > 1 && ev::isObject(args[1])) {
-            Value pv = ev::getProperty(args[1], "points");
-            Value bv = ev::getProperty(args[1], "boxes");
-            if (isJsArray(pv) || isJsArray(bv)) {
+            // One read, one check, before the next read: isJsArray allocates.
+            bool hasPrompt = false;
+            {
+                ev::Persistent pv(ev::getProperty(args[1], "points"));
+                hasPrompt = isJsArray(pv.get());
+            }
+            if (!hasPrompt) {
+                ev::Persistent bv(ev::getProperty(args[1], "boxes"));
+                hasPrompt = isJsArray(bv.get());
+            }
+            if (hasPrompt) {
                 try {
                     brotensor::DeviceScope scope(w->device);
                     w->sam->set_image(rgba.data(), inW, inH, 4);
