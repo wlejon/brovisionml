@@ -375,12 +375,13 @@ static Value loadVisionDetector(const char* name, const HostClass& hostCls, std:
     w->device = dev;
     try {
         w->detector = std::make_unique<NetT>();
-        w->detector->to(dev);
+        // Weights load on the host first; to() moves loaded weights.
         if (std::filesystem::is_regular_file(path)) {
             w->detector->load_file(path);
         } else {
             w->detector->load(path);
         }
+        w->detector->to(dev);
         w->loaded = true;
     } catch (const std::exception& e) {
         return ev::throwError(std::string(name) + " failed: " + e.what());
@@ -431,12 +432,12 @@ Value makeVisionNamespace() {
                 dw->device = w->device;
                 dw->estimator = std::make_unique<brovisionml::depth::DepthEstimator>(
                     brovisionml::depth::DepthAnythingConfig::v2_small());
-                dw->estimator->to(w->device);
                 if (std::filesystem::is_regular_file(path)) {
                     dw->estimator->load_file(path);
                 } else {
                     dw->estimator->load(path);
                 }
+                dw->estimator->to(w->device);
                 dw->loaded = true;
                 w->depthEstimator = std::move(dw);
                 w->task = VisionTaskType::Depth;
@@ -446,12 +447,12 @@ Value makeVisionNamespace() {
                 sw->path = path;
                 sw->device = w->device;
                 sw->sam = std::make_unique<brovisionml::sam::Sam>(brovisionml::sam::SamConfig::vit_b());
-                sw->sam->to(w->device);
                 if (std::filesystem::is_regular_file(path)) {
                     sw->sam->load_file(path);
                 } else {
                     sw->sam->load(path);
                 }
+                sw->sam->to(w->device);
                 sw->loaded = true;
                 w->sam = std::move(sw);
                 w->task = VisionTaskType::Sam;
@@ -461,12 +462,12 @@ Value makeVisionNamespace() {
                 nw->path = path;
                 nw->device = w->device;
                 nw->estimator = std::make_unique<brovisionml::dsine::NormalEstimator>();
-                nw->estimator->to(w->device);
                 if (std::filesystem::is_regular_file(path)) {
                     nw->estimator->load_file(path);
                 } else {
                     nw->estimator->load(path);
                 }
+                nw->estimator->to(w->device);
                 nw->loaded = true;
                 w->normalEstimator = std::move(nw);
                 w->task = VisionTaskType::Normal;
@@ -476,12 +477,12 @@ Value makeVisionNamespace() {
                 hw->path = path;
                 hw->device = w->device;
                 hw->detector = std::make_unique<brovisionml::hed::SoftEdgeDetector>();
-                hw->detector->to(w->device);
                 if (std::filesystem::is_regular_file(path)) {
                     hw->detector->load_file(path);
                 } else {
                     hw->detector->load(path);
                 }
+                hw->detector->to(w->device);
                 hw->loaded = true;
                 w->hed = std::move(hw);
                 w->task = VisionTaskType::Edge;
@@ -491,12 +492,12 @@ Value makeVisionNamespace() {
                 lw->path = path;
                 lw->device = w->device;
                 lw->detector = std::make_unique<brovisionml::lineart::LineartDetector>();
-                lw->detector->to(w->device);
                 if (std::filesystem::is_regular_file(path)) {
                     lw->detector->load_file(path);
                 } else {
                     lw->detector->load(path);
                 }
+                lw->detector->to(w->device);
                 lw->loaded = true;
                 w->lineart = std::move(lw);
                 w->task = VisionTaskType::Lineart;
@@ -506,12 +507,12 @@ Value makeVisionNamespace() {
                 mw->path = path;
                 mw->device = w->device;
                 mw->detector = std::make_unique<brovisionml::mlsd::MLSDdetector>();
-                mw->detector->to(w->device);
                 if (std::filesystem::is_regular_file(path)) {
                     mw->detector->load_file(path);
                 } else {
                     mw->detector->load(path);
                 }
+                mw->detector->to(w->device);
                 mw->loaded = true;
                 w->mlsd = std::move(mw);
                 w->task = VisionTaskType::Mlsd;
@@ -521,12 +522,12 @@ Value makeVisionNamespace() {
                 ow->path = path;
                 ow->device = w->device;
                 ow->detector = std::make_unique<brovisionml::openpose::OpenposeDetector>();
-                ow->detector->to(w->device);
                 if (std::filesystem::is_regular_file(path)) {
                     ow->detector->load_file(path);
                 } else {
                     ow->detector->load(path);
                 }
+                ow->detector->to(w->device);
                 ow->loaded = true;
                 w->openpose = std::move(ow);
                 w->task = VisionTaskType::Pose;
@@ -536,12 +537,12 @@ Value makeVisionNamespace() {
                 sfw->path = path;
                 sfw->device = w->device;
                 sfw->detector = std::make_unique<brovisionml::segformer::SegformerDetector>();
-                sfw->detector->to(w->device);
                 if (std::filesystem::is_regular_file(path)) {
                     sfw->detector->load_file(path);
                 } else {
                     sfw->detector->load(path);
                 }
+                sfw->detector->to(w->device);
                 sfw->loaded = true;
                 w->segformer = std::move(sfw);
                 w->task = VisionTaskType::Segformer;
@@ -580,12 +581,12 @@ Value makeVisionNamespace() {
         try {
             w->estimator = std::make_unique<brovisionml::depth::DepthEstimator>(
                 brovisionml::depth::DepthAnythingConfig::v2_small());
-            w->estimator->to(dev);
             if (std::filesystem::is_regular_file(path)) {
                 w->estimator->load_file(path);
             } else {
                 w->estimator->load(path);
             }
+            w->estimator->to(dev);
             w->loaded = true;
         } catch (const std::exception& e) {
             return ev::throwError(std::string("loadDepth failed: ") + e.what());
@@ -605,12 +606,12 @@ Value makeVisionNamespace() {
         w->device = dev;
         try {
             w->sam = std::make_unique<brovisionml::sam::Sam>(brovisionml::sam::SamConfig::vit_b());
-            w->sam->to(dev);
             if (std::filesystem::is_regular_file(path)) {
                 w->sam->load_file(path);
             } else {
                 w->sam->load(path);
             }
+            w->sam->to(dev);
             w->loaded = true;
         } catch (const std::exception& e) {
             return ev::throwError(std::string("loadSam failed: ") + e.what());
@@ -630,12 +631,12 @@ Value makeVisionNamespace() {
         w->device = dev;
         try {
             w->estimator = std::make_unique<brovisionml::dsine::NormalEstimator>();
-            w->estimator->to(dev);
             if (std::filesystem::is_regular_file(path)) {
                 w->estimator->load_file(path);
             } else {
                 w->estimator->load(path);
             }
+            w->estimator->to(dev);
             w->loaded = true;
         } catch (const std::exception& e) {
             return ev::throwError(std::string("loadNormal failed: ") + e.what());
