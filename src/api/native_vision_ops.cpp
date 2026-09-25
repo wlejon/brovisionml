@@ -45,7 +45,12 @@ bool resolveDevice(const char* fnName, Value opts, brotensor::Device& dev, Value
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     brotensor::Device want = brotensor::Device::CPU;
-    if (s == "cuda" || s == "gpu") {
+    if (s == "gpu") {
+        // The best GPU, whichever backend it is — not CUDA by name, which a
+        // Metal machine does not have.
+        want = brotensor::is_available(brotensor::Device::CUDA) ? brotensor::Device::CUDA
+                                                                : brotensor::Device::Metal;
+    } else if (s == "cuda") {
         want = brotensor::Device::CUDA;
     } else if (s == "metal") {
         want = brotensor::Device::Metal;
