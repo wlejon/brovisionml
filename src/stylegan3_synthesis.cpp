@@ -657,14 +657,15 @@ void SynthesisLayer::backward(const Tensor& w, const Tensor& x, const Cache& cac
     if (input_gain_ != 1.0f) brotensor::scale_inplace(d_yconv, input_gain_);
 
     // 3. Through the modulated conv → dx (to prev layer) and ds (style grad).
-    //    Weights are frozen: dW goes to a scratch buffer the op accumulates into.
+    //    Weights are frozen: an uncommitted dW tells the op to skip the weight
+    //    gradient (its accumulate pass and a weight-sized zeroed scratch).
     const int pad = conv_kernel_ - 1;
     Tensor ds;
-    Tensor dW_scratch = Tensor::zeros_on(weight.device, weight.rows, weight.cols);
+    Tensor dW_skip;
     brotensor::modulated_conv2d_backward(
         x, weight, cache.styles, cache.dcoef, d_yconv, /*N=*/1, in_channels_,
         in_size_, in_size_, out_channels_, conv_kernel_, conv_kernel_, pad, pad,
-        /*demodulate=*/!is_torgb_, /*eps=*/1e-8f, dx, dW_scratch, ds);
+        /*demodulate=*/!is_torgb_, /*eps=*/1e-8f, dx, dW_skip, ds);
 
     // 4. Undo the ToRGB style gain.
     if (is_torgb_) {

@@ -13,7 +13,7 @@
 //
 // Both gates are gated on the converted checkpoint
 // (weights/stylegan3-r-ffhqu-256/model.safetensors) and skip cleanly when it is
-// absent. Each runs on CUDA when available, else CPU.
+// absent. Each runs on the GPU when available (CUDA, else Metal), else CPU.
 
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -313,10 +313,12 @@ int main() {
     try {
         brotensor::init();
 
-        const brotensor::Device dev = brotensor::is_available(brotensor::Device::CUDA)
-                                          ? brotensor::Device::CUDA
-                                          : brotensor::Device::CPU;
-        const char* tag = dev == brotensor::Device::CUDA ? "cuda" : "cpu";
+        const brotensor::Device dev =
+            brotensor::is_available(brotensor::Device::CUDA)  ? brotensor::Device::CUDA
+          : brotensor::is_available(brotensor::Device::Metal) ? brotensor::Device::Metal
+                                                              : brotensor::Device::CPU;
+        const char* tag = dev == brotensor::Device::CUDA  ? "cuda"
+                        : dev == brotensor::Device::Metal ? "metal" : "cpu";
         // The gradient checks below verify the analytic FP32 backward against
         // finite differences of the forward — so the forward used as the FD
         // reference must also be FP32. Disable the FP16 synthesis fast path here
