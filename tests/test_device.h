@@ -15,6 +15,7 @@
 namespace brovisionml_test {
 
 inline brotensor::Device preferred_gpu() {
+    if (brotensor::is_available(brotensor::Device::HIP))   return brotensor::Device::HIP;
     if (brotensor::is_available(brotensor::Device::CUDA))  return brotensor::Device::CUDA;
     if (brotensor::is_available(brotensor::Device::Metal)) return brotensor::Device::Metal;
     return brotensor::Device::CPU;
@@ -22,6 +23,7 @@ inline brotensor::Device preferred_gpu() {
 
 inline const char* device_name(brotensor::Device d) {
     switch (d.type) {
+        case brotensor::DeviceType::HIP:   return "HIP";
         case brotensor::DeviceType::CUDA:  return "CUDA";
         case brotensor::DeviceType::Metal: return "Metal";
         default:                           return "CPU";
