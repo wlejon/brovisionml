@@ -1,9 +1,9 @@
 #pragma once
 
-// Internal: CUDA launch wrappers for the DSINE NRN device ops. Defined in
-// dsine_ops.cu (compiled only with BROTENSOR_WITH_CUDA); declared here so the
-// device dispatch in dsine_ops.cpp can call them. Inputs/outputs are CUDA-
-// resident FP32 brotensor tensors; kernels launch on the default stream — the
+// Internal: CUDA/HIP launch wrappers for the DSINE NRN device ops. Defined in
+// dsine_ops.cu (compiled with BROTENSOR_WITH_CUDA or BROTENSOR_WITH_HIP); declared
+// here so the device dispatch in dsine_ops.cpp can call them. Inputs/outputs are
+// GPU-resident FP32 brotensor tensors; kernels launch on the default stream — the
 // same stream brotensor's own ops use — so no cross-stream sync is needed.
 
 #include "brotensor/tensor.h"

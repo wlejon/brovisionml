@@ -25,6 +25,7 @@ endif()
 # if(NOT TARGET ...) guards below reuse it, backend and all.
 option(BROTENSOR_WITH_CUDA  "Build the CUDA GPU backend"  OFF)
 option(BROTENSOR_WITH_METAL "Build the Metal GPU backend" OFF)
+option(BROTENSOR_WITH_HIP   "Build the HIP GPU backend"   OFF)
 
 # Unlike the rest of the stack (which composes brotensor ops), brovisionml ships
 # a small number of its own CUDA kernels for DSINE's surface-normal *domain* math
@@ -43,6 +44,16 @@ if(BROTENSOR_WITH_CUDA)
     if(MSVC AND DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
         set(CMAKE_CUDA_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
     endif()
+endif()
+
+if(BROTENSOR_WITH_HIP)
+    if(NOT CMAKE_HIP_ARCHITECTURES)
+        set(CMAKE_HIP_ARCHITECTURES "gfx1151")
+    endif()
+    enable_language(HIP)
+    set(CMAKE_HIP_STANDARD 20)
+    set(CMAKE_HIP_STANDARD_REQUIRED ON)
+    find_package(hip REQUIRED)
 endif()
 
 # The Metal twin of the DSINE kernels (src/dsine_ops.mm) is Objective-C++. Enable
@@ -216,6 +227,18 @@ if(BROTENSOR_WITH_CUDA)
         CUDA_STANDARD 17
         CUDA_STANDARD_REQUIRED ON
         CUDA_SEPARABLE_COMPILATION OFF)
+endif()
+
+if(BROTENSOR_WITH_HIP)
+    target_sources(brovisionml PRIVATE src/dsine_ops.cu)
+    set_source_files_properties(src/dsine_ops.cu PROPERTIES LANGUAGE HIP)
+    target_include_directories(brovisionml PRIVATE
+        ${BROTENSOR_DIR}/src/hip/compat
+        ${BROTENSOR_DIR}/src/hip/detail
+        /opt/rocm/include
+    )
+    target_compile_definitions(brovisionml PRIVATE BROVISIONML_WITH_HIP=1)
+    target_link_libraries(brovisionml PUBLIC hip::host)
 endif()
 
 # brovisionml's Metal twin of the same DSINE kernels. Compiled into the library

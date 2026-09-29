@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <string>
 
-#if defined(BROVISIONML_WITH_CUDA)
+#if defined(BROVISIONML_WITH_CUDA) || defined(BROVISIONML_WITH_HIP) || defined(BROTENSOR_HAS_CUDA) || defined(BROTENSOR_HAS_HIP)
 #include "dsine_ops_cuda.h"
 #endif
 #if defined(BROVISIONML_WITH_METAL)
@@ -186,7 +186,7 @@ void ray_relu(brotensor::Tensor& normal, const brotensor::Tensor& ray,
         ray_relu_cpu(normal, ray, H, W);
         return;
     }
-#if defined(BROVISIONML_WITH_CUDA)
+#if defined(BROVISIONML_WITH_CUDA) || defined(BROVISIONML_WITH_HIP) || defined(BROTENSOR_HAS_CUDA) || defined(BROTENSOR_HAS_HIP)
     detail::ray_relu_cuda(normal, ray, H, W);
 #elif defined(BROVISIONML_WITH_METAL)
     detail::ray_relu_metal(normal, ray, H, W);
@@ -210,7 +210,7 @@ void angmf_propagate(const brotensor::Tensor& pred_norm,
                             H, W, out);
         return;
     }
-#if defined(BROVISIONML_WITH_CUDA)
+#if defined(BROVISIONML_WITH_CUDA) || defined(BROVISIONML_WITH_HIP) || defined(BROTENSOR_HAS_CUDA) || defined(BROTENSOR_HAS_HIP)
     detail::angmf_propagate_cuda(pred_norm, prob, xy, angle, ray, fu, cu, fv, cv,
                                  H, W, out);
 #elif defined(BROVISIONML_WITH_METAL)
