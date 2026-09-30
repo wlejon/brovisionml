@@ -172,10 +172,20 @@ int main(int argc, char** argv) {
 
     brotensor::init();
     brotensor::Device dev = brotensor::Device::CPU;
-    if (!force_cpu && brotensor::is_available(brotensor::Device::CUDA))
-        dev = brotensor::Device::CUDA;
+    if (!force_cpu) {
+        if (brotensor::is_available(brotensor::Device::HIP))
+            dev = brotensor::Device::HIP;
+        else if (brotensor::is_available(brotensor::Device::CUDA))
+            dev = brotensor::Device::CUDA;
+        else if (brotensor::is_available(brotensor::Device::Metal))
+            dev = brotensor::Device::Metal;
+    }
+    const char* dev_str = "CPU";
+    if (dev == brotensor::Device::HIP) dev_str = "HIP";
+    else if (dev == brotensor::Device::CUDA) dev_str = "CUDA";
+    else if (dev == brotensor::Device::Metal) dev_str = "Metal";
     std::printf("%s | %dx%d | %s | warmup %d, reps %d\n", family.c_str(), w, h,
-                dev == brotensor::Device::CPU ? "CPU" : "CUDA", warmup, reps);
+                dev_str, warmup, reps);
 
     try {
         if (family == "sam" || family == "amg") {

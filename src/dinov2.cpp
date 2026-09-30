@@ -5,6 +5,7 @@
 #include "brotensor/runtime.h"
 #include "brotensor/safetensors.h"
 
+#include "profile.h"
 #include "weights_util.h"
 
 #include <algorithm>
@@ -288,6 +289,7 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
         else       brotensor::linear_forward_batched(Wt, bias, X, Y);
     };
 
+    detail::profile_mark(device_, fp16_ ? "dinov2_start (FP16)" : "dinov2_start (FP32)");
     // 1. Patch embed -> (1, D*gh*gw), then token-major (gh*gw, D).
     Tensor px = to16(pixels);
     Tensor feat;
@@ -295,9 +297,11 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
                               /*N=*/1, cfg_.in_chans, H, W,
                               /*C_out=*/D, p, p, /*stride=*/p, p,
                               /*pad=*/0, 0, /*dil=*/1, 1, feat);
+    detail::profile_mark(device_, "patch_conv2d");
     Tensor patch_seq;
     brotensor::nchw_to_sequence(feat, 1, D, gh, gw, patch_seq);
     Tensor patch_tokens = to32(patch_seq);
+    detail::profile_mark(device_, "patch_to_seq");
 
     // 2. Prepend cls token, add the (interpolated) position embedding. concat_rows
     //    yields a flat (K*D,1) buffer whose row-major bytes already ARE the
@@ -341,6 +345,7 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
     for (int i = 0; i < cfg_.depth; ++i) {
         const BlockWeights& b = w_->blocks[i];
 
+        if (i == 0) detail::profile_mark(device_, "block_0_start");
         // Attention: x = x + LS1·attn(LN1(x)).  LS1 is folded into Wo/bo.
         Tensor h;
         brotensor::layernorm_forward_inference_batched(x, b.ln1_w, b.ln1_b, h, eps);
@@ -351,21 +356,25 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
             linear16(b.q_w, b.q_b, hc, q);
             linear16(b.k_w, b.k_b, hc, k);
             linear16(b.v_w, b.v_b, hc, v);
+            if (i == 0) detail::profile_mark(device_, "block_0_qkv");
             Tensor ao;
             brotensor::flash_attention_varlen_forward(
                 q, k, v, static_cast<const int32_t*>(cu.data),
                 static_cast<const int32_t*>(cu.data),
                 /*batch_size=*/1, /*max_seqlen_q=*/K, /*max_seqlen_k=*/K,
                 cfg_.num_heads, hd, /*causal=*/false, ao);
+            if (i == 0) detail::profile_mark(device_, "block_0_flash_attn");
             Tensor o16;
             linear16(b.o_w, b.o_b, ao, o16);
             attn = to32(o16);
+            if (i == 0) detail::profile_mark(device_, "block_0_out_proj");
         } else {
             brotensor::mha_forward(h, b.q_w, b.k_w, b.v_w, b.o_w,
                                    &b.q_b, &b.k_b, &b.v_b, &b.o_b,
                                    /*d_mask=*/nullptr, cfg_.num_heads,
                                    Qh, Kh, Vh, Attnh, Yc, attn);
         }
+        if (i == 0) detail::profile_mark(device_, "block_0_attn");
         // MLP: x += attn, h2 = LN2(x) fused in-register pass without intermediate DRAM round-trip
         Tensor h2;
         brotensor::fused_residual_layernorm(x, attn, b.ln2_w, b.ln2_b, eps, h2);
@@ -378,6 +387,7 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
         linear16(b.fc2_w, b.fc2_b, act, m2);
         Tensor m2f = to32(m2);
         brotensor::add_inplace(x, m2f);
+        if (i == 0) detail::profile_mark(device_, "block_0_mlp");
 
         if (wants_stage(i + 1)) {
             Tensor fm;
