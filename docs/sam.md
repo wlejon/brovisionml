@@ -44,7 +44,7 @@ The `sam_segment` CLI tool is the same flow from the shell:
 ```bash
 sam_segment /path/to/sam-vit-huge photo.jpg --point 320,240 --out mask.png
 # flags: --point X,Y  --bg-point X,Y  --box X1,Y1,X2,Y2  (each repeatable)
-#        --variant vit_h|vit_l|vit_b  --single  --cuda
+#        --variant vit_h|vit_l|vit_b  --single  --device D (or --cuda)
 ```
 
 ## GPU path
@@ -110,5 +110,5 @@ mask:
 ```bash
 sam_amg /path/to/sam-vit-huge photo.jpg --points-per-side 32 --out everything.png
 # other flags: --pred-iou-thresh --stability-thresh --crop-n-layers
-#              --min-region-area --points-per-batch --variant --cuda
+#              --min-region-area --points-per-batch --variant --device
 ```

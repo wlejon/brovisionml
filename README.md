@@ -66,7 +66,7 @@ normalize presets). See [docs/architecture.md](docs/architecture.md).
 
 ```bash
 scripts/download-weights.sh sam-vit-huge       # fetch a checkpoint
-sam_segment weights/sam-vit-huge photo.jpg --point 320,240 --out mask.png --cuda
+sam_segment weights/sam-vit-huge photo.jpg --point 320,240 --out mask.png --device gpu
 ```
 
 The same flow in C++:
@@ -94,14 +94,20 @@ absent — a fresh clone builds and passes ctest with no downloads.
 
 ## GPU & performance
 
-Models load on CPU and migrate with `.to(Device::CUDA)`. On CUDA most
-forwards run FP16 where it's safe — full-FP16 WMMA trunks for the conv
-annotators, mixed-precision (FP16 GEMMs, FP32 residual streams) for the ViT
-backbones — engaged automatically by the backend's compute dtype.
+Models load on CPU and migrate with `.to(Device::CUDA)` (or `Device::HIP` /
+`Device::Metal`). On CUDA most forwards run FP16 where it's safe — full-FP16
+WMMA trunks for the conv annotators, mixed-precision (FP16 GEMMs, FP32 residual
+streams) for the ViT backbones — engaged automatically by the backend's compute dtype.
 `tools/bench` times every family; `BROVISIONML_PROFILE=1` prints per-stage
 timings. The per-model precision table, bench usage, profiler, and the
 overlapping-tile path for large images are in
 [docs/performance.md](docs/performance.md).
+
+Every CLI tool takes `--device cpu|cuda|hip|rocm|metal|gpu` (default `cpu`;
+`bench` defaults to `gpu`). `gpu` is the best backend the build registered
+(brotensor's default device: HIP, else CUDA, else Metal); the older `--cuda`
+flag is kept and means `--device gpu`. An unavailable backend falls back to
+the CPU with a note on stderr.
 
 Almost all GPU work happens inside brotensor ops; brovisionml ships exactly
 one CUDA source of its own (DSINE's two surface-normal domain ops — see

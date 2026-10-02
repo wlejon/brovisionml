@@ -54,7 +54,7 @@ The `segformer_seg` CLI tool writes the ADE20K-palette-colorized class map
 
 ```bash
 segformer_seg /path/to/segformer-b0-ade photo.jpg --out seg.png
-# flags: --cuda
+# flags: --device D (or --cuda)
 ```
 
 **Config-driven.** All dims (hidden sizes, heads, depths, sr ratios, patch

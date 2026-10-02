@@ -7,10 +7,14 @@
 //   normal_estimate <checkpoint-dir-or-file> <image> [options]
 //     --out PATH    output PNG path (default: normal.png)
 //     --fov DEG     assumed field-of-view for the synthesized intrinsics (60)
+//     --device D    cpu|cuda|hip|rocm|metal|gpu (default: cpu)
+//     --cuda        same as --device gpu: the best available GPU
 //
-// Built standalone only (BROVISIONML_TOOLS); not part of the test suite. CPU only.
+// Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
 
 #include "brovisionml/dsine.h"
+
+#include "tool_device.h"
 
 #include "broimage/decode.h"
 #include "broimage/encode.h"
@@ -31,7 +35,9 @@ using brovisionml::dsine::NormalMap;
     std::fprintf(stderr,
         "usage: %s <checkpoint-dir-or-file> <image> [options]\n"
         "  --out PATH    output PNG (default: normal.png)\n"
-        "  --fov DEG     assumed field-of-view for intrinsics (default: 60)\n", prog);
+        "  --fov DEG     assumed field-of-view for intrinsics (default: 60)\n"
+        "  --device D    cpu|cuda|hip|rocm|metal|gpu (default: cpu)\n"
+        "  --cuda        same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }
 
@@ -44,6 +50,7 @@ int main(int argc, char** argv) {
     const std::string image_path = argv[2];
     std::string out_path = "normal.png";
     float fov_deg = 60.0f;
+    brovisionml_tools::DeviceRequest device;
 
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
@@ -51,8 +58,10 @@ int main(int argc, char** argv) {
             if (i + 1 >= argc) usage(argv[0]);
             return argv[++i];
         };
-        if (a == "--out")      out_path = next();
-        else if (a == "--fov") fov_deg = static_cast<float>(std::atof(next()));
+        if (a == "--out")         out_path = next();
+        else if (a == "--fov")    fov_deg = static_cast<float>(std::atof(next()));
+        else if (a == "--cuda")   device.parse("gpu");
+        else if (a == "--device") { if (!device.parse(next())) usage(argv[0]); }
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); }
     }
 
@@ -70,6 +79,9 @@ int main(int argc, char** argv) {
         const bool is_file = ckpt.size() >= 12 &&
             ckpt.compare(ckpt.size() - 12, 12, ".safetensors") == 0;
         if (is_file) est.load_file(ckpt); else est.load(ckpt);
+
+        const brotensor::Device dev = device.resolve();
+        if (dev.is_gpu()) est.to(dev);
 
         std::printf("image: %dx%d, estimating surface normals...\n", im.width, im.height);
         NormalMap nm = est.estimate(im.pixels.data(), im.width, im.height, im.channels);

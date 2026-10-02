@@ -13,7 +13,8 @@
 //     --min-region-area N     remove regions/holes smaller than N px (default 0)
 //     --variant V             vit_h (default) | vit_l | vit_b
 //     --out PATH              output overlay PNG (default: amg.png)
-//     --cuda                  run on the CUDA backend if available
+//     --device D              cpu|cuda|hip|rocm|metal|gpu (default: cpu)
+//     --cuda                  same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
 
@@ -22,6 +23,9 @@
 #include "brovisionml/sam_amg.h"
 
 #include "brotensor/runtime.h"
+
+#include "tool_device.h"
+
 #include "broimage/decode.h"
 #include "broimage/encode.h"
 
@@ -49,7 +53,8 @@ using brovisionml::sam::SamConfig;
         "  --min-region-area N   drop regions/holes < N px (default 0)\n"
         "  --variant V           vit_h (default) | vit_l | vit_b\n"
         "  --out PATH            output overlay PNG (default: amg.png)\n"
-        "  --cuda                use the CUDA backend if available\n", prog);
+        "  --device D            cpu|cuda|hip|rocm|metal|gpu (default: cpu)\n"
+        "  --cuda                same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }
 
@@ -70,7 +75,7 @@ int main(int argc, char** argv) {
     const std::string image_path = argv[2];
     std::string variant = "vit_h";
     std::string out_path = "amg.png";
-    bool use_cuda = false;
+    brovisionml_tools::DeviceRequest device;
     AmgConfig amg;
 
     for (int i = 3; i < argc; ++i) {
@@ -87,7 +92,8 @@ int main(int argc, char** argv) {
         else if (a == "--min-region-area") amg.min_mask_region_area = std::atoi(next());
         else if (a == "--variant")        variant = next();
         else if (a == "--out")            out_path = next();
-        else if (a == "--cuda")           use_cuda = true;
+        else if (a == "--cuda")           device.parse("gpu");
+        else if (a == "--device")         { if (!device.parse(next())) usage(argv[0]); }
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); }
     }
 
@@ -108,15 +114,8 @@ int main(int argc, char** argv) {
             ckpt.compare(ckpt.size() - 12, 12, ".safetensors") == 0;
         if (is_file) sam.load_file(ckpt); else sam.load(ckpt);
 
-        if (use_cuda) {
-            brotensor::init();
-            if (brotensor::is_available(brotensor::Device::CUDA)) {
-                sam.to(brotensor::Device::CUDA);
-                std::printf("running on CUDA\n");
-            } else {
-                std::fprintf(stderr, "CUDA requested but unavailable; using CPU\n");
-            }
-        }
+        const brotensor::Device dev = device.resolve();
+        if (dev.is_gpu()) sam.to(dev);
 
         std::printf("image: %dx%d, generating masks (%d^2 grid)...\n",
                     im.width, im.height, amg.points_per_side);

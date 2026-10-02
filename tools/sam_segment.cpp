@@ -11,7 +11,8 @@
 //     --variant V          vit_h (default) | vit_l | vit_b
 //     --single             return the single best mask (default: multimask)
 //     --out PATH           output PNG path (default: mask.png)
-//     --cuda               run on the CUDA backend if available
+//     --device D           cpu|cuda|hip|rocm|metal|gpu (default: cpu)
+//     --cuda               same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
 
@@ -20,6 +21,9 @@
 #include "brovisionml/sam.h"
 
 #include "brotensor/runtime.h"
+
+#include "tool_device.h"
+
 #include "broimage/decode.h"
 #include "broimage/encode.h"
 
@@ -50,7 +54,8 @@ bool parse4(const char* s, float& a, float& b, float& c, float& d) {
         "  --variant V        vit_h (default) | vit_l | vit_b\n"
         "  --single           single best mask (default: multimask)\n"
         "  --out PATH         output PNG (default: mask.png)\n"
-        "  --cuda             use the CUDA backend if available\n", prog);
+        "  --device D         cpu|cuda|hip|rocm|metal|gpu (default: cpu)\n"
+        "  --cuda             same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }
 
@@ -64,7 +69,7 @@ int main(int argc, char** argv) {
     std::string variant = "vit_h";
     std::string out_path = "mask.png";
     bool multimask = true;
-    bool use_cuda = false;
+    brovisionml_tools::DeviceRequest device;
 
     std::vector<std::array<float, 2>> points;
     std::vector<int> labels;
@@ -92,7 +97,9 @@ int main(int argc, char** argv) {
         } else if (a == "--out") {
             out_path = next();
         } else if (a == "--cuda") {
-            use_cuda = true;
+            device.parse("gpu");
+        } else if (a == "--device") {
+            if (!device.parse(next())) usage(argv[0]);
         } else {
             std::fprintf(stderr, "unknown option: %s\n", a.c_str());
             usage(argv[0]);
@@ -122,15 +129,8 @@ int main(int argc, char** argv) {
             ckpt.compare(ckpt.size() - 12, 12, ".safetensors") == 0;
         if (is_file) sam.load_file(ckpt); else sam.load(ckpt);
 
-        if (use_cuda) {
-            brotensor::init();
-            if (brotensor::is_available(brotensor::Device::CUDA)) {
-                sam.to(brotensor::Device::CUDA);
-                std::printf("running on CUDA\n");
-            } else {
-                std::fprintf(stderr, "CUDA requested but unavailable; using CPU\n");
-            }
-        }
+        const brotensor::Device dev = device.resolve();
+        if (dev.is_gpu()) sam.to(dev);
 
         std::printf("image: %dx%d, encoding...\n", im.width, im.height);
         sam.set_image(im.pixels.data(), im.width, im.height, im.channels);

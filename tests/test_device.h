@@ -3,11 +3,12 @@
 // Test-only helper for GPU parity blocks. The model tests build a module on the
 // CPU, then re-run it on a GPU backend and assert the two agree. Historically
 // each test hard-coded Device::CUDA; this helper makes the same block exercise
-// whichever GPU backend the binary was built with — CUDA on a CUDA build, Metal
-// on a Metal build — so the one parity test covers both platforms.
+// whichever GPU backend the binary was built with — HIP on a ROCm build, CUDA on
+// a CUDA build, Metal on a Metal build — so the one parity test covers every
+// platform.
 //
-// Call brotensor::init() first (it performs the CUDA / Metal driver probe), then
-// preferred_gpu(): it returns the backend to test against, or Device::CPU when
+// Call brotensor::init() first (it performs the HIP / CUDA / Metal driver probe),
+// then preferred_gpu(): it returns the backend to test against, or Device::CPU when
 // no GPU backend is registered (meaning "skip the parity block").
 #include "brotensor/runtime.h"
 #include "brotensor/tensor.h"

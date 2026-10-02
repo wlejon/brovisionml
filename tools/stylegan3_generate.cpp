@@ -8,13 +8,17 @@
 //     --seed N       PRNG seed for z (default: 0)
 //     --trunc PSI    truncation psi (default: 1.0 = none)
 //     --out PATH     output PNG path (default: stylegan3.png)
-//     --cuda         run on the CUDA backend if available
+//     --device D     cpu|cuda|hip|rocm|metal|gpu (default: cpu)
+//     --cuda         same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
 
 #include "brovisionml/stylegan3.h"
 
 #include "brotensor/runtime.h"
+
+#include "tool_device.h"
+
 #include "broimage/encode.h"
 
 #include <cstdio>
@@ -36,7 +40,8 @@ using brotensor::Tensor;
         "  --seed N      PRNG seed for z (default: 0)\n"
         "  --trunc PSI   truncation psi (default: 1.0)\n"
         "  --out PATH    output PNG (default: stylegan3.png)\n"
-        "  --cuda        use the CUDA backend if available\n", prog);
+        "  --device D    cpu|cuda|hip|rocm|metal|gpu (default: cpu)\n"
+        "  --cuda        same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }
 
@@ -50,7 +55,7 @@ int main(int argc, char** argv) {
     unsigned long long seed = 0;
     float trunc = 1.0f;
     std::string out_path = "stylegan3.png";
-    bool use_cuda = false;
+    brovisionml_tools::DeviceRequest device;
 
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
@@ -58,11 +63,12 @@ int main(int argc, char** argv) {
             if (i + 1 >= argc) usage(argv[0]);
             return argv[++i];
         };
-        if (a == "--res")        res = std::atoi(next());
-        else if (a == "--seed")  seed = std::strtoull(next(), nullptr, 10);
-        else if (a == "--trunc") trunc = static_cast<float>(std::atof(next()));
-        else if (a == "--out")   out_path = next();
-        else if (a == "--cuda")  use_cuda = true;
+        if (a == "--res")         res = std::atoi(next());
+        else if (a == "--seed")   seed = std::strtoull(next(), nullptr, 10);
+        else if (a == "--trunc")  trunc = static_cast<float>(std::atof(next()));
+        else if (a == "--out")    out_path = next();
+        else if (a == "--cuda")   device.parse("gpu");
+        else if (a == "--device") { if (!device.parse(next())) usage(argv[0]); }
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); }
     }
 
@@ -78,12 +84,8 @@ int main(int argc, char** argv) {
             ckpt.compare(ckpt.size() - 12, 12, ".safetensors") == 0;
         if (is_file) g.load_file(ckpt); else g.load(ckpt);
 
-        if (use_cuda) {
-            if (brotensor::is_available(brotensor::Device::CUDA))
-                g.to(brotensor::Device::CUDA);
-            else
-                std::fprintf(stderr, "(CUDA not available — running on CPU)\n");
-        }
+        const brotensor::Device dev = device.resolve();
+        if (dev.is_gpu()) g.to(dev);
 
         // Sample z ~ N(0,1) from the seed (host), then migrate with the model.
         Tensor z = Tensor::mat(1, cfg.z_dim);

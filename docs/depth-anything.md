@@ -36,7 +36,7 @@ PNG (brighter = nearer):
 
 ```bash
 depth_estimate /path/to/Depth-Anything-V2-Small photo.jpg --out depth.png
-# flags: --variant small|base|large  --invert  --cuda
+# flags: --variant small|base|large  --invert  --device D (or --cuda)
 ```
 
 Fetch a checkpoint with `scripts/download-weights.sh depth-anything-v2-small`

@@ -44,7 +44,7 @@ colored limb-sticks-and-joints control image:
 
 ```bash
 openpose_pose /path/to/openpose photo.jpg --out openpose.png
-# flags: --resolution N  --cuda
+# flags: --resolution N  --device D (or --cuda)
 ```
 
 **Body-only scope.** The canonical ControlNet openpose control image is

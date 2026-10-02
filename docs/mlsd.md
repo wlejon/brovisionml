@@ -40,7 +40,7 @@ black (the conditioning image):
 
 ```bash
 mlsd_lines /path/to/mlsd photo.jpg --out mlsd.png
-# flags: --score-thr F  --dist-thr F  --cuda
+# flags: --score-thr F  --dist-thr F  --device D (or --cuda)
 ```
 
 The GPU path runs FP32 (no FP16 path; the network is small and the TP-map

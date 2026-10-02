@@ -16,9 +16,10 @@ namespace brovisionml::api {
 // The load device, the way the QuickJS binding resolved it: brotensor::init()
 // first (is_available answers false for every GPU until the backends are
 // probed, which is how the port ended up loading everything on the CPU), then
-// the best available backend, overridable by opts.device. An unknown or
-// non-string device is a TypeError, and a GPU that is asked for by name but
-// is not there is an Error — never a silent CPU run of a vision model.
+// brotensor's default device (the registered HIP, CUDA or Metal GPU, else the
+// CPU), overridable by opts.device. An unknown or non-string device is a
+// TypeError, and a GPU that is asked for by name but is not there is an
+// Error — never a silent CPU run of a vision model.
 bool resolveDevice(const char* fnName, Value opts, brotensor::Device& dev, Value& thrown) {
     try {
         brotensor::init();
@@ -26,19 +27,13 @@ bool resolveDevice(const char* fnName, Value opts, brotensor::Device& dev, Value
         thrown = ev::throwError(std::string(fnName) + ": brotensor init failed: " + e.what());
         return false;
     }
-    if (brotensor::is_available(brotensor::Device::CUDA)) {
-        dev = brotensor::Device::CUDA;
-    } else if (brotensor::is_available(brotensor::Device::Metal)) {
-        dev = brotensor::Device::Metal;
-    } else {
-        dev = brotensor::Device::CPU;
-    }
+    dev = brotensor::default_device();
     if (!ev::isObject(opts)) return true;
     Value devVal = ev::getProperty(opts, "device");
     if (ev::isUndefined(devVal) || ev::isNull(devVal)) return true;
     if (!ev::isString(devVal)) {
         thrown = ev::throwTypeError(std::string(fnName) +
-                                    ": opts.device must be a string ('cuda', 'gpu', 'metal' or 'cpu')");
+                                    ": opts.device must be a string ('cuda', 'hip', 'gpu', 'metal' or 'cpu')");
         return false;
     }
     std::string s = ev::toUtf8(devVal);
@@ -47,16 +42,26 @@ bool resolveDevice(const char* fnName, Value opts, brotensor::Device& dev, Value
     brotensor::Device want = brotensor::Device::CPU;
     if (s == "gpu") {
         // The best GPU, whichever backend it is — not CUDA by name, which a
-        // Metal machine does not have.
-        want = brotensor::is_available(brotensor::Device::CUDA) ? brotensor::Device::CUDA
-                                                                : brotensor::Device::Metal;
+        // HIP or Metal machine does not have. The default device when it is a
+        // GPU; otherwise (BROTENSOR_DEFAULT_DEVICE=cpu) the first registered
+        // one, and with none at all the availability check below refuses.
+        want = brotensor::default_device();
+        if (!want.is_gpu()) {
+            want = brotensor::Device::HIP;
+            for (brotensor::Device d : {brotensor::Device::HIP, brotensor::Device::CUDA,
+                                        brotensor::Device::Metal}) {
+                if (brotensor::is_available(d)) { want = d; break; }
+            }
+        }
     } else if (s == "cuda") {
         want = brotensor::Device::CUDA;
+    } else if (s == "hip" || s == "rocm") {
+        want = brotensor::Device::HIP;
     } else if (s == "metal") {
         want = brotensor::Device::Metal;
     } else if (s != "cpu") {
-        thrown = ev::throwTypeError(std::string(fnName) + ": opts.device must be 'cuda', 'gpu', 'metal' or 'cpu' (got '" +
-                                    s + "')");
+        thrown = ev::throwTypeError(std::string(fnName) +
+                                    ": opts.device must be 'cuda', 'hip', 'gpu', 'metal' or 'cpu' (got '" + s + "')");
         return false;
     }
     if (want != brotensor::Device::CPU && !brotensor::is_available(want)) {
@@ -70,6 +75,7 @@ bool resolveDevice(const char* fnName, Value opts, brotensor::Device& dev, Value
 const char* deviceName(brotensor::Device dev) {
     switch (dev.type) {
         case brotensor::DeviceType::CUDA:  return "CUDA";
+        case brotensor::DeviceType::HIP:   return "HIP";
         case brotensor::DeviceType::Metal: return "Metal";
         case brotensor::DeviceType::CPU:   return "CPU";
     }

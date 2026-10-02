@@ -18,13 +18,15 @@ tower) are components of text/multimodal models; the models here take pixels in
 and emit masks / maps / boxes.
 
 CPU-by-default (FP32 scalar backend); a GPU backend is enabled by forwarding
-`BROTENSOR_WITH_CUDA=ON` or `BROTENSOR_WITH_METAL=ON` to brotensor. Almost
+`BROTENSOR_WITH_CUDA=ON`, `BROTENSOR_WITH_HIP=ON` or `BROTENSOR_WITH_METAL=ON` to
+brotensor. Almost
 everything composes brotensor ops, so brovisionml ships **almost no GPU kernels**.
 The lone exception is DSINE's surface-normal *domain* math — RayReLU and the fused
 AngMF propagate — which has no brotensor primitive; `src/dsine_ops.cu` provides a
 CUDA path, compiled into the library and dispatched behind `BROVISIONML_WITH_CUDA`
-only when `BROTENSOR_WITH_CUDA=ON` (whole-program compilation, no separable device
-code). If a *general* op is missing, still add it to brotensor — only true
+when `BROTENSOR_WITH_CUDA=ON` (whole-program compilation, no separable device
+code), and built as HIP through brotensor's compat headers when
+`BROTENSOR_WITH_HIP=ON`. If a *general* op is missing, still add it to brotensor — only true
 domain-specific kernels belong here.
 
 ## Sibling dependencies
@@ -76,6 +78,7 @@ include/brovisionml/       — public headers: one orchestrator per model
 src/                       — one .cpp per public header; src/dsine_ops.cu holds
                              brovisionml's only GPU kernels (DSINE RayReLU +
                              AngMF propagate), compiled in under BROTENSOR_WITH_CUDA
+                             (or as HIP under BROTENSOR_WITH_HIP)
 tests/                     — one test file per header; test_smoke.cpp proves
                              the brotensor + broimage links. Real-checkpoint /
                              golden-parity tests skip cleanly when weights/ is empty

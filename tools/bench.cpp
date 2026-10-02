@@ -13,7 +13,8 @@
 //     --variant V   sam: b (default) | l | h;  depth: small (default) | base | large
 //     --warmup N    untimed warmup reps (default 2)
 //     --reps N      timed reps (default 5)
-//     --cpu         force the CPU backend (default: CUDA when available)
+//     --device D    cpu|cuda|hip|rocm|metal|gpu (default: gpu, the best available)
+//     --cpu         same as --device cpu
 //
 // SAM reports encode (set_image) and decode (segment, one center click) as
 // separate stages; every other family is one end-to-end call.
@@ -33,6 +34,9 @@
 #include "brovisionml/segformer.h"
 
 #include "brotensor/runtime.h"
+
+#include "tool_device.h"
+
 #include "broimage/decode.h"
 
 #include <chrono>
@@ -55,7 +59,8 @@ namespace {
         "  --variant V   sam: b|l|h; depth: small|base|large\n"
         "  --warmup N    untimed warmup reps (default 2)\n"
         "  --reps N      timed reps (default 5)\n"
-        "  --cpu         force the CPU backend\n", prog);
+        "  --device D    cpu|cuda|hip|rocm|metal|gpu (default: gpu)\n"
+        "  --cpu         same as --device cpu\n", prog);
     std::exit(2);
 }
 
@@ -136,7 +141,8 @@ int main(int argc, char** argv) {
     const std::string ckpt   = argv[2];
     std::string image_path, variant;
     int w = 1024, h = 768, warmup = 2, reps = 5;
-    bool force_cpu = false;
+    brovisionml_tools::DeviceRequest device;
+    device.parse("gpu");  // default: the best available GPU
 
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
@@ -149,7 +155,8 @@ int main(int argc, char** argv) {
         else if (a == "--variant") variant = next();
         else if (a == "--warmup")  warmup = std::atoi(next());
         else if (a == "--reps")    reps = std::atoi(next());
-        else if (a == "--cpu")     force_cpu = true;
+        else if (a == "--cpu")     device.parse("cpu");
+        else if (a == "--device")  { if (!device.parse(next())) usage(argv[0]); }
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); }
     }
     if (reps < 1) usage(argv[0]);
@@ -171,19 +178,8 @@ int main(int argc, char** argv) {
     }
 
     brotensor::init();
-    brotensor::Device dev = brotensor::Device::CPU;
-    if (!force_cpu) {
-        if (brotensor::is_available(brotensor::Device::HIP))
-            dev = brotensor::Device::HIP;
-        else if (brotensor::is_available(brotensor::Device::CUDA))
-            dev = brotensor::Device::CUDA;
-        else if (brotensor::is_available(brotensor::Device::Metal))
-            dev = brotensor::Device::Metal;
-    }
-    const char* dev_str = "CPU";
-    if (dev == brotensor::Device::HIP) dev_str = "HIP";
-    else if (dev == brotensor::Device::CUDA) dev_str = "CUDA";
-    else if (dev == brotensor::Device::Metal) dev_str = "Metal";
+    const brotensor::Device dev = device.resolve();
+    const char* dev_str = brotensor::device_name(dev);
     std::printf("%s | %dx%d | %s | warmup %d, reps %d\n", family.c_str(), w, h,
                 dev_str, warmup, reps);
 

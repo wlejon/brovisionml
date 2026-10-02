@@ -63,9 +63,9 @@ The `stylegan3_generate` CLI driver:
 
 ```bash
 stylegan3_generate weights/stylegan3-r-ffhqu-256 --res 256 --seed 42 \
-    --trunc 0.7 --out out.png --cuda
+    --trunc 0.7 --out out.png --device gpu
 # flags: --res 256|512|1024 (must match checkpoint)  --seed N  --trunc PSI
-#        --out PATH  --cuda
+#        --out PATH  --device D (or --cuda)
 ```
 
 ## Inversion (image → W+)

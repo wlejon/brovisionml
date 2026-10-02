@@ -6,13 +6,16 @@
 //
 //   segformer_seg <checkpoint-dir-or-file> <image> [options]
 //     --out PATH        output PNG path (default: seg.png)
-//     --cuda            run on the CUDA device if available
+//     --device D        cpu|cuda|hip|rocm|metal|gpu (default: cpu)
+//     --cuda            same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
 
 #include "brovisionml/segformer.h"
 
 #include "brotensor/runtime.h"
+
+#include "tool_device.h"
 
 #include "broimage/decode.h"
 #include "broimage/encode.h"
@@ -32,7 +35,8 @@ using brovisionml::segformer::SegMap;
     std::fprintf(stderr,
         "usage: %s <checkpoint-dir-or-file> <image> [options]\n"
         "  --out PATH      output PNG (default: seg.png)\n"
-        "  --cuda          run on the CUDA device if available\n", prog);
+        "  --device D      cpu|cuda|hip|rocm|metal|gpu (default: cpu)\n"
+        "  --cuda          same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }
 
@@ -44,7 +48,7 @@ int main(int argc, char** argv) {
     const std::string ckpt = argv[1];
     const std::string image_path = argv[2];
     std::string out_path = "seg.png";
-    bool want_cuda = false;
+    brovisionml_tools::DeviceRequest device;
 
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
@@ -53,7 +57,8 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         if (a == "--out")       out_path = next();
-        else if (a == "--cuda") want_cuda = true;
+        else if (a == "--cuda") device.parse("gpu");
+        else if (a == "--device"){ if (!device.parse(next())) usage(argv[0]); }
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); }
     }
 
@@ -70,15 +75,8 @@ int main(int argc, char** argv) {
             ckpt.compare(ckpt.size() - 12, 12, ".safetensors") == 0;
         if (is_file) det.load_file(ckpt); else det.load(ckpt);
 
-        if (want_cuda) {
-            brotensor::init();
-            if (brotensor::is_available(brotensor::Device::CUDA)) {
-                det.to(brotensor::Device::CUDA);
-                std::printf("running on CUDA\n");
-            } else {
-                std::fprintf(stderr, "CUDA requested but unavailable; using CPU\n");
-            }
-        }
+        const brotensor::Device dev = device.resolve();
+        if (dev.is_gpu()) det.to(dev);
 
         std::printf("image: %dx%d, segmenting...\n", im.width, im.height);
         SegMap sm = det.detect(im.pixels.data(), im.width, im.height, im.channels);

@@ -43,7 +43,7 @@ The `hed_edges` CLI tool writes a grayscale edge PNG (`edge*255`):
 
 ```bash
 hed_edges /path/to/hed photo.jpg --out edges.png
-# flags: --resolution N (longer-side working resolution; 0 = native)  --cuda
+# flags: --resolution N (longer-side working resolution; 0 = native)  --device D (or --cuda)
 ```
 
 ## GPU path

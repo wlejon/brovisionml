@@ -50,7 +50,7 @@ The `lineart` CLI tool writes a grayscale line PNG (`line*255`):
 ```bash
 lineart /path/to/lineart photo.jpg --out lineart.png
 # flags: --resolution N (longer-side working resolution; 0 = native)
-#        --no-invert (write the raw bright-field/dark-line output)  --cuda
+#        --no-invert (write the raw bright-field/dark-line output)  --device D (or --cuda)
 ```
 
 ## GPU path

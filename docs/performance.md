@@ -41,7 +41,8 @@ bench <family> <checkpoint-dir-or-file> [options]
   --variant V   sam: b|l|h; depth: small|base|large
   --warmup N    untimed warmup reps (default 2)
   --reps N      timed reps (default 5)
-  --cpu         force the CPU backend (default: CUDA when available)
+  --device D    cpu|cuda|hip|rocm|metal|gpu (default: gpu, the best available)
+  --cpu         same as --device cpu
 ```
 
 `sam` reports encode and decode separately; `openpose` reports the neural

@@ -41,12 +41,13 @@ The output convention is **camera-space unit normals**; visualize each
 component mapped from [-1,1] to [0,1] as `(n+1)/2` (the usual blue-ish
 normal map).
 
-The `normal_estimate` CLI tool writes that standard normal-map PNG. It runs
-CPU only; use the C++ API for the CUDA path:
+The `normal_estimate` CLI tool writes that standard normal-map PNG; `--device`
+(or `--cuda`) runs it on a GPU:
 
 ```bash
 normal_estimate /path/to/dsine photo.jpg --out normal.png
 # flags: --fov DEG   (assumed field-of-view for the synthesized intrinsics)
+#        --device cpu|cuda|hip|rocm|metal|gpu  (or --cuda = gpu)
 ```
 
 ## GPU path
