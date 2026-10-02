@@ -47,10 +47,19 @@ if(BROTENSOR_WITH_CUDA)
 endif()
 
 if(BROTENSOR_WITH_HIP)
-    if(NOT CMAKE_HIP_ARCHITECTURES)
-        set(CMAKE_HIP_ARCHITECTURES "gfx1151")
+    # ROCm root and target architectures resolve exactly as brotensor's do
+    # (brotensor's cmake/BrotensorHip.cmake): ROCM_PATH, and the build
+    # machine's GPUs unless CMAKE_HIP_ARCHITECTURES is given.
+    set(BROTENSOR_DIR "${CMAKE_SOURCE_DIR}/../brotensor" CACHE PATH
+        "Path to standalone brotensor repo (set to a missing path to force submodule fallback)")
+    if(EXISTS "${BROTENSOR_DIR}/cmake/BrotensorHip.cmake")
+        include("${BROTENSOR_DIR}/cmake/BrotensorHip.cmake")
+    else()
+        include("${CMAKE_SOURCE_DIR}/third_party/brotensor/cmake/BrotensorHip.cmake")
     endif()
+    brotensor_hip_prepare()
     enable_language(HIP)
+    brotensor_hip_check_archs()
     set(CMAKE_HIP_STANDARD 20)
     set(CMAKE_HIP_STANDARD_REQUIRED ON)
     find_package(hip REQUIRED)
@@ -235,7 +244,6 @@ if(BROTENSOR_WITH_HIP)
     target_include_directories(brovisionml PRIVATE
         ${BROTENSOR_DIR}/src/hip/compat
         ${BROTENSOR_DIR}/src/hip/detail
-        /opt/rocm/include
     )
     target_compile_definitions(brovisionml PRIVATE BROVISIONML_WITH_HIP=1)
     target_link_libraries(brovisionml PUBLIC hip::host)
