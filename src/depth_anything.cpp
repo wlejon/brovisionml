@@ -65,12 +65,11 @@ void DepthEstimator::to(brotensor::Device dev) {
 DepthMap DepthEstimator::estimate(const uint8_t* rgb, int w, int h,
                                   int channels) const {
     detail::profile_mark(device_, nullptr);
-    // 1. Preprocess (host) -> upload.
-    dpt::PreprocessedImage pp = dpt::preprocess(
-        rgb, w, h, channels, cfg_.input_size, cfg_.multiple, cfg_.keep_aspect_ratio);
+    // 1. Preprocess (host or device).
+    dpt::PreprocessedImage pp = dpt::preprocess_device(
+        rgb, w, h, channels, device_, cfg_.input_size, cfg_.multiple, cfg_.keep_aspect_ratio);
     const int rh = pp.transform.resized_h, rw = pp.transform.resized_w;
-    brotensor::Tensor px = (device_ == brotensor::Device::CPU)
-                               ? pp.pixels : pp.pixels.to(device_);
+    const brotensor::Tensor& px = pp.pixels;
     detail::profile_mark(device_, "preprocess");
 
     // 2. Backbone -> stage feature maps; 3. DPT head -> depth at model res.

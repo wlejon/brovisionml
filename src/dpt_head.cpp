@@ -1,8 +1,10 @@
 #include "brovisionml/dpt_head.h"
 
 #include "brotensor/ops.h"
+#include "brotensor/runtime.h"
 #include "brotensor/safetensors.h"
 
+#include "profile.h"
 #include "weights_util.h"
 
 #include <cmath>
@@ -216,7 +218,16 @@ void DepthHead::load_file(const std::string& path) {
 void DepthHead::to(brotensor::Device dev) {
     if (!w_->loaded) fail("to() called before load()");
     if (dev == device_) return;
-    auto mv = [dev](Tensor& t) { if (t.data) t = t.to(dev); };
+    const bool fp16 = dev != brotensor::Device::CPU &&
+                      brotensor::compute_dtype() == brotensor::Dtype::FP16;
+    auto to_dt = [&](Tensor& t, brotensor::Dtype want) {
+        if (!t.data) return;
+        t = t.to(dev);
+        if (t.dtype != want) { Tensor c; brotensor::cast(t, c, want); t = std::move(c); }
+    };
+    const brotensor::Dtype dt = fp16 ? brotensor::Dtype::FP16 : brotensor::Dtype::FP32;
+    auto mv = [&](Tensor& t) { to_dt(t, dt); };
+
     for (ReassembleLayer& r : w_->reassemble) {
         mv(r.proj_w); mv(r.proj_b); mv(r.resize_w); mv(r.resize_b);
     }
@@ -229,6 +240,7 @@ void DepthHead::to(brotensor::Device dev) {
     }
     mv(w_->h1_w); mv(w_->h1_b); mv(w_->h2_w); mv(w_->h2_b); mv(w_->h3_w); mv(w_->h3_b);
     device_ = dev;
+    fp16_ = fp16;
 }
 
 // ─── Forward ──────────────────────────────────────────────────────────────────
@@ -269,11 +281,18 @@ brotensor::Tensor DepthHead::forward(const std::vector<brotensor::Tensor>& featu
 
         // Drop the cls token: view rows [1..] of the (1+gh*gw, D) map, then make
         // it NCHW. The view shares the feature map's storage (no copy).
+        const size_t elem_size = (fm.dtype == brotensor::Dtype::FP16) ? sizeof(uint16_t) : sizeof(float);
         Tensor patches = Tensor::view(
-            device_, static_cast<char*>(fm.data) + sizeof(float) * D,
-            gh * gw, D);
+            device_, static_cast<char*>(fm.data) + elem_size * D,
+            gh * gw, D, fm.dtype);
+        Tensor patches_in;
+        if (fp16_ && patches.dtype != brotensor::Dtype::FP16) {
+            brotensor::cast(patches, patches_in, brotensor::Dtype::FP16);
+        } else {
+            patches_in = patches;
+        }
         Tensor nchw;
-        brotensor::sequence_to_nchw(patches, 1, D, gh, gw, nchw);
+        brotensor::sequence_to_nchw(patches_in, 1, D, gh, gw, nchw);
 
         Tensor proj = conv1x1(nchw, r.proj_w, r.proj_b, D, c, gh, gw);
 
@@ -302,6 +321,7 @@ brotensor::Tensor DepthHead::forward(const std::vector<brotensor::Tensor>& featu
         pl.C = F; pl.H = H; pl.W = W;
         feats[i] = std::move(pl);
     }
+    detail::profile_mark(device_, "dpt_reassemble");
 
     // 2. RefineNet fusion — deepest stage first (reversed order).
     Plane fused;
@@ -344,6 +364,7 @@ brotensor::Tensor DepthHead::forward(const std::vector<brotensor::Tensor>& featu
         fused.t = conv1x1(up, fl.proj_w, fl.proj_b, F, F, oh, ow);
         fused.C = F; fused.H = oh; fused.W = ow;
     }
+    detail::profile_mark(device_, "dpt_fusion");
 
     // 3. Depth head: conv -> align-corners upsample to (gh,gw)*patch -> conv ->
     //    ReLU -> 1x1 conv -> ReLU.
@@ -353,13 +374,22 @@ brotensor::Tensor DepthHead::forward(const std::vector<brotensor::Tensor>& featu
     const int ow = gw * cfg_.patch_size;
 
     Tensor c1 = conv3x3(fused.t, w_->h1_w, &w_->h1_b, F, Fh, fused.H, fused.W);
+    detail::profile_mark(device_, "dpt_head_c1");
     Tensor up;
     brotensor::interp2d_align_corners_forward(c1, 1, Fh, fused.H, fused.W, oh, ow,
                                               /*bilinear=*/1, up);
+    detail::profile_mark(device_, "dpt_head_upsample");
     Tensor c2 = conv3x3(up, w_->h2_w, &w_->h2_b, Fh, Hh, oh, ow);
+    detail::profile_mark(device_, "dpt_head_c2");
     Tensor a  = relu(c2);
     Tensor c3 = conv1x1(a, w_->h3_w, w_->h3_b, Hh, 1, oh, ow);
+    detail::profile_mark(device_, "dpt_head_c3");
     Tensor depth = relu(c3);   // activation2 (relative depth); max_depth == 1
+    if (depth.dtype != brotensor::Dtype::FP32) {
+        Tensor d32;
+        brotensor::cast(depth, d32, brotensor::Dtype::FP32);
+        return d32;
+    }
     return depth;              // (1, oh*ow)
 }
 

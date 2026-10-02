@@ -342,51 +342,69 @@ BackboneOutput Backbone::encode(const brotensor::Tensor& pixels,
         cu = cu.to(device_);
     }
 
+    // Persistent activation buffers for FP16 execution (zero allocation per block).
+    Tensor hc, h2c, q, k, v, ao, o16, act, m2;
+    if (fp16_) {
+        hc  = Tensor::empty_on(device_, K, D, brotensor::Dtype::FP16);
+        h2c = Tensor::empty_on(device_, K, D, brotensor::Dtype::FP16);
+        q   = Tensor::empty_on(device_, K, D, brotensor::Dtype::FP16);
+        k   = Tensor::empty_on(device_, K, D, brotensor::Dtype::FP16);
+        v   = Tensor::empty_on(device_, K, D, brotensor::Dtype::FP16);
+        ao  = Tensor::empty_on(device_, K, D, brotensor::Dtype::FP16);
+        o16 = Tensor::empty_on(device_, K, D, brotensor::Dtype::FP16);
+        act = Tensor::empty_on(device_, K, cfg_.mlp_dim(), brotensor::Dtype::FP16);
+        m2  = Tensor::empty_on(device_, K, D, brotensor::Dtype::FP16);
+    }
+
     for (int i = 0; i < cfg_.depth; ++i) {
         const BlockWeights& b = w_->blocks[i];
 
         if (i == 0) detail::profile_mark(device_, "block_0_start");
         // Attention: x = x + LS1·attn(LN1(x)).  LS1 is folded into Wo/bo.
-        Tensor h;
-        brotensor::layernorm_forward_inference_batched(x, b.ln1_w, b.ln1_b, h, eps);
-        Tensor attn;
         if (fp16_) {
-            Tensor hc = to16(h);
-            Tensor q, k, v;
+            brotensor::layernorm_forward_inference_batched(x, b.ln1_w, b.ln1_b, hc, eps);
             linear16(b.q_w, b.q_b, hc, q);
             linear16(b.k_w, b.k_b, hc, k);
             linear16(b.v_w, b.v_b, hc, v);
             if (i == 0) detail::profile_mark(device_, "block_0_qkv");
-            Tensor ao;
             brotensor::flash_attention_varlen_forward(
                 q, k, v, static_cast<const int32_t*>(cu.data),
                 static_cast<const int32_t*>(cu.data),
                 /*batch_size=*/1, /*max_seqlen_q=*/K, /*max_seqlen_k=*/K,
                 cfg_.num_heads, hd, /*causal=*/false, ao);
             if (i == 0) detail::profile_mark(device_, "block_0_flash_attn");
-            Tensor o16;
             linear16(b.o_w, b.o_b, ao, o16);
-            attn = to32(o16);
             if (i == 0) detail::profile_mark(device_, "block_0_out_proj");
+            brotensor::add_inplace(x, o16);
         } else {
+            Tensor h;
+            brotensor::layernorm_forward_inference_batched(x, b.ln1_w, b.ln1_b, h, eps);
+            Tensor attn;
             brotensor::mha_forward(h, b.q_w, b.k_w, b.v_w, b.o_w,
                                    &b.q_b, &b.k_b, &b.v_b, &b.o_b,
                                    /*d_mask=*/nullptr, cfg_.num_heads,
                                    Qh, Kh, Vh, Attnh, Yc, attn);
+            brotensor::add_inplace(x, attn);
         }
         if (i == 0) detail::profile_mark(device_, "block_0_attn");
-        // MLP: x += attn, h2 = LN2(x) fused in-register pass without intermediate DRAM round-trip
-        Tensor h2;
-        brotensor::fused_residual_layernorm(x, attn, b.ln2_w, b.ln2_b, eps, h2);
-        Tensor h2c = to16(h2);
-        Tensor m1;
-        linear16(b.fc1_w, b.fc1_b, h2c, m1);
-        Tensor act;
-        brotensor::gelu_exact_forward(m1, act);
-        Tensor m2;
-        linear16(b.fc2_w, b.fc2_b, act, m2);
-        Tensor m2f = to32(m2);
-        brotensor::add_inplace(x, m2f);
+        // MLP:
+        if (fp16_) {
+            brotensor::layernorm_forward_inference_batched(x, b.ln2_w, b.ln2_b, h2c, eps);
+            brotensor::linear_forward_batched_fp16_act(
+                b.fc1_w, &b.fc1_b, h2c, brotensor::kLinearActGeluExact, act);
+            linear16(b.fc2_w, b.fc2_b, act, m2);
+            brotensor::add_inplace(x, m2);
+        } else {
+            Tensor h2;
+            brotensor::layernorm_forward_inference_batched(x, b.ln2_w, b.ln2_b, h2, eps);
+            Tensor m1;
+            linear16(b.fc1_w, b.fc1_b, h2, m1);
+            Tensor act_cpu;
+            brotensor::gelu_exact_forward(m1, act_cpu);
+            Tensor m2_cpu;
+            linear16(b.fc2_w, b.fc2_b, act_cpu, m2_cpu);
+            brotensor::add_inplace(x, m2_cpu);
+        }
         if (i == 0) detail::profile_mark(device_, "block_0_mlp");
 
         if (wants_stage(i + 1)) {

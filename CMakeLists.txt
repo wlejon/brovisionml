@@ -214,7 +214,7 @@ target_sources(brovisionml PRIVATE
 # device-dispatch branch in src/dsine_ops.cpp that calls them. Everything else in
 # the library stays device-agnostic by composing brotensor ops.
 if(BROTENSOR_WITH_CUDA)
-    target_sources(brovisionml PRIVATE src/dsine_ops.cu)
+    target_sources(brovisionml PRIVATE src/dsine_ops.cu src/dpt_preprocess_gpu.cu)
     target_compile_definitions(brovisionml PRIVATE BROVISIONML_WITH_CUDA=1)
     # Static CUDA runtime so the shipped binary carries no cudart DLL dependency
     # and launches on machines without the CUDA toolkit (falls back to CPU).
@@ -230,8 +230,8 @@ if(BROTENSOR_WITH_CUDA)
 endif()
 
 if(BROTENSOR_WITH_HIP)
-    target_sources(brovisionml PRIVATE src/dsine_ops.cu)
-    set_source_files_properties(src/dsine_ops.cu PROPERTIES LANGUAGE HIP)
+    target_sources(brovisionml PRIVATE src/dsine_ops.cu src/dpt_preprocess_gpu.cu)
+    set_source_files_properties(src/dsine_ops.cu src/dpt_preprocess_gpu.cu PROPERTIES LANGUAGE HIP)
     target_include_directories(brovisionml PRIVATE
         ${BROTENSOR_DIR}/src/hip/compat
         ${BROTENSOR_DIR}/src/hip/detail

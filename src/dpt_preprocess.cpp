@@ -5,6 +5,10 @@
 #include "broimage/normalize.h"
 #include "broimage/presets.h"
 
+#if defined(BROVISIONML_WITH_CUDA) || defined(BROVISIONML_WITH_HIP)
+#include "dpt_preprocess_gpu.h"
+#endif
+
 #include <cmath>
 #include <stdexcept>
 #include <vector>
@@ -91,6 +95,37 @@ PreprocessedImage preprocess(const uint8_t* rgb, int w, int h, int channels,
     out.transform.resized_w = new_w;
     out.transform.resized_h = new_h;
     return out;
+}
+
+PreprocessedImage preprocess_device(const uint8_t* rgb, int w, int h, int channels,
+                                    brotensor::Device dev,
+                                    int target, int multiple, bool keep_aspect_ratio) {
+    if (dev == brotensor::Device::CPU) {
+        return preprocess(rgb, w, h, channels, target, multiple, keep_aspect_ratio);
+    }
+#if defined(BROVISIONML_WITH_CUDA) || defined(BROVISIONML_WITH_HIP)
+    if (!rgb || w <= 0 || h <= 0)
+        throw std::runtime_error("dpt::preprocess: zero-size or null image");
+    if (channels != 1 && channels != 3 && channels != 4)
+        throw std::runtime_error("dpt::preprocess: channels must be 1, 3, or 4");
+    if (target <= 0 || multiple <= 0)
+        throw std::runtime_error("dpt::preprocess: target and multiple must be positive");
+
+    int new_w = 0, new_h = 0;
+    resize_output_size(w, h, target, multiple, keep_aspect_ratio, new_w, new_h);
+
+    PreprocessedImage out;
+    detail::dpt_preprocess_gpu(rgb, w, h, channels, dev, new_w, new_h, out.pixels);
+    out.transform.orig_w    = w;
+    out.transform.orig_h    = h;
+    out.transform.resized_w = new_w;
+    out.transform.resized_h = new_h;
+    return out;
+#else
+    PreprocessedImage pp = preprocess(rgb, w, h, channels, target, multiple, keep_aspect_ratio);
+    pp.pixels = pp.pixels.to(dev);
+    return pp;
+#endif
 }
 
 }  // namespace brovisionml::dpt

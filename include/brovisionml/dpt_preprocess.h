@@ -67,4 +67,11 @@ PreprocessedImage preprocess(const uint8_t* rgb, int w, int h, int channels,
                              int target = 518, int multiple = 14,
                              bool keep_aspect_ratio = true);
 
+// Fast device preprocessor: performs bicubic resizing, rounding, and ImageNet
+// normalization directly on `dev`. When dev is Device::CPU, calls preprocess().
+PreprocessedImage preprocess_device(const uint8_t* rgb, int w, int h, int channels,
+                                    brotensor::Device dev,
+                                    int target = 518, int multiple = 14,
+                                    bool keep_aspect_ratio = true);
+
 }  // namespace brovisionml::dpt

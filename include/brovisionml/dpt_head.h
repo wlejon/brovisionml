@@ -67,6 +67,7 @@ public:
 private:
     HeadConfig cfg_;
     brotensor::Device device_ = brotensor::Device::CPU;
+    bool fp16_ = false;
     struct Weights;
     std::unique_ptr<Weights> w_;
 };
