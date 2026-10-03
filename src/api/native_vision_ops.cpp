@@ -16,7 +16,7 @@ namespace brovisionml::api {
 // The load device, the way the QuickJS binding resolved it: brotensor::init()
 // first (is_available answers false for every GPU until the backends are
 // probed, which is how the port ended up loading everything on the CPU), then
-// brotensor's default device (the registered HIP, CUDA or Metal GPU, else the
+// brotensor's default device (the registered GPU, Vulkan before HIP, else the
 // CPU), overridable by opts.device. An unknown or non-string device is a
 // TypeError, and a GPU that is asked for by name but is not there is an
 // Error — never a silent CPU run of a vision model.
