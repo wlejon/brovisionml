@@ -1,7 +1,7 @@
 # Performance
 
 The GPU path is the primary path. Models load on CPU in FP32 and migrate with
-`.to(Device::CUDA)` (or `Device::METAL`); where a model has an FP16 path it
+`.to(Device::CUDA)` (or `Device::METAL` / `Device::VULKAN` / `Device::HIP`); where a model has an FP16 path it
 engages automatically when the brotensor backend's compute dtype is FP16 —
 there is no per-model flag to set (StyleGAN3's `force_fp32` debug switch is
 the one exception).
