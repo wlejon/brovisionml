@@ -13,7 +13,7 @@
 //     --variant V   sam: b (default) | l | h;  depth: small (default) | base | large
 //     --warmup N    untimed warmup reps (default 2)
 //     --reps N      timed reps (default 5)
-//     --device D    cpu|cuda|hip|rocm|metal|gpu (default: gpu, the best available)
+//     --device D    cpu|cuda|hip|rocm|metal|vulkan|gpu (default: gpu, the best available)
 //     --cpu         same as --device cpu
 //
 // SAM reports encode (set_image) and decode (segment, one center click) as
@@ -59,7 +59,7 @@ namespace {
         "  --variant V   sam: b|l|h; depth: small|base|large\n"
         "  --warmup N    untimed warmup reps (default 2)\n"
         "  --reps N      timed reps (default 5)\n"
-        "  --device D    cpu|cuda|hip|rocm|metal|gpu (default: gpu)\n"
+        "  --device D    cpu|cuda|hip|rocm|metal|vulkan|gpu (default: gpu)\n"
         "  --cpu         same as --device cpu\n", prog);
     std::exit(2);
 }

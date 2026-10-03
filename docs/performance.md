@@ -41,7 +41,7 @@ bench <family> <checkpoint-dir-or-file> [options]
   --variant V   sam: b|l|h; depth: small|base|large
   --warmup N    untimed warmup reps (default 2)
   --reps N      timed reps (default 5)
-  --device D    cpu|cuda|hip|rocm|metal|gpu (default: gpu, the best available)
+  --device D    cpu|cuda|hip|rocm|metal|vulkan|gpu (default: gpu, the best available)
   --cpu         same as --device cpu
 ```
 

@@ -33,7 +33,7 @@ bool resolveDevice(const char* fnName, Value opts, brotensor::Device& dev, Value
     if (ev::isUndefined(devVal) || ev::isNull(devVal)) return true;
     if (!ev::isString(devVal)) {
         thrown = ev::throwTypeError(std::string(fnName) +
-                                    ": opts.device must be a string ('cuda', 'hip', 'gpu', 'metal' or 'cpu')");
+                                    ": opts.device must be a string ('cuda', 'hip', 'vulkan', 'gpu', 'metal' or 'cpu')");
         return false;
     }
     std::string s = ev::toUtf8(devVal);
@@ -49,7 +49,7 @@ bool resolveDevice(const char* fnName, Value opts, brotensor::Device& dev, Value
         if (!want.is_gpu()) {
             want = brotensor::Device::HIP;
             for (brotensor::Device d : {brotensor::Device::HIP, brotensor::Device::CUDA,
-                                        brotensor::Device::Metal}) {
+                                        brotensor::Device::Metal, brotensor::Device::VULKAN}) {
                 if (brotensor::is_available(d)) { want = d; break; }
             }
         }
@@ -59,9 +59,11 @@ bool resolveDevice(const char* fnName, Value opts, brotensor::Device& dev, Value
         want = brotensor::Device::HIP;
     } else if (s == "metal") {
         want = brotensor::Device::Metal;
+    } else if (s == "vulkan" || s == "vk") {
+        want = brotensor::Device::VULKAN;
     } else if (s != "cpu") {
         thrown = ev::throwTypeError(std::string(fnName) +
-                                    ": opts.device must be 'cuda', 'hip', 'gpu', 'metal' or 'cpu' (got '" + s + "')");
+                                    ": opts.device must be 'cuda', 'hip', 'vulkan', 'gpu', 'metal' or 'cpu' (got '" + s + "')");
         return false;
     }
     if (want != brotensor::Device::CPU && !brotensor::is_available(want)) {
@@ -77,6 +79,7 @@ const char* deviceName(brotensor::Device dev) {
         case brotensor::DeviceType::CUDA:  return "CUDA";
         case brotensor::DeviceType::HIP:   return "HIP";
         case brotensor::DeviceType::Metal: return "Metal";
+        case brotensor::DeviceType::VULKAN: return "Vulkan";
         case brotensor::DeviceType::CPU:   return "CPU";
     }
     return "CPU";

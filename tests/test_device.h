@@ -16,9 +16,14 @@
 namespace brovisionml_test {
 
 inline brotensor::Device preferred_gpu() {
+    // The default device when it is a GPU (BROTENSOR_DEFAULT_DEVICE=vulkan runs
+    // the parity blocks on Vulkan), else the first registered GPU, Vulkan last.
+    const brotensor::Device d = brotensor::default_device();
+    if (d.is_gpu()) return d;
     if (brotensor::is_available(brotensor::Device::HIP))   return brotensor::Device::HIP;
     if (brotensor::is_available(brotensor::Device::CUDA))  return brotensor::Device::CUDA;
     if (brotensor::is_available(brotensor::Device::Metal)) return brotensor::Device::Metal;
+    if (brotensor::is_available(brotensor::Device::VULKAN)) return brotensor::Device::VULKAN;
     return brotensor::Device::CPU;
 }
 
@@ -27,6 +32,7 @@ inline const char* device_name(brotensor::Device d) {
         case brotensor::DeviceType::HIP:   return "HIP";
         case brotensor::DeviceType::CUDA:  return "CUDA";
         case brotensor::DeviceType::Metal: return "Metal";
+        case brotensor::DeviceType::VULKAN: return "Vulkan";
         default:                           return "CPU";
     }
 }

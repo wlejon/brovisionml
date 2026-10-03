@@ -6,7 +6,7 @@
 //
 //   segformer_seg <checkpoint-dir-or-file> <image> [options]
 //     --out PATH        output PNG path (default: seg.png)
-//     --device D        cpu|cuda|hip|rocm|metal|gpu (default: cpu)
+//     --device D        cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)
 //     --cuda            same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
@@ -35,7 +35,7 @@ using brovisionml::segformer::SegMap;
     std::fprintf(stderr,
         "usage: %s <checkpoint-dir-or-file> <image> [options]\n"
         "  --out PATH      output PNG (default: seg.png)\n"
-        "  --device D      cpu|cuda|hip|rocm|metal|gpu (default: cpu)\n"
+        "  --device D      cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)\n"
         "  --cuda          same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }

@@ -3,11 +3,12 @@
 // Shared device selection for the brovisionml CLI tools.
 //
 // Every tool accepts
-//     --device D   cpu | cuda | hip | rocm | metal | gpu   (default: cpu)
+//     --device D   cpu | cuda | hip | rocm | metal | vulkan | vk | gpu   (default: cpu)
 //     --cuda       legacy spelling of --device gpu
 // "gpu" (and so --cuda) means the best GPU backend this binary registered —
 // brotensor::default_device() after init() when that is a GPU (HIP > CUDA >
-// Metal, honouring BROTENSOR_DEFAULT_DEVICE), else the first GPU available. On a
+// Metal, honouring BROTENSOR_DEFAULT_DEVICE, which can name Vulkan), else the
+// first GPU available (Vulkan last). On a
 // CUDA build that is CUDA, exactly what --cuda always selected. A named backend
 // that is not available falls back to the CPU with a note on stderr.
 //
@@ -29,13 +30,14 @@ inline brotensor::Device best_gpu() {
     if (brotensor::is_available(brotensor::Device::HIP))   return brotensor::Device::HIP;
     if (brotensor::is_available(brotensor::Device::CUDA))  return brotensor::Device::CUDA;
     if (brotensor::is_available(brotensor::Device::Metal)) return brotensor::Device::Metal;
+    if (brotensor::is_available(brotensor::Device::VULKAN)) return brotensor::Device::VULKAN;
     return brotensor::Device::CPU;
 }
 
 // A --device / --cuda request, parsed at argument time and resolved once the
 // model is loaded.
 struct DeviceRequest {
-    enum class Kind { Cpu, Gpu, Cuda, Hip, Metal };
+    enum class Kind { Cpu, Gpu, Cuda, Hip, Metal, Vulkan };
     Kind kind = Kind::Cpu;
 
     // Parses a --device value; false for an unknown name.
@@ -45,6 +47,7 @@ struct DeviceRequest {
         else if (s == "cuda")               kind = Kind::Cuda;
         else if (s == "hip" || s == "rocm") kind = Kind::Hip;
         else if (s == "metal")              kind = Kind::Metal;
+        else if (s == "vulkan" || s == "vk") kind = Kind::Vulkan;
         else return false;
         return true;
     }
@@ -63,6 +66,7 @@ struct DeviceRequest {
             case Kind::Cuda:  want = brotensor::Device::CUDA;  what = "CUDA";  break;
             case Kind::Hip:   want = brotensor::Device::HIP;   what = "HIP";   break;
             case Kind::Metal: want = brotensor::Device::Metal; what = "Metal"; break;
+            case Kind::Vulkan: want = brotensor::Device::VULKAN; what = "Vulkan"; break;
             case Kind::Cpu:   break;
         }
         if (want.is_gpu() && brotensor::is_available(want)) {

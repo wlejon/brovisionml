@@ -1,0 +1,70 @@
+#version 460
+// DPT / Depth-Anything-V2 preprocessing on Vulkan, the GLSL twin of
+// src/dpt_preprocess_gpu.cu: bicubic resize (Catmull-Rom a = -0.5, half-pixel
+// centres, clamped taps) of a uint8 image (1, 3 or 4 channels), clamp to
+// [0, 255], round to uint8, scale to [0, 1] and ImageNet-normalise into a
+// planar FP32 (3, out_h, out_w) tensor. One invocation per output pixel.
+#include "common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform Push {
+    uint64_t src;     // uint8 HWC
+    uint64_t dst;     // FP32 CHW
+    int in_w;
+    int in_h;
+    int channels;
+    int out_w;
+    int out_h;
+} pc;
+
+float cubic_weight(float t) {
+    const float a = -0.5;
+    const float at = abs(t);
+    if (at < 1.0) return (a + 2.0) * at * at * at - (a + 3.0) * at * at + 1.0;
+    if (at < 2.0) return a * at * at * at - 5.0 * a * at * at + 8.0 * a * at - 4.0 * a;
+    return 0.0;
+}
+
+void main() {
+    const int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.out_w || y >= pc.out_h) return;
+    const float xs = float(pc.in_w) / float(pc.out_w);
+    const float ys = float(pc.in_h) / float(pc.out_h);
+
+    const float fy = (float(y) + 0.5) * ys - 0.5;
+    const int iy = int(floor(fy));
+    const float ty = fy - float(iy);
+    const float fx = (float(x) + 0.5) * xs - 0.5;
+    const int ix = int(floor(fx));
+    const float tx = fx - float(ix);
+    float wy[4], wx[4];
+    int sy[4], sx[4];
+    for (int k = 0; k < 4; ++k) {
+        wy[k] = cubic_weight(float(k - 1) - ty);
+        wx[k] = cubic_weight(float(k - 1) - tx);
+        sy[k] = clamp(iy + k - 1, 0, pc.in_h - 1);
+        sx[k] = clamp(ix + k - 1, 0, pc.in_w - 1);
+    }
+
+    const float mean[3] = float[3](0.485, 0.456, 0.406);
+    const float inv_std[3] = float[3](1.0 / 0.229, 1.0 / 0.224, 1.0 / 0.225);
+    const uint plane = uint(pc.out_w) * uint(pc.out_h);
+    for (int c = 0; c < 3; ++c) {
+        float acc = 0.0;
+        for (int j = 0; j < 4; ++j) {
+            float row = 0.0;
+            const int row_offset = sy[j] * pc.in_w;
+            for (int i = 0; i < 4; ++i) {
+                const int pix = (row_offset + sx[i]) * pc.channels;
+                const uint v = uint(U8Buf(pc.src).v[pc.channels == 1 ? pix : pix + c]);
+                row += wx[i] * float(v);
+            }
+            acc += wy[j] * row;
+        }
+        acc = min(max(acc, 0.0), 255.0);
+        const float u = float(uint(acc + 0.5));
+        F32Buf(pc.dst).v[uint(c) * plane + uint(y) * uint(pc.out_w) + uint(x)] =
+            (u * (1.0 / 255.0) - mean[c]) * inv_std[c];
+    }
+}

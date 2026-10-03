@@ -1,0 +1,225 @@
+#version 460
+// DSINE NRN device ops on Vulkan: the GLSL twin of src/dsine_ops.cu (and of
+// the CPU reference in src/dsine_ops.cpp). One invocation per /8-grid pixel;
+// maps are planar FP32 (channel * HW + pixel).
+//
+//   -DOP=0  ray_relu (in place on `n`, against the ray map `r`)
+//   -DOP=1  angmf_propagate (5x5 rotation-propagated normals -> `op`)
+//   -DF64   the per-pixel geometry in double, as the CPU and CUDA paths do
+//           (needs shaderFloat64); without it, in float like the Metal twin
+//           (dsine_ops.mm), sin / cos through brotensor's sincos_acc.
+//
+// GLSL has no double sin / cos: dsin / dcos below reduce by pi/2 in double
+// and evaluate Taylor polynomials on [-pi/4, pi/4] (truncation < 1e-19).
+#ifdef F64
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#endif
+#include "common.glsl"
+#include "math_acc.glsl"
+
+#ifdef F64
+#define real double
+#else
+#define real float
+#endif
+// Constants: exact binary values go through real(); the decimal ones are
+// spelled per precision (GLSL cannot paste a literal suffix).
+#define K(x) real(x)
+#ifdef F64
+const double kE2 = 1e-2lf, kE6 = 1e-6lf, kE8 = 1e-8lf, kE12 = 1e-12lf;
+#else
+const float kE2 = 1e-2, kE6 = 1e-6, kE8 = 1e-8, kE12 = 1e-12;
+#endif
+
+layout(local_size_x = 256) in;
+
+#if OP == 0
+layout(push_constant) uniform Push {
+    uint64_t n;
+    uint64_t r;
+    uint hw;
+} pc;
+#else
+layout(push_constant) uniform Push {
+    uint64_t pn;
+    uint64_t pr;
+    uint64_t xy;
+    uint64_t ang;
+    uint64_t ray;
+    uint64_t op;
+    real fu;
+    real cu;
+    real fv;
+    real cv;
+    int H;
+    int W;
+} pc;
+#endif
+
+const real kRayEps = kE2;
+
+#ifdef F64
+void sincos_real(double x, out double s, out double c) {
+    const double j = round(x * 0.63661977236758134308lf);
+    // pi/2 in two parts: hi has 33 significant bits, so j * hi is exact for |j| < 2^20.
+    double y = x - j * 1.5707963267341256141662598lf;
+    y = y - j * 6.0771005065061922518926e-11lf;
+    const double z = y * y;
+    // sin y = y (1 - z/3! + z^2/5! - ...), cos y = 1 - z/2! + z^2/4! - ...
+    // Horner in z: sin y = y + y z sum_k (-1)^(k+1) z^k / (2k+3)!,
+    // cos y = 1 - z sum_k (-1)^k z^k / (2k+2)!.
+    double ps = -1.0lf / 121645100408832000.0lf;       // -1/19!
+    ps = ps * z + 1.0lf / 355687428096000.0lf;         //  1/17!
+    ps = ps * z - 1.0lf / 1307674368000.0lf;           // -1/15!
+    ps = ps * z + 1.0lf / 6227020800.0lf;              //  1/13!
+    ps = ps * z - 1.0lf / 39916800.0lf;                // -1/11!
+    ps = ps * z + 1.0lf / 362880.0lf;                  //  1/9!
+    ps = ps * z - 1.0lf / 5040.0lf;                    // -1/7!
+    ps = ps * z + 1.0lf / 120.0lf;                     //  1/5!
+    ps = ps * z - 1.0lf / 6.0lf;                       // -1/3!
+    const double sv = y + y * z * ps;
+    double pcos = 1.0lf / 6402373705728000.0lf;        //  1/18!
+    pcos = pcos * z - 1.0lf / 20922789888000.0lf;      // -1/16!
+    pcos = pcos * z + 1.0lf / 87178291200.0lf;         //  1/14!
+    pcos = pcos * z - 1.0lf / 479001600.0lf;           // -1/12!
+    pcos = pcos * z + 1.0lf / 3628800.0lf;             //  1/10!
+    pcos = pcos * z - 1.0lf / 40320.0lf;               // -1/8!
+    pcos = pcos * z + 1.0lf / 720.0lf;                 //  1/6!
+    pcos = pcos * z - 1.0lf / 24.0lf;                  // -1/4!
+    pcos = pcos * z + 0.5lf;                           //  1/2!
+    const double cv = 1.0lf - z * pcos;
+    const int q = int(j) & 3;
+    if (q == 0)      { s = sv;  c = cv;  }
+    else if (q == 1) { s = cv;  c = -sv; }
+    else if (q == 2) { s = -sv; c = -cv; }
+    else             { s = -cv; c = sv;  }
+}
+#else
+void sincos_real(float x, out float s, out float c) { sincos_acc(x, s, c); }
+#endif
+
+bool finite_real(real v) { return !isnan(v) && !isinf(v); }
+
+real ldr(uint64_t base, uint i) { return real(F32Buf(base).v[i]); }
+
+// RayReLU of (nx, ny, nz) against the ray (rx, ry, rz), normalised.
+void ray_relu3(inout real nx, inout real ny, inout real nz, real rx, real ry, real rz) {
+    const real nn = sqrt(nx * nx + ny * ny + nz * nz);
+    const real rr = sqrt(rx * rx + ry * ry + rz * rz);
+    const real denom = max(nn * rr, kE8);
+    const real c = (nx * rx + ny * ry + nz * rz) / denom;
+    const real relu_cm = max(c - kRayEps, K(0.0)) + kRayEps;
+    const real dcoef = relu_cm - c;
+    const real mx = nx + rx * dcoef, my = ny + ry * dcoef, mz = nz + rz * dcoef;
+    const real inv = K(1.0) / max(sqrt(mx * mx + my * my + mz * mz), kE12);
+    nx = mx * inv;
+    ny = my * inv;
+    nz = mz * inv;
+}
+
+#if OP == 0
+
+void main() {
+    const uint HW = pc.hw;
+    for (uint p = gl_GlobalInvocationID.x; p < HW; p += GRID_STRIDE_X) {
+        real nx = ldr(pc.n, p), ny = ldr(pc.n, HW + p), nz = ldr(pc.n, 2u * HW + p);
+        ray_relu3(nx, ny, nz, ldr(pc.r, p), ldr(pc.r, HW + p), ldr(pc.r, 2u * HW + p));
+        F32Buf(pc.n).v[p] = float(nx);
+        F32Buf(pc.n).v[HW + p] = float(ny);
+        F32Buf(pc.n).v[2u * HW + p] = float(nz);
+    }
+}
+
+#else
+
+const int kPs = 5, kPad = 2, kPP = 25;
+
+// axis_angle_to_matrix (PyTorch3D port): ax = axis * angle -> row-major R.
+void axis_angle_to_matrix(real ax, real ay, real az, out real R[9]) {
+    const real angle = sqrt(ax * ax + ay * ay + az * az);
+    const real hang = angle * K(0.5);
+    real sh, ch;
+    sincos_real(hang, sh, ch);
+    const real s = angle < kE6 ? K(0.5) - (angle * angle) / K(48.0) : sh / angle;
+    const real r = ch;
+    const real i = ax * s, j = ay * s, k = az * s;
+    const real two_s = K(2.0) / (r * r + i * i + j * j + k * k);
+    R[0] = K(1.0) - two_s * (j * j + k * k);
+    R[1] = two_s * (i * j - k * r);
+    R[2] = two_s * (i * k + j * r);
+    R[3] = two_s * (i * j + k * r);
+    R[4] = K(1.0) - two_s * (i * i + k * k);
+    R[5] = two_s * (j * k - i * r);
+    R[6] = two_s * (i * k - j * r);
+    R[7] = two_s * (j * k + i * r);
+    R[8] = K(1.0) - two_s * (i * i + j * j);
+}
+
+void main() {
+    const int H = pc.H, W = pc.W;
+    const uint HW = uint(H) * uint(W);
+    for (uint p = gl_GlobalInvocationID.x; p < HW; p += GRID_STRIDE_X) {
+        const int y = int(p) / W, x = int(p) % W;
+        const real rx = ldr(pc.ray, p), ry = ldr(pc.ray, HW + p), rz = ldr(pc.ray, 2u * HW + p);
+        real acc0 = K(0.0), acc1 = K(0.0), acc2 = K(0.0);
+        for (int nn = 0; nn < kPP; ++nn) {
+            const int ky = nn / kPs, kx = nn % kPs;
+            const int sy = clamp(y - kPad + ky, 0, H - 1);   // replicate pad
+            const int sx = clamp(x - kPad + kx, 0, W - 1);
+            const uint sp = uint(sy) * uint(W) + uint(sx);
+
+            const real nx = ldr(pc.pn, sp), ny = ldr(pc.pn, HW + sp), nz = ldr(pc.pn, 2u * HW + sp);
+            const real pix_x = real(sx) + K(0.5), pix_y = real(sy) + K(0.5);
+
+            real xs = ldr(pc.xy, uint(nn) * HW + p);
+            real ys = ldr(pc.xy, uint(kPP + nn) * HW + p);
+            const real xyinv = K(1.0) / max(sqrt(xs * xs + ys * ys), kE12);
+            xs *= xyinv;
+            ys *= xyinv;
+            const real theta = ldr(pc.ang, uint(nn) * HW + p);
+            const real w = ldr(pc.pr, uint(nn) * HW + p);
+
+            const real du_over_fu = xs / pc.fu;
+            const real dv_over_fv = ys / pc.fv;
+            const real term_u = (pix_x + xs - pc.cu) / pc.fu;
+            const real term_v = (pix_y + ys - pc.cv) / pc.fv;
+
+            const real num = -(du_over_fu * nx + dv_over_fv * ny);
+            real dd = term_u * nx + term_v * ny + nz;
+            if (abs(dd) < kE8) dd = kE8 * sign(dd);
+            const real dz = num / dd;
+
+            real axx = du_over_fu + dz * term_u;
+            real axy = dv_over_fv + dz * term_v;
+            real axz = dz;
+            const real ainv = K(1.0) / max(sqrt(axx * axx + axy * axy + axz * axz), kE12);
+            axx *= ainv;
+            axy *= ainv;
+            axz *= ainv;
+            if (!finite_real(axx) || !finite_real(axy) || !finite_real(axz)) {
+                axx = K(0.0); axy = K(0.0); axz = K(0.0);   // invalid axis -> identity
+            }
+
+            real R[9];
+            axis_angle_to_matrix(axx * theta, axy * theta, axz * theta, R);
+            real rnx = R[0] * nx + R[1] * ny + R[2] * nz;
+            real rny = R[3] * nx + R[4] * ny + R[5] * nz;
+            real rnz = R[6] * nx + R[7] * ny + R[8] * nz;
+            const real rinv = K(1.0) / max(sqrt(rnx * rnx + rny * rny + rnz * rnz), kE12);
+            rnx *= rinv;
+            rny *= rinv;
+            rnz *= rinv;
+
+            ray_relu3(rnx, rny, rnz, rx, ry, rz);   // against the output pixel's ray
+            acc0 += w * rnx;
+            acc1 += w * rny;
+            acc2 += w * rnz;
+        }
+        const real inv = K(1.0) / max(sqrt(acc0 * acc0 + acc1 * acc1 + acc2 * acc2), kE12);
+        F32Buf(pc.op).v[p] = float(acc0 * inv);
+        F32Buf(pc.op).v[HW + p] = float(acc1 * inv);
+        F32Buf(pc.op).v[2u * HW + p] = float(acc2 * inv);
+    }
+}
+
+#endif

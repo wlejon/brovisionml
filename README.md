@@ -103,7 +103,7 @@ timings. The per-model precision table, bench usage, profiler, and the
 overlapping-tile path for large images are in
 [docs/performance.md](docs/performance.md).
 
-Every CLI tool takes `--device cpu|cuda|hip|rocm|metal|gpu` (default `cpu`;
+Every CLI tool takes `--device cpu|cuda|hip|rocm|metal|vulkan|gpu` (default `cpu`;
 `bench` defaults to `gpu`). `gpu` is the best backend the build registered
 (brotensor's default device: HIP, else CUDA, else Metal); the older `--cuda`
 flag is kept and means `--device gpu`. An unavailable backend falls back to

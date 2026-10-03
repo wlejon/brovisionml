@@ -8,7 +8,7 @@
 //     --seed N       PRNG seed for z (default: 0)
 //     --trunc PSI    truncation psi (default: 1.0 = none)
 //     --out PATH     output PNG path (default: stylegan3.png)
-//     --device D     cpu|cuda|hip|rocm|metal|gpu (default: cpu)
+//     --device D     cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)
 //     --cuda         same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
@@ -40,7 +40,7 @@ using brotensor::Tensor;
         "  --seed N      PRNG seed for z (default: 0)\n"
         "  --trunc PSI   truncation psi (default: 1.0)\n"
         "  --out PATH    output PNG (default: stylegan3.png)\n"
-        "  --device D    cpu|cuda|hip|rocm|metal|gpu (default: cpu)\n"
+        "  --device D    cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)\n"
         "  --cuda        same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }
