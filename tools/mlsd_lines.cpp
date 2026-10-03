@@ -7,7 +7,7 @@
 //     --out PATH        output PNG path (default: mlsd.png)
 //     --score-thr F     center-score threshold (default: 0.1)
 //     --dist-thr F      minimum segment length on the 256 grid (default: 0.1)
-//     --device D        cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)
+//     --device D        cpu|cuda|metal|vulkan|gpu (default: cpu)
 //     --cuda            same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
@@ -41,7 +41,7 @@ using brovisionml::mlsd::MLSDdetector;
         "  --out PATH      output PNG (default: mlsd.png)\n"
         "  --score-thr F   center-score threshold (default: 0.1)\n"
         "  --dist-thr F    minimum segment length on the 256 grid (default: 0.1)\n"
-        "  --device D      cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)\n"
+        "  --device D      cpu|cuda|metal|vulkan|gpu (default: cpu)\n"
         "  --cuda          same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }

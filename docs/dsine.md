@@ -47,7 +47,7 @@ The `normal_estimate` CLI tool writes that standard normal-map PNG; `--device`
 ```bash
 normal_estimate /path/to/dsine photo.jpg --out normal.png
 # flags: --fov DEG   (assumed field-of-view for the synthesized intrinsics)
-#        --device cpu|cuda|hip|rocm|metal|vulkan|gpu  (or --cuda = gpu)
+#        --device cpu|cuda|metal|vulkan|gpu  (or --cuda = gpu)
 ```
 
 ## GPU path

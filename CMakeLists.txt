@@ -25,7 +25,6 @@ endif()
 # if(NOT TARGET ...) guards below reuse it, backend and all.
 option(BROTENSOR_WITH_CUDA  "Build the CUDA GPU backend"  OFF)
 option(BROTENSOR_WITH_METAL "Build the Metal GPU backend" OFF)
-option(BROTENSOR_WITH_HIP   "Build the HIP GPU backend"   OFF)
 option(BROTENSOR_WITH_VULKAN "Build the Vulkan GPU backend" OFF)
 
 # Unlike the rest of the stack (which composes brotensor ops), brovisionml ships
@@ -45,25 +44,6 @@ if(BROTENSOR_WITH_CUDA)
     if(MSVC AND DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
         set(CMAKE_CUDA_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
     endif()
-endif()
-
-if(BROTENSOR_WITH_HIP)
-    # ROCm root and target architectures resolve exactly as brotensor's do
-    # (brotensor's cmake/BrotensorHip.cmake): ROCM_PATH, and the build
-    # machine's GPUs unless CMAKE_HIP_ARCHITECTURES is given.
-    set(BROTENSOR_DIR "${CMAKE_SOURCE_DIR}/../brotensor" CACHE PATH
-        "Path to standalone brotensor repo (set to a missing path to force submodule fallback)")
-    if(EXISTS "${BROTENSOR_DIR}/cmake/BrotensorHip.cmake")
-        include("${BROTENSOR_DIR}/cmake/BrotensorHip.cmake")
-    else()
-        include("${CMAKE_SOURCE_DIR}/third_party/brotensor/cmake/BrotensorHip.cmake")
-    endif()
-    brotensor_hip_prepare()
-    enable_language(HIP)
-    brotensor_hip_check_archs()
-    set(CMAKE_HIP_STANDARD 20)
-    set(CMAKE_HIP_STANDARD_REQUIRED ON)
-    find_package(hip REQUIRED)
 endif()
 
 if(BROTENSOR_WITH_VULKAN)
@@ -251,17 +231,6 @@ if(BROTENSOR_WITH_CUDA)
         CUDA_STANDARD 17
         CUDA_STANDARD_REQUIRED ON
         CUDA_SEPARABLE_COMPILATION OFF)
-endif()
-
-if(BROTENSOR_WITH_HIP)
-    target_sources(brovisionml PRIVATE src/dsine_ops.cu src/dpt_preprocess_gpu.cu)
-    set_source_files_properties(src/dsine_ops.cu src/dpt_preprocess_gpu.cu PROPERTIES LANGUAGE HIP)
-    target_include_directories(brovisionml PRIVATE
-        ${BROTENSOR_DIR}/src/hip/compat
-        ${BROTENSOR_DIR}/src/hip/detail
-    )
-    target_compile_definitions(brovisionml PRIVATE BROVISIONML_WITH_HIP=1)
-    target_link_libraries(brovisionml PUBLIC hip::host)
 endif()
 
 # brovisionml's Vulkan twins of the same kernels: GLSL embedded as SPIR-V

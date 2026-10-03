@@ -13,7 +13,7 @@
 //     --min-region-area N     remove regions/holes smaller than N px (default 0)
 //     --variant V             vit_h (default) | vit_l | vit_b
 //     --out PATH              output overlay PNG (default: amg.png)
-//     --device D              cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)
+//     --device D              cpu|cuda|metal|vulkan|gpu (default: cpu)
 //     --cuda                  same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
@@ -53,7 +53,7 @@ using brovisionml::sam::SamConfig;
         "  --min-region-area N   drop regions/holes < N px (default 0)\n"
         "  --variant V           vit_h (default) | vit_l | vit_b\n"
         "  --out PATH            output overlay PNG (default: amg.png)\n"
-        "  --device D            cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)\n"
+        "  --device D            cpu|cuda|metal|vulkan|gpu (default: cpu)\n"
         "  --cuda                same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }

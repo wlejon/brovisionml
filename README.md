@@ -7,7 +7,7 @@
 Vision-model inference in pure C++20. brovisionml runs standalone
 image-understanding models — promptable segmentation, depth, surface
 normals, pose, edges, lines, semantic segmentation, background matting, and
-GAN image generation — on CPU or GPU (CUDA / Metal / Vulkan / HIP), loading HuggingFace
+GAN image generation — on CPU or GPU (CUDA / Metal / Vulkan), loading HuggingFace
 safetensors checkpoints directly with no conversion or Python runtime.
 
 Each model is a small orchestrator class (`load()` → optional
@@ -47,14 +47,14 @@ ctest --test-dir build -C Release
 cmake -B build -DBROTENSOR_WITH_CUDA=ON
 cmake --build build --config Release
 
-# AMD: Vulkan (the AMD backend of choice) + HIP as the comparison backend
-cmake -B build_vk -G Ninja -DCMAKE_BUILD_TYPE=Release -DBROTENSOR_WITH_VULKAN=ON -DBROTENSOR_WITH_HIP=ON
+# AMD (or any Vulkan GPU): the Vulkan backend
+cmake -B build_vk -G Ninja -DCMAKE_BUILD_TYPE=Release -DBROTENSOR_WITH_VULKAN=ON
 cmake --build build_vk
 ```
 
 CPU is the FP32 default; `BROTENSOR_WITH_CUDA=ON` / `BROTENSOR_WITH_METAL=ON` /
-`BROTENSOR_WITH_VULKAN=ON` / `BROTENSOR_WITH_HIP=ON` enable a GPU backend (Vulkan
-beside HIP is the default device; `BROTENSOR_PREFER_HIP=1` picks HIP). Other options: `BROVISIONML_TESTS` /
+`BROTENSOR_WITH_VULKAN=ON` enable a GPU backend (Vulkan is the AMD GPU
+backend). Other options: `BROVISIONML_TESTS` /
 `BROVISIONML_TOOLS` (default ON standalone), `BROVISIONML_INSTALL` (default
 OFF — consume via `add_subdirectory`).
 
@@ -100,8 +100,8 @@ absent — a fresh clone builds and passes ctest with no downloads.
 ## GPU & performance
 
 Models load on CPU and migrate with `.to(Device::CUDA)` (or `Device::VULKAN` /
-`Device::HIP` / `Device::Metal`; `Device::CUDA` aliases to Vulkan or HIP
-when there is no CUDA backend). On CUDA most forwards run FP16 where it's safe — full-FP16
+`Device::Metal`; `Device::CUDA` aliases to Vulkan when there is no CUDA
+backend). On CUDA most forwards run FP16 where it's safe — full-FP16
 WMMA trunks for the conv annotators, mixed-precision (FP16 GEMMs, FP32 residual
 streams) for the ViT backbones — engaged automatically by the backend's compute dtype.
 `tools/bench` times every family; `BROVISIONML_PROFILE=1` prints per-stage
@@ -109,9 +109,9 @@ timings. The per-model precision table, bench usage, profiler, and the
 overlapping-tile path for large images are in
 [docs/performance.md](docs/performance.md).
 
-Every CLI tool takes `--device cpu|cuda|hip|rocm|metal|vulkan|gpu` (default `cpu`;
+Every CLI tool takes `--device cpu|cuda|metal|vulkan|gpu` (default `cpu`;
 `bench` defaults to `gpu`). `gpu` is the best backend the build registered
-(brotensor's default device: CUDA, else Metal, else Vulkan, else HIP); the older `--cuda`
+(brotensor's default device: CUDA, else Metal, else Vulkan); the older `--cuda`
 flag is kept and means `--device gpu`. An unavailable backend falls back to
 the CPU with a note on stderr.
 

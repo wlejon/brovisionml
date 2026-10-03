@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <string>
 
-#if defined(BROVISIONML_WITH_CUDA) || defined(BROVISIONML_WITH_HIP) || defined(BROTENSOR_HAS_CUDA) || defined(BROTENSOR_HAS_HIP)
+#if defined(BROVISIONML_WITH_CUDA) || defined(BROTENSOR_HAS_CUDA)
 #include "dsine_ops_cuda.h"
 #endif
 #if defined(BROVISIONML_WITH_METAL)
@@ -189,16 +189,16 @@ void ray_relu(brotensor::Tensor& normal, const brotensor::Tensor& ray,
         ray_relu_cpu(normal, ray, H, W);
         return;
     }
-    // Each GPU backend gets its own kernel: a HIP + Vulkan build must never
-    // hand a Vulkan buffer address to the HIP kernel.
+    // Each GPU backend gets its own kernel: a CUDA + Vulkan build must never
+    // hand a Vulkan buffer address to the CUDA kernel.
 #if defined(BROVISIONML_WITH_VULKAN)
     if (normal.device.is_vulkan()) {
         detail::ray_relu_vulkan(normal, ray, H, W);
         return;
     }
 #endif
-#if defined(BROVISIONML_WITH_CUDA) || defined(BROVISIONML_WITH_HIP) || defined(BROTENSOR_HAS_CUDA) || defined(BROTENSOR_HAS_HIP)
-    if (normal.device.is_cuda() || normal.device.is_hip()) {
+#if defined(BROVISIONML_WITH_CUDA) || defined(BROTENSOR_HAS_CUDA)
+    if (normal.device.is_cuda()) {
         detail::ray_relu_cuda(normal, ray, H, W);
         return;
     }
@@ -234,8 +234,8 @@ void angmf_propagate(const brotensor::Tensor& pred_norm,
         return;
     }
 #endif
-#if defined(BROVISIONML_WITH_CUDA) || defined(BROVISIONML_WITH_HIP) || defined(BROTENSOR_HAS_CUDA) || defined(BROTENSOR_HAS_HIP)
-    if (dev.is_cuda() || dev.is_hip()) {
+#if defined(BROVISIONML_WITH_CUDA) || defined(BROTENSOR_HAS_CUDA)
+    if (dev.is_cuda()) {
         detail::angmf_propagate_cuda(pred_norm, prob, xy, angle, ray, fu, cu, fv, cv,
                                      H, W, out);
         return;

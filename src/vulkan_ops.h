@@ -2,7 +2,7 @@
 //
 // Vulkan twins of brovisionml's own GPU kernels (src/vulkan_ops.cpp, GLSL in
 // src/vulkan/): the DSINE NRN ops (dsine_ops.cu) and the DPT bicubic
-// preprocessor (dpt_preprocess_gpu.cu). Same contracts as the CUDA / HIP
+// preprocessor (dpt_preprocess_gpu.cu). Same contracts as the CUDA
 // entry points; compiled only with BROTENSOR_WITH_VULKAN
 // (BROVISIONML_WITH_VULKAN). The DSINE geometry runs in double when the device
 // has shaderFloat64 (as on the CPU and CUDA), else in float (as on Metal).

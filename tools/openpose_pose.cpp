@@ -7,7 +7,7 @@
 //   openpose_pose <checkpoint-dir-or-file> <image> [options]
 //     --out PATH        output PNG path (default: openpose.png)
 //     --resolution N    detect resolution (shorter side, default: 512)
-//     --device D        cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)
+//     --device D        cpu|cuda|metal|vulkan|gpu (default: cpu)
 //     --cuda            same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
@@ -37,7 +37,7 @@ using brovisionml::openpose::PoseResult;
         "usage: %s <checkpoint-dir-or-file> <image> [options]\n"
         "  --out PATH      output PNG (default: openpose.png)\n"
         "  --resolution N  detect resolution (shorter side, default: 512)\n"
-        "  --device D      cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)\n"
+        "  --device D      cpu|cuda|metal|vulkan|gpu (default: cpu)\n"
         "  --cuda          same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }

@@ -8,7 +8,7 @@
 //     --resolution N    longer-side working resolution (default: 0 = native)
 //     --no-invert       write the raw generator output (bright field, dark
 //                       lines) instead of the inverted ControlNet convention
-//     --device D        cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)
+//     --device D        cpu|cuda|metal|vulkan|gpu (default: cpu)
 //     --cuda            same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
@@ -40,7 +40,7 @@ using brovisionml::lineart::LineartDetector;
         "  --out PATH        output PNG (default: lineart.png)\n"
         "  --resolution N    longer-side working resolution (default: 0 = native)\n"
         "  --no-invert       write the raw output (bright field, dark lines)\n"
-        "  --device D        cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)\n"
+        "  --device D        cpu|cuda|metal|vulkan|gpu (default: cpu)\n"
         "  --cuda            same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }

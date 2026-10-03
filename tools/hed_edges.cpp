@@ -6,7 +6,7 @@
 //   hed_edges <checkpoint-dir-or-file> <image> [options]
 //     --out PATH        output PNG path (default: edges.png)
 //     --resolution N    longer-side working resolution (default: 0 = native)
-//     --device D        cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)
+//     --device D        cpu|cuda|metal|vulkan|gpu (default: cpu)
 //     --cuda            same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
@@ -37,7 +37,7 @@ using brovisionml::hed::SoftEdgeDetector;
         "usage: %s <checkpoint-dir-or-file> <image> [options]\n"
         "  --out PATH        output PNG (default: edges.png)\n"
         "  --resolution N    longer-side working resolution (default: 0 = native)\n"
-        "  --device D        cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)\n"
+        "  --device D        cpu|cuda|metal|vulkan|gpu (default: cpu)\n"
         "  --cuda            same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }

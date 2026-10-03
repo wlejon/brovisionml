@@ -5,7 +5,7 @@
 #include "broimage/normalize.h"
 #include "broimage/presets.h"
 
-#if defined(BROVISIONML_WITH_CUDA) || defined(BROVISIONML_WITH_HIP)
+#if defined(BROVISIONML_WITH_CUDA)
 #include "dpt_preprocess_gpu.h"
 #endif
 #if defined(BROVISIONML_WITH_VULKAN)
@@ -106,11 +106,11 @@ PreprocessedImage preprocess_device(const uint8_t* rgb, int w, int h, int channe
     if (dev == brotensor::Device::CPU) {
         return preprocess(rgb, w, h, channels, target, multiple, keep_aspect_ratio);
     }
-    // The fused bicubic + normalise kernel of the tensor's backend (CUDA / HIP,
+    // The fused bicubic + normalise kernel of the tensor's backend (CUDA,
     // Vulkan); any other GPU preprocesses on the host and uploads.
     bool fused = false;
-#if defined(BROVISIONML_WITH_CUDA) || defined(BROVISIONML_WITH_HIP)
-    fused = fused || dev.is_cuda() || dev.is_hip();
+#if defined(BROVISIONML_WITH_CUDA)
+    fused = fused || dev.is_cuda();
 #endif
 #if defined(BROVISIONML_WITH_VULKAN)
     fused = fused || dev.is_vulkan();
@@ -136,8 +136,8 @@ PreprocessedImage preprocess_device(const uint8_t* rgb, int w, int h, int channe
         detail::dpt_preprocess_vulkan(rgb, w, h, channels, dev, new_w, new_h, out.pixels);
     }
 #endif
-#if defined(BROVISIONML_WITH_CUDA) || defined(BROVISIONML_WITH_HIP)
-    if (dev.is_cuda() || dev.is_hip()) {
+#if defined(BROVISIONML_WITH_CUDA)
+    if (dev.is_cuda()) {
         detail::dpt_preprocess_gpu(rgb, w, h, channels, dev, new_w, new_h, out.pixels);
     }
 #endif

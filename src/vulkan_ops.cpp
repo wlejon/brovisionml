@@ -91,7 +91,7 @@ void angmf_propagate_vulkan(const bt::Tensor& pred_norm, const bt::Tensor& prob,
     require_f32(angle, "angmf_propagate: angle");
     require_f32(ray, "angmf_propagate: ray");
     const std::uint64_t HW = static_cast<std::uint64_t>(H) * W;
-    // As on CUDA / HIP: the output is allocated on the input's device.
+    // As on CUDA: the output is allocated on the input's device.
     out = bt::Tensor::zeros_on(pred_norm.device, 1, static_cast<int>(3 * HW));
     if (HW == 0) return;
     if (pred_norm.size() < 3 * HW || ray.size() < 3 * HW || prob.size() < 25 * HW ||

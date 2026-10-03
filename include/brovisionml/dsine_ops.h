@@ -7,9 +7,9 @@
 // brotensor; what stays here is DSINE's rotation/clamp geometry. These are
 // brovisionml's first CUDA kernels.
 //
-// Each op has a CPU FP32 path and a kernel per GPU backend built in — CUDA / HIP
+// Each op has a CPU FP32 path and a kernel per GPU backend built in — CUDA
 // (dsine_ops.cu), Metal (dsine_ops.mm), Vulkan (src/vulkan/dsine_ops.comp); the
-// public entry points dispatch on the input tensor's device. The CPU, CUDA / HIP
+// public entry points dispatch on the input tensor's device. The CPU, CUDA
 // and Vulkan paths run their per-pixel geometry in double (Vulkan: when the
 // device has shaderFloat64, else float as on Metal), and operate on the /8 NRN
 // grid in NCHW layout.

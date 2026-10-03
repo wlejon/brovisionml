@@ -11,7 +11,7 @@
 //     --variant V          vit_h (default) | vit_l | vit_b
 //     --single             return the single best mask (default: multimask)
 //     --out PATH           output PNG path (default: mask.png)
-//     --device D           cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)
+//     --device D           cpu|cuda|metal|vulkan|gpu (default: cpu)
 //     --cuda               same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
@@ -54,7 +54,7 @@ bool parse4(const char* s, float& a, float& b, float& c, float& d) {
         "  --variant V        vit_h (default) | vit_l | vit_b\n"
         "  --single           single best mask (default: multimask)\n"
         "  --out PATH         output PNG (default: mask.png)\n"
-        "  --device D         cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)\n"
+        "  --device D         cpu|cuda|metal|vulkan|gpu (default: cpu)\n"
         "  --cuda             same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }

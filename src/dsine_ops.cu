@@ -1,6 +1,4 @@
 // CUDA kernels for the DSINE NRN device ops — brovisionml's first CUDA code.
-// The same source also builds as HIP (BROTENSOR_WITH_HIP) through brotensor's
-// src/hip/compat cuda_runtime.h shim.
 // The host wrappers (declared in dsine_ops_cuda.h) cast the brotensor tensors'
 // raw device pointers and launch one thread per /8-grid pixel on the default
 // stream (the stream brotensor's own ops use, so no cross-stream sync needed).
@@ -177,8 +175,7 @@ void angmf_propagate_cuda(const brotensor::Tensor& pred_norm,
                           double fu, double cu, double fv, double cv,
                           int H, int W, brotensor::Tensor& out) {
     const int HW = H * W;
-    // Allocate on the input's device: this TU is built as CUDA or (via the
-    // brotensor compat headers) as HIP, so the output must not name a backend.
+    // Allocate on the input's device rather than naming a backend.
     out = brotensor::Tensor::zeros_on(pred_norm.device, 1, 3 * HW);
     if (HW == 0) return;
     const int block = 256;

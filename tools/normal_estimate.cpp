@@ -7,7 +7,7 @@
 //   normal_estimate <checkpoint-dir-or-file> <image> [options]
 //     --out PATH    output PNG path (default: normal.png)
 //     --fov DEG     assumed field-of-view for the synthesized intrinsics (60)
-//     --device D    cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)
+//     --device D    cpu|cuda|metal|vulkan|gpu (default: cpu)
 //     --cuda        same as --device gpu: the best available GPU
 //
 // Built standalone only (BROVISIONML_TOOLS); not part of the test suite.
@@ -36,7 +36,7 @@ using brovisionml::dsine::NormalMap;
         "usage: %s <checkpoint-dir-or-file> <image> [options]\n"
         "  --out PATH    output PNG (default: normal.png)\n"
         "  --fov DEG     assumed field-of-view for intrinsics (default: 60)\n"
-        "  --device D    cpu|cuda|hip|rocm|metal|vulkan|gpu (default: cpu)\n"
+        "  --device D    cpu|cuda|metal|vulkan|gpu (default: cpu)\n"
         "  --cuda        same as --device gpu (best available GPU)\n", prog);
     std::exit(2);
 }

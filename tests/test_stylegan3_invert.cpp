@@ -13,7 +13,7 @@
 //
 // Both gates are gated on the converted checkpoint
 // (weights/stylegan3-r-ffhqu-256/model.safetensors) and skip cleanly when it is
-// absent. Each runs on the GPU when available (HIP, else CUDA, else Metal), else CPU.
+// absent. Each runs on the GPU when available (the default GPU device), else CPU.
 
 #define _CRT_SECURE_NO_WARNINGS
 
