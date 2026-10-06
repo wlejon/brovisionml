@@ -58,14 +58,21 @@ backend). Other options: `BROVISIONML_TESTS` /
 `BROVISIONML_TOOLS` (default ON standalone), `BROVISIONML_INSTALL` (default
 OFF — consume via `add_subdirectory`).
 
-brovisionml links three sibling libraries, resolved at `../<name>` with a
-`third_party/<name>` fallback (override with `-DBROMATH_DIR` /
-`-DBROTENSOR_DIR` / `-DBROIMAGE_DIR`):
+brovisionml links three sibling libraries:
 [`bromath`](https://github.com/wlejon/bromath) (header-only math),
 [`brotensor`](https://github.com/wlejon/brotensor) (tensors + compute
 kernels + the safetensors loader), and
 [`broimage`](https://github.com/wlejon/broimage) (image decode, resampling,
-normalize presets). See [docs/architecture.md](docs/architecture.md).
+normalize presets). They resolve the way every repo in the ecosystem resolves a
+sibling: an existing target wins, then a checkout beside this one at
+`../<name>` (override with `-DBROMATH_DIR` / `-DBROTENSOR_DIR` /
+`-DBROIMAGE_DIR`), then the `third_party/` submodules, which carry all three,
+so `git clone --recursive` is enough for them. The JavaScript binding in
+`src/api/` needs [bronze](https://github.com/wlejon/bronze) and
+[brass](https://github.com/wlejon/brass) beside this repository in either
+layout (or `-DBRONZE_DIR=<path>`); they have no submodule, because the binding
+has to be compiled against the same bronze as the program that loads it. See
+[docs/architecture.md](docs/architecture.md).
 
 ## Quick start
 
@@ -115,18 +122,29 @@ Every CLI tool takes `--device cpu|cuda|metal|vulkan|gpu` (default `cpu`;
 flag is kept and means `--device gpu`. An unavailable backend falls back to
 the CPU with a note on stderr.
 
-Almost all GPU work happens inside brotensor ops; brovisionml ships exactly
-one CUDA source of its own (DSINE's two surface-normal domain ops — see
-[docs/architecture.md](docs/architecture.md)).
+Almost all GPU work happens inside brotensor ops; brovisionml's own GPU code
+is two small kernel sets — DSINE's two surface-normal domain ops and the DPT
+(Depth-Anything) preprocess — each as a CUDA source (`src/*.cu`) and a Vulkan
+compute shader (`src/vulkan/*.comp`), with a Metal twin for the DSINE ops
+(`src/dsine_ops.mm`). See [docs/architecture.md](docs/architecture.md).
+
+**Platforms.** The library builds and its self-contained tests pass on Windows
+(MSVC), Linux (GCC and Clang) and macOS (arm64); CI covers the CPU build. The
+CUDA (Windows, Linux), Metal (macOS) and Vulkan (any Vulkan GPU; the AMD path)
+paths are tested on hardware that has the weights.
 
 ## Ecosystem
 
-brovisionml is the vision member of the **bro** stack of sibling inference
-libraries — [`brolm`](https://github.com/wlejon/brolm) (text),
+brovisionml is the vision member of the
+[bro ecosystem](https://github.com/wlejon/bro/blob/main/docs/ecosystem.md)'s
+inference libraries — [`brolm`](https://github.com/wlejon/brolm) (text),
 [`brosoundml`](https://github.com/wlejon/brosoundml) (audio),
 [`brodiffusion`](https://github.com/wlejon/brodiffusion) (image generation)
 — but stands alone: its own build, tests, and tools, with no dependency on
-any of them. How it relates to the rest of the stack (and why the
+any of them (brodiffusion builds on brovisionml: its image-to-3D pipeline
+uses the DINOv3 backbone and BiRefNet). [bro](https://github.com/wlejon/bro) links it under
+`BRO_WITH_VISION` and exposes it to apps as `bro.vision` through the
+JavaScript binding in `src/api/` (`brovisionml_api`). How it relates to the rest of the stack (and why the
 vision-language encoders live in brolm instead) is covered in
 [docs/architecture.md](docs/architecture.md#ecosystem).
 
