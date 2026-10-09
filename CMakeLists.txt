@@ -66,15 +66,15 @@ endif()
 # and brass for its JIT) reuses these targets rather than adding a second copy.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bro_deps.cmake)
 
-bro_dependency(bromath GITHUB wlejon/bromath REF 8b511fbd69c014bf0584d2b42e6c96a8cf720f6a TARGET bromath::bromath)
+bro_dependency(bromath GITHUB wlejon/bromath TARGET bromath::bromath)
 
 # bronze, the JavaScript runtime the api binds (it brings brass, its code
 # generator). The api is bound across bronze's C++ embed boundary, so it has to
 # build against the bronze the surrounding tree builds against.
-bro_dependency(bronze GITHUB wlejon/bronze REF 15ce4cf5fc25d8afe03882985ae95adcba46a6a9 TARGET bronze_runtime_shared
+bro_dependency(bronze GITHUB wlejon/bronze TARGET bronze_runtime_shared
                OPTIONS BRONZE_BUILD_SHARED_RUNTIME=ON BRONZE_BUILD_TESTS=OFF)
 
-bro_dependency(brotensor GITHUB wlejon/brotensor REF a332d9283c1e23b9f39e8ecaa4393f937dd26c0a)
+bro_dependency(brotensor GITHUB wlejon/brotensor)
 
 if(BROTENSOR_WITH_VULKAN)
     # The Vulkan twins of the DSINE and DPT kernels are GLSL (src/vulkan/*.comp),
@@ -88,7 +88,7 @@ endif()
 # (CLIP/ImageNet/SAM). It is the preprocessing front-end every vision model in
 # this repo feeds: decode → resize/letterbox → normalize → NHWC->NCHW. Its own
 # CUDA/Metal image preproc forwards into brotensor, so no GPU language here.
-bro_dependency(broimage GITHUB wlejon/broimage REF 9346cd5e97cb2fba0bae15e9f15fc0d9e37349ee)
+bro_dependency(broimage GITHUB wlejon/broimage)
 
 # --- brovisionml library ---
 
