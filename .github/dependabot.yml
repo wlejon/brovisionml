@@ -1,7 +1,7 @@
 version: 2
 
-# brovisionml pins its dependencies (bromath, brotensor, broimage, bronze) to
-# commits with bro_dependency() in CMakeLists.txt, not through a package
+# brovisionml takes its dependencies (bromath, brotensor, broimage, bronze) at
+# their main with bro_dependency() in CMakeLists.txt, not through a package
 # manager, and vendors nothing, so there is no
 # manifest for Dependabot to bump. The only versioned things it can watch are
 # the pinned actions in .github/workflows/.

@@ -17,7 +17,7 @@ concurrency:
 # brovisionml ships are not compiled. Every job builds a plain clone, checked
 # out under brovisionml/ with the build tree beside it; the three siblings and
 # bronze (the JavaScript runtime brovisionml_api binds, with brass, its code
-# generator) come from the commits CMakeLists.txt pins (cmake/bro_deps.cmake),
+# generator) come from the heads of their main branches (cmake/bro_deps.cmake),
 # fetched at configure. There are no submodules and no sibling checkouts.
 #
 # bronze and brass compile inside this build tree with the

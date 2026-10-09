@@ -33,9 +33,9 @@ domain-specific kernels belong here.
 
 ## Sibling dependencies
 
-Three sibling repos (plus bronze/brass for the binding), each pinned by
+Three sibling repos (plus bronze/brass for the binding), each a
 `bro_dependency()` in `CMakeLists.txt` (`cmake/bro_deps.cmake`): a working tree
-at `../<name>` wins, else the pinned commit is fetched at configure (the
+at `../<name>` wins, else the head of its main is fetched at configure (the
 `bro/docs/multi-repo-workflow.md` pattern):
 
 - **bromath** — header-only scalar / math helpers.

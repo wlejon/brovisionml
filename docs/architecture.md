@@ -10,8 +10,8 @@ brotensor where every sibling library can use it, and brovisionml composes it.
 
 ## Sibling dependencies
 
-Three sibling repos, each pinned by `bro_dependency()` in `CMakeLists.txt`: a
-working tree at `../<name>` wins, else the pinned commit is fetched at
+Three sibling repos, each declared by `bro_dependency()` in `CMakeLists.txt`: a
+working tree at `../<name>` wins, else the head of its main branch is fetched at
 configure. Override one with `-DFETCHCONTENT_SOURCE_DIR_<NAME>=...`.
 
 | Library | Role |

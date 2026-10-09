@@ -32,7 +32,7 @@ jobs:
           path: brovisionml
 
       # The dependencies — bromath, brotensor, broimage, and bronze (with brass)
-      # — are fetched at configure from the pinned commits. bronze is needed at
+      # — are fetched at configure from the heads of their main branches. bronze is needed at
       # configure for the api; it is not built here, since only the brovisionml
       # target is traced.
 

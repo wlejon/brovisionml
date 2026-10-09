@@ -59,8 +59,8 @@ endif()
 #
 # Each resolves through cmake/bro_deps.cmake, like every repo in the bro
 # ecosystem: an existing target (a superbuild such as bro already added it, and
-# its pins win) first; otherwise the ../<name> working tree beside the top-level
-# project; otherwise the commit pinned here, fetched at configure.
+# its choice wins) first; otherwise the ../<name> working tree beside the top-level
+# project; otherwise the head of its main, fetched at configure.
 #
 # Order matters: leaves first, so broimage (which links bromath and brotensor,
 # and brass for its JIT) reuses these targets rather than adding a second copy.
