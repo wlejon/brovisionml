@@ -10,9 +10,9 @@ brotensor where every sibling library can use it, and brovisionml composes it.
 
 ## Sibling dependencies
 
-Three sibling repos, resolved at `../<name>` with a `third_party/<name>`
-fallback. Override with `-DBROMATH_DIR=...`, `-DBROTENSOR_DIR=...`,
-`-DBROIMAGE_DIR=...`.
+Three sibling repos, each pinned by `bro_dependency()` in `CMakeLists.txt`: a
+working tree at `../<name>` wins, else the pinned commit is fetched at
+configure. Override one with `-DFETCHCONTENT_SOURCE_DIR_<NAME>=...`.
 
 | Library | Role |
 |---|---|

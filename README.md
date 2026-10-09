@@ -63,15 +63,16 @@ brovisionml links three sibling libraries:
 [`brotensor`](https://github.com/wlejon/brotensor) (tensors + compute
 kernels + the safetensors loader), and
 [`broimage`](https://github.com/wlejon/broimage) (image decode, resampling,
-normalize presets). They resolve the way every repo in the ecosystem resolves a
-sibling: an existing target wins, then a checkout beside this one at
-`../<name>` (override with `-DBROMATH_DIR` / `-DBROTENSOR_DIR` /
-`-DBROIMAGE_DIR`), then the `third_party/` submodules, which carry all three,
-so `git clone --recursive` is enough for them. The JavaScript binding in
-`src/api/` needs [bronze](https://github.com/wlejon/bronze) and
-[brass](https://github.com/wlejon/brass) beside this repository in either
-layout (or `-DBRONZE_DIR=<path>`); they have no submodule, because the binding
-has to be compiled against the same bronze as the program that loads it. See
+normalize presets). The JavaScript binding in `src/api/` also needs
+[bronze](https://github.com/wlejon/bronze) and its code generator
+[brass](https://github.com/wlejon/brass), compiled inside this build tree
+because the binding has to be compiled against the same bronze as the program
+that loads it. A plain clone is all it takes: each dependency is pinned to a
+commit in `CMakeLists.txt` (`bro_dependency()`, `cmake/bro_deps.cmake`) and
+resolves the way every repo in the ecosystem resolves one: an existing target
+wins, then a working tree beside this one at `../<name>`, then the pinned
+commit, fetched at configure. `-DFETCHCONTENT_SOURCE_DIR_<NAME>=<path>` points
+one dependency anywhere else. See
 [docs/architecture.md](docs/architecture.md).
 
 ## Quick start

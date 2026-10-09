@@ -14,19 +14,13 @@ concurrency:
 # decode / resampling / normalize. Its dependency closure is bromath
 # (header-only) + brotensor (Tensor + CPU op backend) + broimage. CI builds the
 # default CPU-only configuration (GPU backends OFF), so the DSINE CUDA kernels
-# brovisionml ships are not compiled and all three siblings are reconstructed
-# beside this repo:
+# brovisionml ships are not compiled. Every job builds a plain clone, checked
+# out under brovisionml/ with the build tree beside it; the three siblings and
+# bronze (the JavaScript runtime brovisionml_api binds, with brass, its code
+# generator) come from the commits CMakeLists.txt pins (cmake/bro_deps.cmake),
+# fetched at configure. There are no submodules and no sibling checkouts.
 #
-#   $GITHUB_WORKSPACE/
-#     brovisionml/  <- this repo, checked out into a named path
-#     bromath/
-#     brotensor/
-#     broimage/
-#     bronze/       <- the JavaScript runtime brovisionml_api binds
-#     brass/        <- bronze's code generator
-#
-# bronze and brass are laid out by bronze's checkout-toolchain action and
-# compiled inside this build tree (bronze add_subdirectory()s brass), with the
+# bronze and brass compile inside this build tree with the
 # job's own compiler and CRT — the api is bound across bronze's C++ embed
 # boundary, so a prebuilt bronze would be an unverifiable ABI hazard. That is
 # what makes brovisionml_test_api the check that the library works the way
@@ -50,14 +44,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: brovisionml
-      - uses: actions/checkout@v7
-        with: { repository: wlejon/bromath, path: bromath }
-      - uses: actions/checkout@v7
-        with: { repository: wlejon/brotensor, path: brotensor }
-      - uses: actions/checkout@v7
-        with: { repository: wlejon/broimage, path: broimage }
-
-      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
 
       - name: Install Ninja (Linux)
         if: runner.os == 'Linux'
@@ -84,44 +70,6 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
-  # ── Submodule fallback ────────────────────────────────────────────────────
-  #
-  # No sibling checkouts: bromath, brotensor and broimage come from the flat
-  # third_party/ submodules at the commits this repo pins, as they do for a
-  # fresh `git clone --recursive`. bronze and brass are the documented
-  # exception (no submodule; the api has to compile against the bronze of the
-  # program that loads it) and are laid out beside the repo as in the other
-  # jobs. The configure step checks each sibling really took the submodule
-  # path.
-  submodule:
-    name: Submodule fallback · ubuntu-24.04
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          path: brovisionml
-          submodules: recursive
-
-      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
-
-      - name: Install Ninja
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ninja-build
-
-      - name: Configure
-        shell: bash
-        run: |
-          test ! -e bromath && test ! -e brotensor && test ! -e broimage
-          cmake -S brovisionml -B build -G Ninja -DCMAKE_BUILD_TYPE=Release | tee configure.log
-          for s in bromath brotensor broimage; do
-            grep -q "brovisionml: $s from .*third_party/$s (submodule)" configure.log
-          done
-
-      - name: Build
-        run: cmake --build build --parallel 4
-
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-
   # ── Coverage ──────────────────────────────────────────────────────────────
   coverage:
     name: Coverage
@@ -130,14 +78,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: brovisionml
-      - uses: actions/checkout@v7
-        with: { repository: wlejon/bromath, path: bromath }
-      - uses: actions/checkout@v7
-        with: { repository: wlejon/brotensor, path: brotensor }
-      - uses: actions/checkout@v7
-        with: { repository: wlejon/broimage, path: broimage }
-
-      - uses: wlejon/bronze/.github/actions/checkout-toolchain@main
 
       - name: Install gcovr + Ninja
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcovr ninja-build
@@ -175,7 +115,7 @@ jobs:
           {
             echo '## Coverage — `include/brovisionml/` + `src/`'
             echo
-            echo 'The bromath / brotensor / broimage siblings are filtered out.'
+            echo 'The bromath / brotensor / broimage dependencies are filtered out.'
             echo
             echo '```'
             cat coverage-summary.txt
