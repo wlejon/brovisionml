@@ -1,5 +1,5 @@
 // Coverage for the bro.vision members the QuickJS -> bronze port dropped or
-// renamed (bro's docs/transition-drift.md row H7 and the vision rows of
+// renamed (the vision rows of
 // build/binding-audit/shape_all.txt).
 //
 // The heavyweight paths need checkpoints this repo does not ship, so the

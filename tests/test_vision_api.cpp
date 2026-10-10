@@ -16,7 +16,7 @@
 #include <string>
 
 // tests/test_vision_api_restored.cpp — the bro.vision members the bronze port
-// dropped or renamed (bro's docs/transition-drift.md row H7).
+// dropped or renamed.
 void brovisionmlTestRestoredSurface();
 
 // tests/test_vision_api_paths.cpp — setPathResolver: the host's resolver is
