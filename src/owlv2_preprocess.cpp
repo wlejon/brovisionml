@@ -11,13 +11,16 @@
 // Only the blurred values the bilinear taps read are computed: for each output
 // row, the (at most two) source rows it samples are blurred vertically across
 // the width once, then horizontally only at the sampled columns. A 6000-pixel
-// photo therefore costs ~2 x 960 blurred rows, not 6000^2 pixels.
+// photo therefore costs ~2 x 960 blurred rows, not 6000^2 pixels. Bands of
+// output rows run on up to 8 threads, each with its own row cache.
 
 #include "brovisionml/owlv2.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace brovisionml::owlv2 {
@@ -88,31 +91,14 @@ Pixels preprocess(const uint8_t* pixels, int width, int height, int channels, in
 
     const Taps ty = bilinear_taps(S, size), tx = bilinear_taps(S, size);
 
-    // Vertically blurred source rows, cached by row index (consecutive output
-    // rows share their taps). Each is 3 planes of S floats.
-    struct Row { int y = -1; std::vector<float> v; };
-    Row cache[2];
-    int next_slot = 0;
-    auto vrow = [&](int y) -> const std::vector<float>& {
-        for (Row& r : cache) if (r.y == y) return r.v;
-        Row& r = cache[next_slot];
-        next_slot ^= 1;
-        r.y = y;
-        r.v.assign(static_cast<std::size_t>(3) * S, 0.f);
-        for (int c = 0; c < 3; ++c) {
-            float* dst = r.v.data() + static_cast<std::size_t>(c) * S;
-            if (g.empty()) {
-                for (int x = 0; x < S; ++x) dst[x] = at(c, y, x);
-                continue;
-            }
-            for (int k = -radius; k <= radius; ++k) {
-                const int yy = reflect(y + k, S);
-                const float w = g[k + radius];
-                for (int x = 0; x < S; ++x) dst[x] += w * at(c, yy, x);
-            }
-        }
-        return r.v;
-    };
+    Pixels out;
+    out.width = width;
+    out.height = height;
+    out.padded = S;
+    out.nchw = brotensor::Tensor::mat(1, 3 * size * size);
+    float* dst = out.nchw.host_f32_mut();
+    const std::size_t plane = static_cast<std::size_t>(size) * size;
+
     // Horizontal blur of a vertically blurred row at one column.
     auto hval = [&](const std::vector<float>& v, int c, int x) -> float {
         const float* row = v.data() + static_cast<std::size_t>(c) * S;
@@ -122,34 +108,72 @@ Pixels preprocess(const uint8_t* pixels, int width, int height, int channels, in
         return acc;
     };
 
-    Pixels out;
-    out.width = width;
-    out.height = height;
-    out.padded = S;
-    out.nchw = brotensor::Tensor::mat(1, 3 * size * size);
-    float* dst = out.nchw.host_f32_mut();
-    const std::size_t plane = static_cast<std::size_t>(size) * size;
-    std::vector<float> top(static_cast<std::size_t>(3) * size), bot(static_cast<std::size_t>(3) * size);
-    for (int oy = 0; oy < size; ++oy) {
-        // Horizontal resample of the two source rows, then blend them.
-        for (int pass = 0; pass < 2; ++pass) {
-            const std::vector<float>& v = vrow(pass == 0 ? ty.i0[oy] : ty.i1[oy]);
-            std::vector<float>& h = pass == 0 ? top : bot;
+    // Output rows [oy0, oy1): each band keeps its own row cache, and every
+    // output value is computed the same way in any band, so the split does
+    // not change the result.
+    auto band = [&](int oy0, int oy1) {
+        // Vertically blurred source rows, cached by row index (consecutive
+        // output rows share their taps). Each is 3 planes of S floats.
+        struct Row { int y = -1; std::vector<float> v; };
+        Row cache[2];
+        int next_slot = 0;
+        auto vrow = [&](int y) -> const std::vector<float>& {
+            for (Row& r : cache) if (r.y == y) return r.v;
+            Row& r = cache[next_slot];
+            next_slot ^= 1;
+            r.y = y;
+            r.v.assign(static_cast<std::size_t>(3) * S, 0.f);
             for (int c = 0; c < 3; ++c) {
-                for (int ox = 0; ox < size; ++ox) {
-                    const float a = hval(v, c, tx.i0[ox]), b = hval(v, c, tx.i1[ox]);
-                    h[static_cast<std::size_t>(c) * size + ox] = a + (b - a) * tx.l1[ox];
+                float* row = r.v.data() + static_cast<std::size_t>(c) * S;
+                if (g.empty()) {
+                    for (int x = 0; x < S; ++x) row[x] = at(c, y, x);
+                    continue;
+                }
+                for (int k = -radius; k <= radius; ++k) {
+                    const int yy = reflect(y + k, S);
+                    const float w = g[k + radius];
+                    for (int x = 0; x < S; ++x) row[x] += w * at(c, yy, x);
                 }
             }
+            return r.v;
+        };
+
+        std::vector<float> top(static_cast<std::size_t>(3) * size), bot(static_cast<std::size_t>(3) * size);
+        for (int oy = oy0; oy < oy1; ++oy) {
+            // Horizontal resample of the two source rows, then blend them.
+            for (int pass = 0; pass < 2; ++pass) {
+                const std::vector<float>& v = vrow(pass == 0 ? ty.i0[oy] : ty.i1[oy]);
+                std::vector<float>& h = pass == 0 ? top : bot;
+                for (int c = 0; c < 3; ++c) {
+                    for (int ox = 0; ox < size; ++ox) {
+                        const float a = hval(v, c, tx.i0[ox]), b = hval(v, c, tx.i1[ox]);
+                        h[static_cast<std::size_t>(c) * size + ox] = a + (b - a) * tx.l1[ox];
+                    }
+                }
+            }
+            const float l = ty.l1[oy];
+            for (int c = 0; c < 3; ++c) {
+                float* d = dst + c * plane + static_cast<std::size_t>(oy) * size;
+                const float* a = top.data() + static_cast<std::size_t>(c) * size;
+                const float* b = bot.data() + static_cast<std::size_t>(c) * size;
+                for (int ox = 0; ox < size; ++ox)
+                    d[ox] = ((a[ox] + (b[ox] - a[ox]) * l) - kMean[c]) / kStd[c];
+            }
         }
-        const float l = ty.l1[oy];
-        for (int c = 0; c < 3; ++c) {
-            float* d = dst + c * plane + static_cast<std::size_t>(oy) * size;
-            const float* a = top.data() + static_cast<std::size_t>(c) * size;
-            const float* b = bot.data() + static_cast<std::size_t>(c) * size;
-            for (int ox = 0; ox < size; ++ox)
-                d[ox] = ((a[ox] + (b[ox] - a[ox]) * l) - kMean[c]) / kStd[c];
-        }
+    };
+
+    // Bands of output rows on up to 8 threads; a small input stays on one.
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const int threads = static_cast<std::size_t>(S) * S < (std::size_t(1) << 20)
+                            ? 1 : static_cast<int>(std::min({hw, 8u, static_cast<unsigned>(size)}));
+    if (threads == 1) {
+        band(0, size);
+    } else {
+        auto edge = [&](int t) { return static_cast<int>(static_cast<int64_t>(size) * t / threads); };
+        std::vector<std::thread> pool;
+        for (int t = 1; t < threads; ++t) pool.emplace_back(band, edge(t), edge(t + 1));
+        band(edge(0), edge(1));
+        for (std::thread& th : pool) th.join();
     }
     return out;
 }
