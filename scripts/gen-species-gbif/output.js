@@ -1,6 +1,8 @@
 // output.js: the files the species generator writes besides the rows themselves.
 
-const LICENSE_URL = 'https://creativecommons.org/licenses/by/4.0/legalcode.txt';
+const { taxaJson } = require(bro.appDir + '/taxa.js');
+
+const LICENSE_URL ='https://creativecommons.org/licenses/by/4.0/legalcode.txt';
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
                 'September', 'October', 'November', 'December'];
@@ -10,12 +12,15 @@ function citeDate(iso) {
     return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 }
 
-// Pretty-printed, but one species per line, the way the hand-made lists read.
+// Pretty-printed, but one species (and one taxa entry) per line, the way the
+// hand-made lists read.
 function speciesJson(doc) {
     const head = Object.assign({}, doc);
     delete head.species;
+    delete head.taxa;
     let s = JSON.stringify(head, null, 2);
     s = s.slice(0, s.lastIndexOf('}')).replace(/\s+$/, '');
+    if (doc.taxa) s += ',\n' + taxaJson(doc.taxa);
     s += ',\n  "species": [\n' + doc.species.map((r) => '    ' + JSON.stringify(r)).join(',\n') + '\n  ]\n}\n';
     return s;
 }
@@ -54,7 +59,22 @@ function editorialMd(e) {
         for (const o of e.nameOverrides) out.push(`| *${o.scientific}* | ${o.common} | ${o.was} (${o.wasSource}) | ${o.why} |`);
         out.push('');
     }
+    if (e.taxaNameOverrides && e.taxaNameOverrides.length) {
+        out.push(`Names of higher taxa set by hand (${e.taxaNameOverrides.length}; \`taxa-names.json\`):`, '',
+                 '| Taxon | Rank | Name | Sourced name | Why |', '|---|---|---|---|---|');
+        for (const o of e.taxaNameOverrides)
+            out.push(`| *${o.taxon}* | ${o.rank} | ${o.common || '(none)'} | ${o.was || '(none)'} | ${o.why} |`);
+        out.push('');
+    }
     return out.join('\n') || 'None.';
+}
+
+// "10", or "300 (insects), 30 (spiders)" when the groups differ.
+function groupMin(m) {
+    const g = m.groupMinRecords || {};
+    const vals = new Set(Object.values(g));
+    if (vals.size <= 1) return String(vals.size ? [...vals][0] : m.minRecords);
+    return Object.entries(g).map(([k, v]) => `${v} (${k})`).join(', ');
 }
 
 function attribution(doc, cfg, ds) {
@@ -111,6 +131,12 @@ that registration is something GBIF asks for, not a licence condition.
   with neither keeps its scientific name (\`commonSource: "none"\`). Names set by
   the list's editors (\`commonSource: "override"\`, see Editorial corrections) are
   part of this list.
+- **Names of higher taxa** (\`taxa\`: each genus, family, order and class of the
+  rows): Wikidata (CC0 1.0; English taxon common name, label or alias, with the
+  item id in \`wikidata\`), else the GBIF Backbone's English vernacular names
+  (CC BY 4.0), else none (the entry keeps only its rank); names set by the
+  list's editors (\`commonSource: "override"\`, the generator's \`taxa-names.json\`)
+  are part of this list.
 
 ## Query
 
@@ -120,7 +146,7 @@ GBIF occurrence search API (${m.gbifApi}/occurrence/search), \`limit=0\`, counte
     .filter(([k, v]) => v !== undefined && k !== 'excludeBasisOfRecord')
     .map(([k, v]) => [].concat(v).map((x) => `\`${k === 'licenses' ? 'license' : k}=${x}\``).join(' or ')).join(', ')}${
     (m.filters.excludeBasisOfRecord || []).length ? ` (every basisOfRecord but ${m.filters.excludeBasisOfRecord.join(' and ')})` : ''}.
-
+${cfg.filtersNote ? `\nWhy these filters: ${cfg.filtersNote}.\n` : ''}
 | Region | GBIF filter |
 |---|---|
 ${regions}
@@ -142,12 +168,13 @@ ${urls}
 1. Each region x group search gives a record count per species (\`speciesKey\`
    facet; records identified to subspecies roll up to their species, records not
    identified to species are not counted).
-2. A species counts in a region when it has at least **${m.minRecords}** records there
+2. A species counts in a region when it has at least **${groupMin(m)}** records there
    (\`minRecords\`), which drops one-off misidentifications and mis-georeferenced
    records; it is kept when it counts in at least one region. \`regions\` lists the
    regions it counts in and \`records\` its record count in every region it has any.
    ${t.speciesSeen} species were seen; after the editorial merges and drops,
-   ${t.droppedBelowThreshold} fell below the threshold everywhere.
+   ${t.droppedBelowThreshold} fell below the threshold everywhere.${cfg.minRecordsNote ? `
+   Why this threshold: ${cfg.minRecordsNote}.` : ''}
 3. \`accidental\` is true when, in every region the species counts in, its records
    are below **${m.accidentalShare}** of that region's records for its group
    (\`accidentalShare\`): vagrants that birders chase pile up records, but still a
@@ -168,7 +195,9 @@ ${editorialMd(m.editorial)}
 
 ${t.species} species: ${Object.entries(t.byClass).map(([k, v]) => `${k} ${v}`).join(', ')};
 ${t.accidental} marked accidental. Per region: ${Object.entries(t.byRegion).map(([k, v]) => `${k} ${v}`).join(', ')}.
-Common names: ${Object.entries(t.commonNameSource).map(([k, v]) => `${k} ${v}`).join(', ')}.
+Common names: ${Object.entries(t.commonNameSource).map(([k, v]) => `${k} ${v}`).join(', ')}.${t.taxa ? `
+Higher taxa (\`taxa\`): ${t.taxa.taxa} (${Object.entries(t.taxa.byRank).map(([k, v]) => `${k} ${v}`).join(', ')}); names from ${
+    Object.entries(t.taxa.commonSource).map(([k, v]) => `${k} ${v}`).join(', ')}.` : ''}
 
 Largest contributing datasets (all ${t.datasets} in \`datasets.tsv\`; the first holds
 ${ds.length ? (100 * ds[0].records / t.datasetRecords).toFixed(1) : 0}% of the counted records):

@@ -31,16 +31,30 @@
 // live in the config only; see editorial.js.
 //   --cache <dir>              keep API responses on disk (re-runs are offline)
 //   --concurrency N            requests in flight (1..4, default 4)
+//   --taxa-report <file>       also write a TSV of every taxa entry with the
+//                              Wikidata and GBIF names it was chosen from
+//
+// Every list carries a `taxa` map (taxa.js): the English names of the genera,
+// families, orders and classes of its rows. Names set by hand come from
+// taxa-names.json beside this script, then the config's "taxaNames".
+//
+//   bro-headless --no-gpu scripts/gen-species-gbif scripts/gen-species-gbif/generate.js \
+//       --add-taxa <list.json> [--out <file>] [--config <region.json>] [--cache <dir>]
+//
+// adds (or replaces) the `taxa` map of a list made elsewhere (the eBird-named
+// upper-midwest.json), leaving every other byte of the file as it was; it is
+// written back in place unless --out names another file.
 
 const GENERATOR = 'brovisionml/scripts/gen-species-gbif';
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 const fs = require('fs');
 const { Http, mapLimit } = require(bro.appDir + '/http.js');
 const gbif = require(bro.appDir + '/gbif.js');
-const { wikidataNames, titleCase, API: WIKIDATA_API } = require(bro.appDir + '/names.js');
+const { wikidataNames, titleCase, latinName, API: WIKIDATA_API } = require(bro.appDir + '/names.js');
 const out = require(bro.appDir + '/output.js');
 const editorial = require(bro.appDir + '/editorial.js');
+const taxaMod = require(bro.appDir + '/taxa.js');
 
 const log = (...a) => console.log(...a);
 
@@ -84,8 +98,45 @@ function parseGroup(s) {
 // working directory, so paths from the command line are made absolute here.
 const abs = (p) => (!p || /^([A-Za-z]:)?[\\/]/.test(p) ? p : `${process.cwd()}/${p}`);
 
+// The hand-set taxa names: taxa-names.json beside this script (shared by every
+// list), then the config's own "taxaNames" over it. Keys starting with "_" are
+// comments.
+function taxaNames(cfg) {
+    const shared = JSON.parse(fs.readFileSync(bro.appDir + '/taxa-names.json', 'utf8'));
+    const all = Object.assign({}, shared, cfg.taxaNames || {});
+    for (const k of Object.keys(all)) if (k.startsWith('_')) delete all[k];
+    return all;
+}
+
+// The taxa report: one line per entry, with what each source offered.
+function taxaReport(file, built) {
+    const lines = ['taxon\trank\tcommon\tsource\twikidata\tgbif'];
+    for (const r of built.report)
+        lines.push([r.taxon, r.rank, r.common || '', r.source, r.wikidata || '', r.gbif || '']
+            .map((v) => String(v).replace(/[\t\n]/g, ' ')).join('\t'));
+    fs.writeFileSync(file, lines.join('\n') + '\n', 'utf8');
+}
+
+// --add-taxa: the taxa map of an existing list, put into its text.
+async function addTaxa(args) {
+    for (const k of ['config', 'out', 'cache', 'addTaxa', 'taxaReport']) args[k] = abs(args[k]);
+    const cfg = args.config ? JSON.parse(fs.readFileSync(args.config, 'utf8')) : {};
+    const http = new Http({ concurrency: Number(args.concurrency || 4), cacheDir: args.cache || null, log });
+    const text = fs.readFileSync(args.addTaxa, 'utf8');
+    const doc = JSON.parse(text);
+    const built = await taxaMod.buildTaxa(doc.species, { http, overrides: taxaNames(cfg), log });
+    const next = taxaMod.insertTaxa(text, built.taxa);
+    const check = JSON.parse(next);
+    if (JSON.stringify(check.species) !== JSON.stringify(doc.species)) throw new Error('rows changed; not written');
+    const target = args.out || args.addTaxa;
+    fs.writeFileSync(target, next, 'utf8');
+    if (args.taxaReport) taxaReport(args.taxaReport, built);
+    log(`wrote ${target}: taxa ${JSON.stringify(built.summary)}`);
+    if (built.overrides.unused.length) log(`  taxa overrides naming no taxon here: ${built.overrides.unused.length}`);
+}
+
 function loadConfig(args) {
-    for (const k of ['config', 'out', 'cache']) args[k] = abs(args[k]);
+    for (const k of ['config', 'out', 'cache', 'taxaReport']) args[k] = abs(args[k]);
     const cfg = args.config ? JSON.parse(fs.readFileSync(args.config, 'utf8')) : {};
     if (args.region.length) cfg.regions = args.region.map(parseRegion);
     if (args.group.length) cfg.groups = args.group.map(parseGroup);
@@ -97,6 +148,9 @@ function loadConfig(args) {
     // allowed values listed. An explicit filters.basisOfRecord wins.
     if (args.excludeBasis !== undefined)
         cfg.filters.excludeBasisOfRecord = args.excludeBasis ? args.excludeBasis.split(',') : [];
+    // An explicit basisOfRecord list excludes every other value.
+    if (cfg.filters.basisOfRecord && !cfg.filters.excludeBasisOfRecord)
+        cfg.filters.excludeBasisOfRecord = gbif.BASIS_OF_RECORD.filter((b) => !cfg.filters.basisOfRecord.includes(b));
     if (!cfg.filters.excludeBasisOfRecord) cfg.filters.excludeBasisOfRecord = ['LIVING_SPECIMEN', 'FOSSIL_SPECIMEN'];
     for (const b of cfg.filters.excludeBasisOfRecord)
         if (!gbif.BASIS_OF_RECORD.includes(b)) throw new Error(`basisOfRecord "${b}" is not one of ${gbif.BASIS_OF_RECORD.join(' ')}`);
@@ -109,6 +163,7 @@ function loadConfig(args) {
         if (s !== 'wikidata' && s !== 'gbif') throw new Error(`name source "${s}": expected wikidata or gbif`);
     cfg.out = args.out || cfg.out;
     cfg.cache = args.cache || cfg.cache || null;
+    cfg.taxaReport = args.taxaReport || null;
     cfg.concurrency = Number(args.concurrency || cfg.concurrency || 4);
     if (!cfg.out) throw new Error('--out <dir> is required');
     if (!cfg.name) cfg.name = cfg.out.replace(/\/+$/, '').split('/').pop();
@@ -129,7 +184,9 @@ async function commonName(http, sp, wd, order) {
     // first) or name a group of species ("Snow/Ross's Goose", "Canada Goose
     // (canadensis Group)": skip).
     const first = (s) => s.split(/[,;]/)[0].trim().replace(/’/g, "'");
-    const clean = (s) => s && !/[/()]/.test(first(s));
+    // A group noun is not a species' name ("Moth", "Weevil", "Hover Fly").
+    const generic = (s) => /^(moth|butterfly|weevil|beetle|fly|bug|wasp|bee|spider|ant|midge|cranefly|crane fly|hover ?fly|stink bug|leaf beetle|ground beetle|sawfly|aphid|leafhopper)s?$/i.test(s);
+    const clean = (s) => s && !/[/()]/.test(first(s)) && !latinName(first(s), sp.scientific) && !generic(first(s));
     for (const src of order) {
         if (src === 'wikidata' && wd) return { common: wd.name, source: 'wikidata', wikidata: wd.qid, alt: wd.alt };
         if (src !== 'gbif') continue;
@@ -142,7 +199,9 @@ async function commonName(http, sp, wd, order) {
 
 async function main() {
     const t0 = Date.now();
-    const cfg = loadConfig(parseArgs(bro.app.argv || []));
+    const args = parseArgs(bro.app.argv || []);
+    if (args.addTaxa) return addTaxa(args);
+    const cfg = loadConfig(args);
     const http = new Http({ concurrency: cfg.concurrency, cacheDir: cfg.cache, log });
     const codes = cfg.regions.map((r) => r.code);
     log(`gen-species-gbif ${VERSION}: ${cfg.name}, regions ${codes.join(' ')}, ` +
@@ -187,16 +246,30 @@ async function main() {
     // 2b. Editorial merges (backbone duplicates, misfilings) and drops.
     const { merges, drops } = await editorial.mergeAndDrop(http, cfg, perSpecies, log);
 
-    // 3. Threshold: a region counts for a species at minRecords records there.
+    // 3. Threshold: a region counts for a species at minRecords records there
+    // (the group's own minRecords when it has one).
+    const minOf = (label) => {
+        const g = cfg.groups.find((x) => x.label === label);
+        return Number(g && g.minRecords != null ? g.minRecords : cfg.minRecords);
+    };
+    // How many species each group would keep at other cuts, to choose one by.
+    for (const g of cfg.groups) {
+        const best = [...perSpecies.values()].filter((e) => e.group === g.label)
+            .map((e) => Math.max(0, ...Object.values(e.records)));
+        const at = [3, 5, 10, 20, 50, 100, 200, 300, 500, 1000, 2000].map((n) => `${n}:${best.filter((b) => b >= n).length}`);
+        log(`  ${g.label}: species with N+ records in some region ${at.join(' ')}`);
+    }
     const kept = [];
     let dropped = 0;
     for (const [key, e] of perSpecies) {
-        const regions = codes.filter((c) => (e.records[c] || 0) >= cfg.minRecords);
+        const min = minOf(e.group);
+        const regions = codes.filter((c) => (e.records[c] || 0) >= min);
         if (!regions.length) { dropped++; continue; }
         const share = Math.max(...regions.map((c) => e.records[c] / totals[c][e.group]));
         kept.push({ key, group: e.group, regions, records: e.records, share });
     }
-    log(`  ${seen} species seen, ${perSpecies.size} after merges/drops, ${kept.length} kept at >= ${cfg.minRecords} records in a region, ${dropped} dropped`);
+    log(`  ${seen} species seen, ${perSpecies.size} after merges/drops, ${kept.length} kept at >= ` +
+        `${cfg.groups.map((g) => `${minOf(g.label)} (${g.label})`).join(', ')} records in a region, ${dropped} dropped`);
 
     // 4. Backbone names and higher taxonomy.
     const info = await mapLimit(kept, 4, (s) => gbif.species(http, s.key));
@@ -227,6 +300,15 @@ async function main() {
     log(`  name overrides: ${overrides.applied.length} applied` +
         (overrides.unused.length ? `, ${overrides.unused.length} matched no species: ${overrides.unused.join(', ')}` : ''));
 
+    // Two species under one name are a backbone duplicate (a merge) or a
+    // wrong name (an override): say so, for the region's review.
+    const byName = new Map();
+    for (const s of kept) {
+        const k = s.common.toLowerCase();
+        byName.set(k, (byName.get(k) || []).concat(`${s.scientific} (${s.source})`));
+    }
+    for (const [k, v] of byName) if (v.length > 1) log(`  note: "${k}" names ${v.join(', ')}`);
+
     // 6. Rows, grouped as the config orders the groups, then taxonomically.
     const groupOrder = cfg.groups.map((g) => g.label);
     kept.sort((a, b) => groupOrder.indexOf(a.group) - groupOrder.indexOf(b.group)
@@ -243,6 +325,12 @@ async function main() {
         if (s.alt && s.alt.length) row.commonAlt = s.alt;
         return row;
     });
+
+    // 6b. The higher taxa of the rows and their names (taxa.js).
+    const taxa = await taxaMod.buildTaxa(rows, { http, info, overrides: taxaNames(cfg), log });
+    if (cfg.taxaReport) taxaReport(cfg.taxaReport, taxa);
+    log(`  taxa: ${JSON.stringify(taxa.summary)}` + (taxa.overrides.applied.length
+        ? `, ${taxa.overrides.applied.length} names set by hand` : ''));
 
     // 7. Datasets (titles, DOIs) for the citation.
     const dsKeys = [...datasets.keys()];
@@ -262,6 +350,7 @@ async function main() {
         accidental: rows.filter((r) => r.accidental).length,
         byClass: count((r) => r.class), byRegion,
         commonNameSource: count((r) => r.commonSource),
+        taxa: taxa.summary,
         records: totals, datasets: dsInfo.length,
         datasetRecords: dsInfo.reduce((n, d) => n + d.records, 0),
     };
@@ -270,25 +359,36 @@ async function main() {
         gbifApi: gbif.API, taxonomyDataset: backboneDataset,
         licenseFilter: cfg.filters.licenses, filters: cfg.filters,
         regions: cfg.regions, groups: cfg.groups.map((g) => ({ label: g.label, taxa: g.resolved })),
-        minRecords: cfg.minRecords, accidentalShare: cfg.accidentalShare,
+        minRecords: cfg.minRecords,
+        groupMinRecords: Object.fromEntries(cfg.groups.map((g) => [g.label, minOf(g.label)])),
+        accidentalShare: cfg.accidentalShare,
         commonNames: { order: cfg.nameSources.concat(['none']),
                        wikidata: 'item by P846 (GBIF ID), else P225 (taxon name); name = P1843 (taxon common name, en) ' +
                                  'matching the enwiki title, else P1843 matching the en label, else the enwiki title, else the en label',
                        gbif: 'backbone vernacularName, else the most attested /species/{key}/vernacularNames (eng)',
                        none: 'the scientific name',
                        wikidataApi: WIKIDATA_API },
+        taxaNames: { order: ['override', 'wikidata', 'gbif', 'none'],
+                     override: 'taxa-names.json of the generator, then the config\'s taxaNames',
+                     wikidata: 'item by P846 (GBIF ID), else P225 (taxon name) with P105 (rank); the first English ' +
+                               'P1843 (taxon common name), label, alias or enwiki title that is not a Latin name',
+                     gbif: 'the most attested English /species/{key}/vernacularNames of the backbone key',
+                     none: 'rank only, no common' },
         editorial: {
             excludeDatasets: (cfg.excludeDatasets || []).map((x) => Object.assign({}, x,
                 { removed: excluded.filter((e) => e.dataset === x.key) })),
             merges, drops,
             nameOverrides: overrides.applied, unusedNameOverrides: overrides.unused,
+            taxaNameOverrides: taxa.overrides.applied,
         },
         queries, totals: summary,
     };
     const regionNames = cfg.regions.map((r) => r.code).join(', ');
     const doc = {
         name: cfg.name,
-        description: `${cfg.groups.map((g) => g.label).join(' and ')} with at least ${cfg.minRecords} ` +
+        description: ((new Set(cfg.groups.map((g) => minOf(g.label)))).size === 1
+            ? `${cfg.groups.map((g) => g.label).join(' and ')} with at least ${minOf(cfg.groups[0].label)} `
+            : `${cfg.groups.map((g) => `${g.label} (at least ${minOf(g.label)})`).join(' and ')} with that many `) +
             `CC0 / CC BY 4.0 GBIF occurrence records (${cfg.filters.year ? 'years ' + cfg.filters.year + ', ' : ''}` +
             `occurrenceStatus ${cfg.filters.occurrenceStatus || 'any'}) in at least one of ${regionNames}; ` +
             `accidental:true below ${cfg.accidentalShare} of a region's records everywhere it counts. ` +
@@ -297,6 +397,7 @@ async function main() {
         taxonomy: 'GBIF Backbone Taxonomy',
         regions: codes,
         meta,
+        taxa: taxa.taxa,
         species: rows,
     };
     fs.mkdirSync(cfg.out, { recursive: true });

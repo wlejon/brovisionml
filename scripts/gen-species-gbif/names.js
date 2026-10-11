@@ -23,8 +23,23 @@ const lc = (s) => s.toLowerCase();
 
 // Capitalise each space-separated word ("black-capped chickadee" ->
 // "Black-capped Chickadee"), the convention bird lists use.
+// "and", "of", "the" stay lower case inside a name ("Black and Gold Bumblebee").
+const SMALL = new Set(['and', 'of', 'the', 'or', 'in', 'on', 'with', 'a', 'an']);
 function titleCase(s) {
-    return s.split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    return s.split(' ').map((w, i) => (i > 0 && SMALL.has(w.toLowerCase()) ? w.toLowerCase()
+        : w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
+}
+
+// A Latin name passed off as a common one: the binomial in another gender or
+// spelling ("Melissodes Bimaculata" for Melissodes bimaculatus), or a name
+// with an author ("Diplolepis Polita (Ashmead"). Not a name that only starts
+// with the genus ("Strangalepta Flower Longhorn").
+function latinName(name, scientific) {
+    if (/[()0-9]/.test(name)) return true;
+    const w = name.trim().split(/\s+/), s = String(scientific).toLowerCase().split(' ');
+    // "Eurema Lisa" for Pyrisitia lisa: the epithet under an older genus.
+    return w.length <= 2 && (w[0].toLowerCase() === s[0] ||
+                             (w.length === 2 && s.length > 1 && w[1].toLowerCase() === s[s.length - 1]));
 }
 
 // Of several spellings of one name, the one capitalising the most words, then
@@ -91,13 +106,14 @@ function describe(e) {
 // An item -> { qid, name, alt[], via } or null when it has no usable name.
 function pick(d, scientific) {
     const sci = lc(scientific);
-    const usable = [...new Set(d.common)].filter((c) => c && lc(c) !== sci);
+    const ok = (c) => c && lc(c) !== sci && !latinName(c, scientific);
+    const usable = [...new Set(d.common)].filter(ok);
     const same = (x) => usable.filter((c) => lc(c) === lc(x));
     let name = '', via = '';
     if (d.title && same(d.title).length) { name = bestCase(same(d.title)); via = 'P1843=enwiki'; }
     else if (d.label && same(d.label).length) { name = bestCase(same(d.label)); via = 'P1843=label'; }
-    else if (d.title && lc(d.title) !== sci) { name = titleCase(d.title); via = 'enwiki'; }
-    else if (d.label && lc(d.label) !== sci) { name = titleCase(d.label); via = 'label'; }
+    else if (ok(d.title)) { name = titleCase(d.title); via = 'enwiki'; }
+    else if (ok(d.label)) { name = titleCase(d.label); via = 'label'; }
     else if (usable.length) { name = titleCase(usable.find((c) => /^[A-Z]/.test(c)) || usable[0]); via = 'P1843'; }
     if (!name) return null;
     name = titleCase(firstName(name));
@@ -151,4 +167,4 @@ async function wikidataNames(http, species, { batch = 40, log = () => {} } = {})
     return result;
 }
 
-module.exports = { API, wikidataNames, titleCase };
+module.exports = { API, wikidataNames, titleCase, latinName };

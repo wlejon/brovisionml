@@ -38,7 +38,7 @@ It writes, into `--out`:
 
 | File | What |
 |---|---|
-| `species.json` | the list: `name`, `description`, `taxonomy`, `regions`, `meta`, `species[]` |
+| `species.json` | the list: `name`, `description`, `taxonomy`, `regions`, `meta`, `taxa`, `species[]` |
 | `datasets.tsv` | every GBIF dataset whose records were counted: key, record count, DOI, default licence, title |
 | `ATTRIBUTION.md` | the citation (GBIF.org and the datasets in `datasets.tsv`), licences, the exact search URLs, method and totals |
 | `LICENSE` | the CC BY 4.0 legal code, fetched verbatim from creativecommons.org |
@@ -59,6 +59,63 @@ The rest are provenance: `records` per region (regions under the threshold
 included, so the cut can be re-judged), the backbone key, which source gave
 the common name (`wikidata` / `gbif` / `override` / `none`), the Wikidata item, and
 `commonAlt`, the item's other English names, when it has any.
+
+### Taxa
+
+Every list carries a top-level `taxa` map, the English names of the genera
+(the first word of `scientific`), families, orders and classes its rows use, so
+a classifier can fall back from a species to a higher rank ("Darners
+(Aeshnidae)") when no species clears its threshold:
+
+```json
+"taxa": {
+  "Odonata":   {"rank": "order",  "common": "Dragonflies and damselflies", "commonSource": "wikidata", "wikidata": "Q25375", "gbifKey": 789},
+  "Aeshnidae": {"rank": "family", "common": "Darners", "commonSource": "override", "wikidata": "Q516862", "gbifKey": 4209},
+  "Aeshna":    {"rank": "genus",  "common": "Mosaic darners", "commonSource": "override", "wikidata": "Q746347", "gbifKey": 1425165}
+}
+```
+
+`rank` is the row field the name is in, so a row without a rank adds nothing for
+it (the herps' `Squamata` and `Testudines` are classes, with no order).
+`common` is a short group name in sentence case, proper words kept ("New World
+warblers"); an entry with no name worth giving keeps only `rank` (most insect
+genera). `taxa.js` picks it:
+
+1. **By hand**, from `scripts/gen-species-gbif/taxa-names.json` (shared by every
+   list), then the config's `taxaNames`, each with a `why`
+   (`commonSource: "override"`).
+2. **Wikidata (CC0):** the item by the backbone key (P846), else by taxon name
+   (P225) with the rank (P105), skipped when two items match (the plant and
+   animal *Morus*). Its English taxon common names (P1843), label, aliases and
+   enwiki title are the candidates, cleaned of a leading article and a trailing
+   rank word ("Cricket frog genus"), Latin names left out.
+3. **GBIF's** English vernacular names for the key, most attested first.
+
+Of the candidates, a plural or "X and Y" name from Wikidata wins, then one from
+GBIF, then anglicised Latin ("accipitrids"), then Wikidata's singular made
+plural ("Box turtle" to "Box turtles"). A GBIF name, or a Wikidata one found by
+name, for a family or genus must share a word with the common names of the
+rows under it or its parent's name: GBIF matches vernaculars by name, so a
+homonym brings a plant's ("False indigos" for the sphinx moth genus *Amorpha*)
+or nothing useful ("Animals"). The backbone keys come from the rows' species
+records in a generated list, or from species/match (rank, higher taxa as hints)
+for a list made elsewhere.
+
+What the overrides fix: an order named for one of its families (Hymenoptera
+"Ants", Accipitriformes "Hawks", Pelecaniformes "Herons"), British names
+(Paridae "Tits", Aeshnidae "Hawker dragonflies", Tettigoniidae "Bushcrickets",
+*Sympetrum* "Darters", *Riparia* "Sand martins"), slang or odd sources
+(Trochilidae "Hummers", Haematopodidae "Seapies", *Grus* "Anthropoides"), and
+the bird families field guides head with several names (Anatidae "Ducks, geese
+and swans", Ardeidae "Herons, egrets and bitterns", Rallidae "Rails, gallinules
+and coots"). `--taxa-report <file>` writes every entry with each source's
+candidates, for review.
+
+`--add-taxa <list.json>` adds the map to a list the generator did not make (the
+eBird-named `upper-midwest.json`), or refreshes it in a published one without
+re-counting (`upper-midwest-gbif`): the block goes in as one line per entry
+before `"species"`, every other byte stays, and the rows are checked unchanged
+before the file is written.
 
 `meta` records the generator version, the generation time, the API base, the
 licence filter and record filters, the regions and resolved taxon keys, the
@@ -83,10 +140,12 @@ A region file (`regions/*.json`) holds everything; flags override it.
 | `merge` | | none | `[{from, into, why}]`: backbone duplicates and misfilings; `from`'s per-region counts are added to `into`'s before the threshold. Taxa are keys or scientific names |
 | `drop` | | none | `[{taxon, why}]`: a species removed outright |
 | `names` | | none | `{"<speciesKey or scientific name>": {common, why}}`: a common name replacing the sourced one (`commonSource: "override"`) |
-| `minRecords` | `--min-records` | 10 | records a species needs in a region to count there |
+| `minRecords` | `--min-records` | 10 | records a species needs in a region to count there; a group's own `minRecords` overrides it for that group. The log prints, per group, how many species have N+ records in some region, to choose it by |
+| `taxaNames` | | none | `{"<taxon>": {common, why}}`: names of higher taxa over `taxa-names.json` (see Taxa) |
+| `filtersNote`, `minRecordsNote` | | none | why the filters and the cut are what they are; copied into `ATTRIBUTION.md` |
 | `accidentalShare` | `--accidental-share` | 0.00002 | the `accidental` cut, below |
 | `nameSources` | `--name-sources` | `wikidata,gbif` | common-name sources in order |
-| | `--out`, `--cache`, `--concurrency` (1..4) | | |
+| | `--out`, `--cache`, `--concurrency` (1..4), `--taxa-report`, `--add-taxa` | | |
 
 The editorial keys are explained under "Editorial corrections" below.
 
@@ -129,6 +188,51 @@ open data. Its differences from the birds config:
   Slider, Smallmouth Salamander, Northern Dusky Salamander. Garter snakes
   keep Wikidata's spaced form (Common Garter Snake; field guides also write
   Common Gartersnake).
+
+`upper-midwest-arthropods.json` covers the same seven regions for insects
+(class Insecta) and spiders and harvestmen (orders Araneae and Opiliones),
+written to `species/upper-midwest-arthropods/`: 1350 species, Lepidoptera
+730, Coleoptera 122, Araneae 111, Hymenoptera 102, Diptera 90, Odonata 88,
+Hemiptera 62, Orthoptera 19, Trichoptera 7, Opiliones 5, and 14 in seven
+smaller orders (none accidental: at these counts no species is under 2e-5 of a
+region's records). Its differences:
+
+- **Observations only** (`basisOfRecord` HUMAN_OBSERVATION and
+  MACHINE_OBSERVATION). In Ontario 72% of the open insect records are
+  DNA-barcoded trap material (iBOL, 763 k MATERIAL_SAMPLE; the Centre for
+  Biodiversity Genomics, 377 k PRESERVED_SPECIMEN): counted, the most recorded
+  species are the malaise traps' midges, gall midges and parasitoid wasps.
+  Observations (iNaturalist's CC0 / CC BY ones, BugGuide, Bumble Bee Watch, the
+  Lepidopterists' Society, PollardBase) are the species people see and
+  photograph.
+- **`minRecords` 40 for insects, 10 for spiders** (a group cut). Insects with
+  N+ observations in some region: 1881 at 20, 1070 at 50, 650 at 100; 40 keeps
+  1234 (after the merge below). Spiders have about a thirtieth of the records: 116 at 10, 73 at 20.
+  Ontario's 286 k insect observations set most of the list (1247 species count
+  there, 332 in MN).
+- **Editorial.** Merged: *Eurema lisa* into *Pyrisitia lisa* (Little Yellow,
+  two backbone keys). Named: butterflies the backbone files under an old name
+  with no English one (*Euptychia cymela*, *Elkalyce comyntas*, *Incisalia*,
+  *Mitoura*, ...), British names (Camberwell Beauty, Small White, Four-spotted
+  Chaser, Black Darter, Vapourer, Seven-spot Ladybird, German Wasp), GBIF
+  vernaculars that name a family or group ("Soldier Beetle", "Crab Spider",
+  "Wolf Spiders", "Cutworm"), Wikidata items carrying another species' name
+  (*Hesperia comma* as Silver-spotted Skipper, *Sciaphilus asperatus* as
+  Strawberry Root Weevil) and Spongy Moth for *Lymantria dispar*. A species
+  with no English name anywhere keeps its scientific name (66). The generator
+  now leaves out, as a species name, a group noun ("Moth", "Weevil", "Hover
+  Fly") and a Latin binomial dressed as a name ("Melissodes Bimaculata",
+  "Eurema Lisa"), and logs every common name two species share.
+
+`species/pets/species.json` is hand-made (CC0, facts): the domestic dog,
+*Canis lupus familiaris*, and the domestic cat, *Felis catus*, with
+`regions: []` and its `taxa` from `--add-taxa`. The dog has the backbone's
+accepted name, a subspecies (*Canis familiaris* is a synonym there): BioCLIP 2's
+TreeOfLife-200M labels were resolved against the GBIF backbone (TaxonoPy) and
+cut to seven ranks, so its dog images were captioned *Canis lupus*, and the
+three-word name keeps the row apart from the Gray Wolf's (lists merge by
+scientific name). *Felis catus* is also a row of `upper-midwest-gbif`, with
+the same name; merged, either stands.
 
 ## Method
 
