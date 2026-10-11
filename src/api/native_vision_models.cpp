@@ -332,6 +332,8 @@ void ensureVisionClassesInstalled() {
     g_dinov2Class.install("Dinov2", 0, nullptr, decorateDinov2Proto);
     g_dinov3Class.install("Dinov3", 0, nullptr, decorateDinov3Proto);
     g_visionModelClass.install("VisionModel", 0, nullptr, decorateVisionModelProto);
+    g_sam2Class.install("Sam2", 0, nullptr, decorateSam2Proto);
+    g_sam2TrackerClass.install("Sam2Tracker", 0, nullptr, decorateSam2TrackerProto);
 }
 
 static bool validateLoaderPath(const char* name, std::span<const Value> args, std::string& path, Value& outError) {
@@ -621,6 +623,29 @@ Value makeVisionNamespace() {
         return g_samClass.createInstance(std::move(w));
     });
 
+    // SAM 2.1: a directory holding the HF checkpoint (config.json +
+    // model.safetensors); any of the four sizes.
+    vision.def("loadSam2", 2, [](Value, std::span<const Value> args) -> Value {
+        std::string path;
+        Value errVal;
+        brotensor::Device dev = brotensor::Device::CPU;
+        if (!loaderPrologue("loadSam2", args, path, dev, errVal)) return errVal;
+        auto w = std::make_unique<Sam2Wrapper>();
+        w->path = path;
+        w->device = dev;
+        try {
+            w->sam = std::make_shared<brovisionml::Sam2>();
+            w->sam->load(path);
+            w->sam->to(dev);
+            w->loaded = true;
+        } catch (const std::exception& e) {
+            return ev::throwError(std::string("loadSam2 failed: ") + e.what());
+        } catch (...) {
+            return ev::throwError("loadSam2 failed: unknown error");
+        }
+        return g_sam2Class.createInstance(std::move(w));
+    });
+
     vision.def("loadNormal", 2, [](Value, std::span<const Value> args) -> Value {
         std::string path;
         Value errVal;
@@ -760,6 +785,8 @@ Value makeVisionNamespace() {
     vision.set("Dinov2", g_dinov2Class.constructor());
     vision.set("Dinov3", g_dinov3Class.constructor());
     vision.set("VisionModel", g_visionModelClass.constructor());
+    vision.set("Sam2", g_sam2Class.constructor());
+    vision.set("Sam2Tracker", g_sam2TrackerClass.constructor());
 
     // Ops and helpers
     mountVisionOps(vision);

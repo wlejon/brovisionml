@@ -74,7 +74,7 @@ int main() {
     runJs("loaders validate their path", block(R"JS(
         const loaders = ["loadDepth", "loadSam", "loadNormal", "loadHed", "loadLineart",
                          "loadMlsd", "loadOpenpose", "loadSegformer", "loadBirefnet",
-                         "loadStyleGAN3", "loadDinov2", "loadDinov3", "loadModel"];
+                         "loadStyleGAN3", "loadDinov2", "loadDinov3", "loadModel", "loadSam2"];
         for (const name of loaders) {
             if (typeof V[name] !== "function") return name + " is not a function";
             let r = throwsWith(() => V[name](),
@@ -90,7 +90,7 @@ int main() {
     // The device is resolved after the path, so these use a directory that
     // exists (".") and fail on the device before any weights are read.
     runJs("loaders validate opts.device", block(R"JS(
-        for (const name of ["loadDepth", "loadSam", "loadHed", "loadBirefnet", "loadModel"]) {
+        for (const name of ["loadDepth", "loadSam", "loadHed", "loadBirefnet", "loadModel", "loadSam2"]) {
             let r = throwsWith(() => V[name](".", { device: "tpu" }),
                                (e) => e instanceof TypeError && String(e.message).includes("opts.device"));
             if (r) return name + "({device:'tpu'}): " + r;
@@ -115,7 +115,7 @@ int main() {
     runJs("host class constructors refuse construction", block(R"JS(
         const classes = ["DepthEstimator", "Sam", "NormalEstimator", "Hed", "Lineart", "Mlsd",
                          "Openpose", "Segformer", "Birefnet", "StyleGAN3", "Dinov2", "Dinov3",
-                         "VisionModel"];
+                         "VisionModel", "Sam2", "Sam2Tracker"];
         for (const name of classes) {
             if (typeof V[name] !== "function") return name + " constructor missing";
             const r = throwsWith(() => V[name](),

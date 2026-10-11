@@ -9,6 +9,7 @@
 #include <brovisionml/depth_anything.h>
 #include <brovisionml/sam.h>
 #include <brovisionml/sam_amg.h>
+#include <brovisionml/sam2.h>
 #include <brovisionml/dsine.h>
 #include <brovisionml/hed.h>
 #include <brovisionml/lineart.h>
@@ -50,6 +51,26 @@ inline constexpr uint32_t kHostStyleGAN3Tag       = 0x56535459u; // 'VSTY'
 inline constexpr uint32_t kHostDinov2Tag          = 0x56444932u; // 'VDI2'
 inline constexpr uint32_t kHostDinov3Tag          = 0x56444933u; // 'VDI3'
 inline constexpr uint32_t kHostVisionModelTag     = 0x564D4F44u; // 'VMOD'
+inline constexpr uint32_t kHostSam2Tag            = 0x56534D32u; // 'VSM2'
+inline constexpr uint32_t kHostSam2TrackerTag     = 0x56535432u; // 'VST2'
+
+// SAM 2.1. The model is shared with every tracker made from it, so a tracker
+// keeps the weights alive whatever order JS collects the two in; the busy
+// guard of either is keyed on the model (one set of GPU workspaces).
+struct Sam2Wrapper {
+    uint32_t tag = kHostSam2Tag;
+    std::shared_ptr<brovisionml::Sam2> sam;
+    brotensor::Device device = brotensor::Device::CPU;
+    bool loaded = false;
+    std::string path;
+};
+
+struct Sam2TrackerWrapper {
+    uint32_t tag = kHostSam2TrackerTag;
+    std::shared_ptr<brovisionml::Sam2> sam;
+    std::unique_ptr<brovisionml::Sam2Tracker> tracker;
+    brotensor::Device device = brotensor::Device::CPU;
+};
 
 struct DepthEstimatorWrapper {
     uint32_t tag = kHostDepthEstimatorTag;
@@ -211,6 +232,8 @@ extern HostClass g_stylegan3Class;
 extern HostClass g_dinov2Class;
 extern HostClass g_dinov3Class;
 extern HostClass g_visionModelClass;
+extern HostClass g_sam2Class;
+extern HostClass g_sam2TrackerClass;
 
 // Resolve a loader's device from opts.device (see native_vision_ops.cpp):
 // init() + best available backend by default; false with a pending JS
@@ -364,6 +387,30 @@ Value buildSegmentation(const brovisionml::sam::Segmentation& seg);
 // dimensions; returns false and sets `err` on a bad option or a load failure.
 bool loadStyleGAN3Generator(const std::string& path, Value opts,
                             StyleGAN3Wrapper& w, std::string& err);
+
+// SAM 2.1, in native_vision_sam2.cpp. The prompt reader, the model calls and
+// the result builders are shared with bro's job-machine overrides, which
+// add the ImageBitmap and the thread.
+void decorateSam2Proto(ObjectBuilder& proto);
+void decorateSam2TrackerProto(ObjectBuilder& proto);
+// opts.points ([[x, y], ...] or [{x, y, label?}, ...]), opts.labels, opts.box
+// ([x0, y0, x1, y1] or {x1, y1, x2, y2}). `opts` must be current (rooted).
+// False with `err` set on a malformed prompt.
+bool readSam2Prompt(Value opts, brovisionml::Sam2Prompt& prompt, std::string& err);
+// Sam2::segment with an optional host (256*256) mask-input row; fills
+// `low_res` with the (num, 256*256) logits downloaded.
+brovisionml::Sam2Segmentation sam2Segment(const brovisionml::Sam2& sam,
+                                          const brovisionml::Sam2Prompt& prompt, bool multimask,
+                                          const std::vector<float>* mask_input,
+                                          std::vector<float>& low_res);
+// { num, width, height, best, objectScore, masks: [{ iou, data, logits, lowRes, box }] }
+Value buildSam2Segmentation(const brovisionml::Sam2Segmentation& seg,
+                            const std::vector<float>& low_res);
+// { frame, width, height, present, objectScore, iou, conditioning, box, data, logits }
+Value buildSam2Frame(const brovisionml::Sam2FrameResult& r);
+// The tracker wrapper behind a JS value (tag-checked), or nullptr.
+Sam2TrackerWrapper* sam2TrackerSelf(Value thisVal);
+Sam2Wrapper* sam2Self(Value thisVal);
 
 void ensureVisionClassesInstalled();
 Value makeVisionNamespace();
