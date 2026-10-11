@@ -57,13 +57,16 @@ The first nine fields are the shape the classifier reads (the prompt is
 name <common>.`; `accidental: false` filters on the flag, `classes` on `class`).
 The rest are provenance: `records` per region (regions under the threshold
 included, so the cut can be re-judged), the backbone key, which source gave
-the common name (`wikidata` / `gbif` / `none`), the Wikidata item, and
+the common name (`wikidata` / `gbif` / `override` / `none`), the Wikidata item, and
 `commonAlt`, the item's other English names, when it has any.
 
 `meta` records the generator version, the generation time, the API base, the
 licence filter and record filters, the regions and resolved taxon keys, the
-thresholds, every search URL with its totals, and the totals of the list
-(species by class and region, common-name sources, datasets).
+thresholds, every search URL with its totals, the editorial corrections
+(`meta.editorial`: excluded datasets with the records removed, merges with the
+records moved, drops, name overrides with the name they replaced, each with
+its `why`), and the totals of the list (species by class and region,
+common-name sources, override, merge and drop counts, datasets).
 
 ## Parameters
 
@@ -74,11 +77,18 @@ A region file (`regions/*.json`) holds everything; flags override it.
 | `name` | `--name` | output folder name | the list's `name` |
 | `regions` | `--region CODE=CC:Province` (repeatable) | | `{code, country, stateProvince}`; `stateProvince` may be an array of spellings, or `{code, gadmGid}` filters by GADM level-1 polygon instead (`--region MN=gadm:USA.24_1`) |
 | `groups` | `--group label=taxa` (repeatable) | | `{label, taxa}`: taxa are backbone keys or `{name, rank}` resolved with species/match (an inexact match is an error); the keys of one group are OR'd in one search |
-| `filters` | `--year` | licences CC0_1_0 + CC_BY_4_0, `occurrenceStatus=PRESENT` | also `year` (`"1990,*"` in upper-midwest), `basisOfRecord` (array), `hasGeospatialIssue` |
+| `filters` | `--year` | licences CC0_1_0 + CC_BY_4_0, `occurrenceStatus=PRESENT` | also `year` (`"1990,*"` in upper-midwest), `hasGeospatialIssue`, `basisOfRecord` (array, the values to count; overrides the next) |
+| `filters.excludeBasisOfRecord` | `--exclude-basis A,B` | `LIVING_SPECIMEN, FOSSIL_SPECIMEN` | basisOfRecord values not counted (the search lists every other value: GBIF has no negated filter) |
+| `excludeDatasets` | | none | `[{key, regions?, why}]`: a dataset's records are not counted (in those regions, or all), subtracted per search with a `datasetKey` facet |
+| `merge` | | none | `[{from, into, why}]`: backbone duplicates and misfilings; `from`'s per-region counts are added to `into`'s before the threshold. Taxa are keys or scientific names |
+| `drop` | | none | `[{taxon, why}]`: a species removed outright |
+| `names` | | none | `{"<speciesKey or scientific name>": {common, why}}`: a common name replacing the sourced one (`commonSource: "override"`) |
 | `minRecords` | `--min-records` | 10 | records a species needs in a region to count there |
 | `accidentalShare` | `--accidental-share` | 0.00002 | the `accidental` cut, below |
 | `nameSources` | `--name-sources` | `wikidata,gbif` | common-name sources in order |
 | | `--out`, `--cache`, `--concurrency` (1..4) | | |
+
+The editorial keys are explained under "Editorial corrections" below.
 
 `upper-midwest.json` covers MN, WI, IA, ND, SD (US) and MB, ON (CA) by
 `country` + `stateProvince`, birds (class Aves, key 212), and the medium and
@@ -100,14 +110,19 @@ rodents, shrews and bats are left out, as photos rarely tell them apart.
    EOD dataset, most of them, is CC BY 4.0. Mammals lose far more: most
    iNaturalist observations are CC BY-NC, so the mammal counts are hundreds where
    birds have millions.
-3. **Modern records.** `year=1990,*` drops museum specimens of extinct species
-   (Passenger Pigeon, Carolina Parakeet) and historic records of extirpated
-   ones; `occurrenceStatus=PRESENT` drops absence records.
+3. **Modern, wild records.** `year=1990,*` drops museum specimens of extinct
+   species (Passenger Pigeon, Carolina Parakeet) and historic records of
+   extirpated ones; `occurrenceStatus=PRESENT` drops absence records; living and
+   fossil specimens (zoo and aviary animals, fossils) are not counted. That last
+   filter changes no species in upper-midwest (it removes 4 small datasets): the
+   captive birds that do show up are preserved specimens, such as the eggs of
+   the International Crane Foundation's flock in a Wisconsin egg collection,
+   which `excludeDatasets` takes out (7 crane species).
 4. **Threshold, `minRecords` = 10.** A species counts in a region at 10 or more
    records there, and is kept when it counts in any region. In the
-   upper-midwest run 739 species keys have a record, 731 of them not hybrids;
-   with N or more records in some region: 636 at 3, 612 at 5, 597 at 10, 571 at
-   20, 533 at 50 (hybrids dropped). The 5 to 9
+   first upper-midwest run (before the editorial corrections) 739 species keys
+   had a record, 731 of them not hybrids; with N or more records in some region:
+   636 at 3, 612 at 5, 597 at 10, 571 at 20, 533 at 50. The 5 to 9
    band is a mix of one-off vagrants (Kelp Gull, Grace's Warbler), escapes
    (Silver Teal, Monk Parakeet, Yellow-fronted Canary) and naming artefacts
    (Common Snipe for Wilson's Snipe, Audubon's Warbler as a species), while a
@@ -121,9 +136,12 @@ rodents, shrews and bats are left out, as photos rarely tell them apart.
    (ON 60 M birds, SD 2.4 M). 2e-5 (20 records per million) was chosen by
    comparing with the regular/accidental status of the state and provincial
    checklists on the 505 bird species both lists hold: it agrees on 483 (1e-5:
-   469, 5e-5: 471). Escaped and captive birds with records (the cranes at a
-   Wisconsin crane collection, peafowl, budgerigars) fall under it too.
-6. **Hybrids** (`Anas rubripes x platyrhynchos`) are dropped.
+   469, 5e-5: 471). Escaped birds seen in the wild (peafowl, budgerigars,
+   Mandarin Duck) fall under it too.
+6. **Editorial corrections** from the config (below): dataset exclusions while
+   counting, then merges and drops, before the threshold, so a merged species is
+   judged on its summed counts. **Hybrids** (`Anas rubripes x platyrhynchos`) are
+   dropped.
 7. **Names.** Higher taxonomy and the scientific name are the backbone's
    (`/v1/species/{key}`). The common name is Wikidata's: the item with P846
    (GBIF taxon ID) = the key, else P225 (taxon name) = the scientific name,
@@ -133,27 +151,52 @@ rodents, shrews and bats are left out, as photos rarely tell them apart.
    equal to its English label, then the title, then the label. Without an item
    or name, GBIF's: the backbone's `vernacularName`, else the most attested
    English entry of `/vernacularNames`, skipping group names
-   ("Snow/Ross's Goose"); else the scientific name.
+   ("Snow/Ross's Goose"); else the scientific name. Last, the config's `names`
+   table replaces the names it lists (`commonSource: "override"`).
 8. **Order.** Rows by group, then order, family, scientific name.
+
+## Editorial corrections: why they exist
+
+The data sources are kept as they are, and a region config corrects them in
+the open. Each entry carries a `why`, and `ATTRIBUTION.md` and `meta.editorial`
+list them all. Wikidata stays the first name source, and the overrides fix the
+two ways it goes wrong for a North American list:
+
+- **Backbone lumps with an Old World relative.** The GBIF backbone lags the
+  checklists and keeps some American species lumped with their Old World (or
+  tropical) relative, so nearly all of a familiar bird's records sit on the
+  Old World name: *Setophaga petechia* (Yellow Warbler), *Anas crecca*
+  (Green-winged Teal), *Numenius phaeopus* (Whimbrel), *Accipiter gentilis*
+  (American Goshawk), *Circus cyaneus* (Northern Harrier), *Cistothorus
+  platensis* (Sedge Wren), *Gallinula chloropus* (Common Gallinule), and among
+  mammals *Cervus elaphus* (Elk). Wikidata's item for that name follows the
+  current split and is named after the Old World bird ("Mangrove Warbler",
+  "Eurasian Teal", "Hen Harrier", "Red Deer"), so the override gives the name
+  of the bird actually recorded. The same lumps leave a small duplicate row for
+  the American name (*Setophaga aestiva*, *Anas carolinensis*, *Numenius
+  hudsonicus*), and the backbone also files the American Goshawk as *Falco
+  atricapillus* in Falconidae with no common name anywhere; `merge` folds
+  these into the row holding the records. Records under a pre-split name of an
+  American species (*Larus argentatus*, *Lanius excubitor*, *Melanitta fusca*,
+  *Troglodytes troglodytes*) are merged into it the same way.
+- **British names.** Wikidata and English Wikipedia name taxa by IOC / British
+  usage: Sand Martin, Grey Plover, Rough-legged Buzzard, Rock Dove, Little Auk,
+  Black-necked Grebe, Common Starling, Stoat. The override gives the North
+  American name (Bank Swallow, Black-bellied Plover, Rough-legged Hawk, ...).
+
+`--name-sources gbif,wikidata` prefers GBIF's names instead, which follow the
+backbone's concepts ("Yellow Warbler", "Herring Gull") but carry eBird group
+names and their own oddities ("Eurasian Moorhen"); the overrides are the
+smaller, reviewable fix. Hyphenation (Whistling Duck / Whistling-Duck,
+Screech Owl / Screech-Owl) is left as Wikidata has it. A new region needs its
+own review of names before it ships.
 
 ## Caveats
 
-- **Taxonomy is the GBIF backbone's, not Clements/AOS.** The backbone lags the
-  checklists: it keeps *Phalacrocorax auritus*, *Bubulcus ibis*, *Grus
-  canadensis*, *Regulus calendula*, *Accipiter cooperii*, and lumps some recent
-  North American splits into their Old World parent (*Setophaga petechia*,
-  *Numenius phaeopus*, *Accipiter gentilis*, *Larus argentatus*, *Circus
-  cyaneus*, *Cistothorus platensis*, *Gallinula chloropus*, *Anas crecca*). It
-  also files the American Goshawk as *Falco atricapillus* in Falconidae, which
-  has no common name anywhere (`commonSource: "none"`).
-- **Wikidata names follow the item's concept and Wikipedia's (IOC) usage.** A
-  lumped backbone species gets the Old World daughter's name (*Setophaga
-  petechia* is "Mangrove Warbler" in Wikidata, though nearly every record here
-  is a Yellow Warbler), and some names are British (Sand Martin, Grey Plover,
-  Rough-legged Buzzard). `--name-sources gbif,wikidata` prefers GBIF's names,
-  which follow the backbone's concept ("Yellow Warbler", "Herring Gull") but
-  include eBird-style names and more gaps. Either way, check the list's names
-  before shipping a region.
+- **Taxonomy is the GBIF backbone's, not Clements/AOS.** Besides the lumps
+  above it keeps older genera (*Phalacrocorax auritus*, *Bubulcus ibis*, *Grus
+  canadensis*, *Regulus calendula*, *Accipiter cooperii*); the classifier's
+  prompts use these names.
 - **Region filter.** `stateProvince` is the publisher's text, interpreted by
   GBIF; a few records geolocated just across a border are included (22 k of
   Minnesota's 20 M bird records fall in Wisconsin). `gadmGid` filters by

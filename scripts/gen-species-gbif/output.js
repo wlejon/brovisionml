@@ -28,6 +28,35 @@ function datasetsTsv(ds) {
     return lines.join('\n') + '\n';
 }
 
+const recs = (r) => Object.entries(r || {}).map(([k, v]) => `${k} ${v}`).join(', ') || 'none';
+
+function editorialMd(e) {
+    if (!e) return 'None.';
+    const out = [];
+    if (e.excludeDatasets.length) {
+        out.push('Datasets not counted:', '', '| Dataset | Regions | Records removed | Why |', '|---|---|---|---|');
+        for (const x of e.excludeDatasets)
+            out.push(`| ${x.key} | ${(x.regions || ['all']).join(' ')} | ${x.removed.reduce((n, r) => n + r.records, 0)} | ${x.why} |`);
+        out.push('');
+    }
+    if (e.merges.length) {
+        out.push('Merged (records added region by region):', '', '| From | Into | Records moved | Why |', '|---|---|---|---|');
+        for (const m of e.merges) out.push(`| *${m.from}* (${m.fromKey}) | *${m.into}* (${m.intoKey}) | ${recs(m.records)} | ${m.why} |`);
+        out.push('');
+    }
+    if (e.drops.length) {
+        out.push('Dropped:', '', '| Species | Records | Why |', '|---|---|---|');
+        for (const d of e.drops) out.push(`| *${d.taxon}* (${d.key}) | ${recs(d.records)} | ${d.why} |`);
+        out.push('');
+    }
+    if (e.nameOverrides.length) {
+        out.push(`Common names set by hand (${e.nameOverrides.length}):`, '', '| Species | Name | Sourced name | Why |', '|---|---|---|---|');
+        for (const o of e.nameOverrides) out.push(`| *${o.scientific}* | ${o.common} | ${o.was} (${o.wasSource}) | ${o.why} |`);
+        out.push('');
+    }
+    return out.join('\n') || 'None.';
+}
+
 function attribution(doc, cfg, ds) {
     const m = doc.meta;
     const t = m.totals;
@@ -81,14 +110,18 @@ ${t.datasetRecords} records).
 - **English common names:** Wikidata (CC0 1.0) where an item carries one
   (\`commonSource: "wikidata"\`, with the item id in \`wikidata\`); otherwise the GBIF
   Backbone's English vernacular names (\`commonSource: "gbif"\`, CC BY 4.0); a species
-  with neither keeps its scientific name (\`commonSource: "none"\`).
+  with neither keeps its scientific name (\`commonSource: "none"\`). Names set by
+  the list's editors (\`commonSource: "override"\`, see Editorial corrections) are
+  part of this list.
 
 ## Query
 
 GBIF occurrence search API (${m.gbifApi}/occurrence/search), \`limit=0\`, counted with
 \`facet=speciesKey\` (species list) and \`facet=datasetKey\` (datasets), paged with
-\`facetOffset\`. Filters on every query: ${Object.entries(m.filters).filter(([, v]) => v !== undefined)
-    .map(([k, v]) => [].concat(v).map((x) => `\`${k === 'licenses' ? 'license' : k}=${x}\``).join(' or ')).join(', ')}.
+\`facetOffset\`. Filters on every query: ${Object.entries(m.filters)
+    .filter(([k, v]) => v !== undefined && k !== 'excludeBasisOfRecord')
+    .map(([k, v]) => [].concat(v).map((x) => `\`${k === 'licenses' ? 'license' : k}=${x}\``).join(' or ')).join(', ')}${
+    (m.filters.excludeBasisOfRecord || []).length ? ` (every basisOfRecord but ${m.filters.excludeBasisOfRecord.join(' and ')})` : ''}.
 
 | Region | GBIF filter |
 |---|---|
@@ -115,7 +148,8 @@ ${urls}
    (\`minRecords\`), which drops one-off misidentifications and mis-georeferenced
    records; it is kept when it counts in at least one region. \`regions\` lists the
    regions it counts in and \`records\` its record count in every region it has any.
-   ${t.speciesSeen} species were seen, ${t.droppedBelowThreshold} fell below the threshold everywhere.
+   ${t.speciesSeen} species were seen; after the editorial merges and drops,
+   ${t.droppedBelowThreshold} fell below the threshold everywhere.
 3. \`accidental\` is true when, in every region the species counts in, its records
    are below **${m.accidentalShare}** of that region's records for its group
    (\`accidentalShare\`): vagrants that birders chase pile up records, but still a
@@ -125,6 +159,12 @@ ${urls}
 5. Rows are ordered by group (${m.groups.map((g) => g.label).join(', ')}), then order,
    family and scientific name. \`meta\` in \`species.json\` records the parameters,
    the queries and the totals.
+
+## Editorial corrections
+
+Hand-made, each with its reason; all recorded in \`meta.editorial\` of \`species.json\`.
+
+${editorialMd(m.editorial)}
 
 ## Contents
 

@@ -6,6 +6,11 @@
 
 const API = 'https://api.gbif.org/v1';
 
+// Every basisOfRecord value the occurrence API knows.
+const BASIS_OF_RECORD = ['HUMAN_OBSERVATION', 'MACHINE_OBSERVATION', 'OBSERVATION', 'OCCURRENCE',
+                         'PRESERVED_SPECIMEN', 'MATERIAL_SAMPLE', 'MATERIAL_CITATION',
+                         'LIVING_SPECIMEN', 'FOSSIL_SPECIMEN'];
+
 // Query parameters shared by every occurrence search: the licence filter and
 // the record filters, then the region, then the taxon group. Returned as
 // [key, value] pairs, since GBIF repeats a key to OR its values.
@@ -106,5 +111,5 @@ async function dataset(http, key) {
     }
 }
 
-module.exports = { API, occurrenceParams, searchUrl, query, facetAll, resolveTaxon, species,
+module.exports = { API, BASIS_OF_RECORD, occurrenceParams, searchUrl, query, facetAll, resolveTaxon, species,
                    englishVernaculars, dataset };

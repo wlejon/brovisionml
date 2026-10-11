@@ -32,8 +32,73 @@
   "filters": {
     "licenses": ["CC0_1_0", "CC_BY_4_0"],
     "occurrenceStatus": "PRESENT",
-    "year": "1990,*"
+    "year": "1990,*",
+    "excludeBasisOfRecord": ["LIVING_SPECIMEN", "FOSSIL_SPECIMEN"]
   },
   "minRecords": 10,
-  "accidentalShare": 0.00002
+  "accidentalShare": 0.00002,
+
+  "excludeDatasets": [
+    {"key": "8be43f9b-52e7-47d4-be3e-dbcc066d70ab", "regions": ["WI"],
+     "why": "WFVZ Bird Collections: in Wisconsin, eggs from the International Crane Foundation's captive flock (preserved specimens, so the basisOfRecord filter does not catch them)"}
+  ],
+
+  "merge": [
+    {"from": "Falco atricapillus", "into": "Accipiter gentilis", "why": "the backbone files American Goshawk under Falco; same bird as the goshawk records"},
+    {"from": "Alces americanus", "into": "Alces alces", "why": "the backbone keeps two moose species; one animal here"},
+    {"from": "Setophaga aestiva", "into": "Setophaga petechia", "why": "the backbone keeps nearly all Yellow Warbler records on S. petechia; the split name holds a few"},
+    {"from": "Anas carolinensis", "into": "Anas crecca", "why": "the backbone keeps nearly all Green-winged Teal records on A. crecca"},
+    {"from": "Numenius hudsonicus", "into": "Numenius phaeopus", "why": "the backbone keeps nearly all Whimbrel records on N. phaeopus"},
+    {"from": "Acanthis hornemanni", "into": "Acanthis flammea", "why": "Common and Hoary Redpoll are one species in current North American checklists"},
+    {"from": "Larus argentatus", "into": "Larus smithsonianus", "why": "records under the pre-split name; Herring Gulls here are the American species"},
+    {"from": "Lanius excubitor", "into": "Lanius borealis", "why": "records under the pre-split name; shrikes here are Northern Shrikes"},
+    {"from": "Melanitta fusca", "into": "Melanitta deglandi", "why": "records under the pre-split name; scoters here are White-winged Scoters"},
+    {"from": "Troglodytes troglodytes", "into": "Troglodytes hiemalis", "why": "records under the pre-split name; wrens here are Winter Wrens"}
+  ],
+
+  "drop": [],
+
+  "names": {
+    "Setophaga petechia": {"common": "Yellow Warbler", "why": "backbone lump with the Old World/tropical relative; Wikidata names the mangrove form"},
+    "Anas crecca": {"common": "Green-winged Teal", "why": "backbone lump with the Old World relative; Wikidata names the Eurasian bird"},
+    "Numenius phaeopus": {"common": "Whimbrel", "why": "backbone lump with the Old World relative; Wikidata names the Eurasian bird"},
+    "Accipiter gentilis": {"common": "American Goshawk", "why": "backbone lump with the Old World relative; Wikidata names the Eurasian bird"},
+    "Circus cyaneus": {"common": "Northern Harrier", "why": "backbone lump with the Old World relative; Wikidata names the Eurasian bird"},
+    "Cistothorus platensis": {"common": "Sedge Wren", "why": "backbone lump with the South American relative; Wikidata names that bird"},
+    "Gallinula chloropus": {"common": "Common Gallinule", "why": "backbone lump with the Old World relative; Wikidata names the Eurasian bird"},
+    "Larus smithsonianus": {"common": "Herring Gull", "why": "the name North American birders use"},
+    "Acanthis flammea": {"common": "Redpoll", "why": "Common and Hoary Redpoll merged (see merge)"},
+    "Riparia riparia": {"common": "Bank Swallow", "why": "British name in Wikidata"},
+    "Pluvialis squatarola": {"common": "Black-bellied Plover", "why": "British name in Wikidata"},
+    "Buteo lagopus": {"common": "Rough-legged Hawk", "why": "British name in Wikidata"},
+    "Columba livia": {"common": "Rock Pigeon", "why": "British name in Wikidata"},
+    "Alle alle": {"common": "Dovekie", "why": "British name in Wikidata"},
+    "Podiceps nigricollis": {"common": "Eared Grebe", "why": "British name in Wikidata"},
+    "Gavia arctica": {"common": "Arctic Loon", "why": "British name in Wikidata"},
+    "Sturnus vulgaris": {"common": "European Starling", "why": "British name in Wikidata"},
+    "Corvus corax": {"common": "Common Raven", "why": "British name in Wikidata"},
+    "Loxia leucoptera": {"common": "White-winged Crossbill", "why": "British name in Wikidata"},
+    "Lagopus lagopus": {"common": "Willow Ptarmigan", "why": "British name in Wikidata"},
+    "Phasianus colchicus": {"common": "Ring-necked Pheasant", "why": "British name in Wikidata"},
+    "Perdix perdix": {"common": "Gray Partridge", "why": "British spelling in Wikidata"},
+    "Strix nebulosa": {"common": "Great Gray Owl", "why": "British spelling in Wikidata"},
+    "Alectoris chukar": {"common": "Chukar", "why": "the name North American birders use"},
+    "Centrocercus urophasianus": {"common": "Greater Sage-Grouse", "why": "Wikidata has the name from before Gunnison Sage-Grouse was split off"},
+    "Porphyrio martinica": {"common": "Purple Gallinule", "why": "the name North American birders use"},
+    "Eudocimus albus": {"common": "White Ibis", "why": "the name North American birders use"},
+    "Empidonax wrightii": {"common": "Gray Flycatcher", "why": "the name North American birders use"},
+    "Empidonax oberholseri": {"common": "Dusky Flycatcher", "why": "the name North American birders use"},
+    "Empidonax difficilis": {"common": "Western Flycatcher", "why": "Pacific-slope and Cordilleran Flycatcher are one species in current North American checklists"},
+    "Pyrocephalus rubinus": {"common": "Vermilion Flycatcher", "why": "Wikidata names the South American split"},
+    "Piranga flava": {"common": "Hepatic Tanager", "why": "Wikidata names the South American split; the bird reaching this region is the Hepatic Tanager"},
+    "Passerella iliaca": {"common": "Fox Sparrow", "why": "Wikidata names one subspecies group"},
+    "Setophaga coronata": {"common": "Yellow-rumped Warbler", "why": "Wikidata names one subspecies group"},
+    "Troglodytes aedon": {"common": "House Wren", "why": "the name North American birders use"},
+    "Bubulcus ibis": {"common": "Cattle Egret", "why": "the name North American birders use"},
+    "Cervus elaphus": {"common": "Elk", "why": "the backbone lumps elk (wapiti) with the Old World red deer; Wikidata names the red deer"},
+    "Canis lupus": {"common": "Gray Wolf", "why": "the name used in North America"},
+    "Felis catus": {"common": "Domestic Cat", "why": "Wikidata's 'Cat' is ambiguous as a label"},
+    "Mustela erminea": {"common": "Ermine", "why": "the name used in North America (Stoat in Britain)"},
+    "Rangifer tarandus": {"common": "Caribou", "why": "the name used in North America"}
+  }
 }

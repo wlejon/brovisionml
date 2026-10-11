@@ -24,6 +24,11 @@
 //                              region it counts in) a species is marked accidental
 //   --year RANGE               GBIF year filter, e.g. 1990,* ('' for none)
 //   --name-sources LIST        common-name sources in order (default wikidata,gbif)
+//   --exclude-basis LIST       basisOfRecord values not counted
+//                              (default LIVING_SPECIMEN,FOSSIL_SPECIMEN; '' for none)
+//
+// Editorial corrections (dataset exclusions, merges, drops, name overrides)
+// live in the config only; see editorial.js.
 //   --cache <dir>              keep API responses on disk (re-runs are offline)
 //   --concurrency N            requests in flight (1..4, default 4)
 
@@ -35,6 +40,7 @@ const { Http, mapLimit } = require(bro.appDir + '/http.js');
 const gbif = require(bro.appDir + '/gbif.js');
 const { wikidataNames, titleCase, API: WIKIDATA_API } = require(bro.appDir + '/names.js');
 const out = require(bro.appDir + '/output.js');
+const editorial = require(bro.appDir + '/editorial.js');
 
 const log = (...a) => console.log(...a);
 
@@ -87,6 +93,15 @@ function loadConfig(args) {
     cfg.filters = Object.assign({ licenses: ['CC0_1_0', 'CC_BY_4_0'], occurrenceStatus: 'PRESENT' },
                                 cfg.filters || {});
     if (args.year !== undefined) cfg.filters.year = args.year || undefined;
+    // GBIF's search has no negated basisOfRecord, so an exclusion is the
+    // allowed values listed. An explicit filters.basisOfRecord wins.
+    if (args.excludeBasis !== undefined)
+        cfg.filters.excludeBasisOfRecord = args.excludeBasis ? args.excludeBasis.split(',') : [];
+    if (!cfg.filters.excludeBasisOfRecord) cfg.filters.excludeBasisOfRecord = ['LIVING_SPECIMEN', 'FOSSIL_SPECIMEN'];
+    for (const b of cfg.filters.excludeBasisOfRecord)
+        if (!gbif.BASIS_OF_RECORD.includes(b)) throw new Error(`basisOfRecord "${b}" is not one of ${gbif.BASIS_OF_RECORD.join(' ')}`);
+    if (!cfg.filters.basisOfRecord && cfg.filters.excludeBasisOfRecord.length)
+        cfg.filters.basisOfRecord = gbif.BASIS_OF_RECORD.filter((b) => !cfg.filters.excludeBasisOfRecord.includes(b));
     cfg.minRecords = Number(args.minRecords ?? cfg.minRecords ?? 10);
     cfg.accidentalShare = Number(args.accidentalShare ?? cfg.accidentalShare ?? 2e-5);
     cfg.nameSources = args.nameSources ? args.nameSources.split(',') : (cfg.nameSources || ['wikidata', 'gbif']);
@@ -147,12 +162,16 @@ async function main() {
     const perSpecies = new Map();   // key -> { group, records: {code: n} }
     const totals = {};              // code -> label -> records
     const datasets = new Map();     // datasetKey -> records
+    const excluded = [];            // records of excludeDatasets taken out
     await mapLimit(jobs, 4, async ({ r, g }) => {
         const pairs = gbif.occurrenceParams(cfg.filters, r, g);
         const sp = await gbif.facetAll(http, pairs, 'speciesKey');
         const ds = await gbif.facetAll(http, pairs, 'datasetKey');
+        const removed = await editorial.subtractDatasets(http, cfg, pairs, r, sp, ds);
+        excluded.push(...removed.map((x) => Object.assign(x, { group: g.label })));
         queries.push({ region: r.code, group: g.label, url: gbif.searchUrl(pairs, [['limit', '0']]),
-                       records: sp.total, species: sp.counts.size, datasets: ds.counts.size });
+                       records: sp.total, species: sp.counts.size, datasets: ds.counts.size,
+                       excludedRecords: removed.reduce((n, x) => n + x.records, 0) });
         (totals[r.code] = totals[r.code] || {})[g.label] = sp.total;
         for (const [k, n] of sp.counts) {
             const e = perSpecies.get(k) || { group: g.label, records: {} };
@@ -163,6 +182,10 @@ async function main() {
         log(`  ${r.code} ${g.label}: ${sp.total} records, ${sp.counts.size} species, ${ds.counts.size} datasets`);
     });
     queries.sort((a, b) => codes.indexOf(a.region) - codes.indexOf(b.region) || a.group.localeCompare(b.group));
+    const seen = perSpecies.size;
+
+    // 2b. Editorial merges (backbone duplicates, misfilings) and drops.
+    const { merges, drops } = await editorial.mergeAndDrop(http, cfg, perSpecies, log);
 
     // 3. Threshold: a region counts for a species at minRecords records there.
     const kept = [];
@@ -173,7 +196,7 @@ async function main() {
         const share = Math.max(...regions.map((c) => e.records[c] / totals[c][e.group]));
         kept.push({ key, group: e.group, regions, records: e.records, share });
     }
-    log(`  ${perSpecies.size} species seen, ${kept.length} kept at >= ${cfg.minRecords} records in a region, ${dropped} dropped`);
+    log(`  ${seen} species seen, ${perSpecies.size} after merges/drops, ${kept.length} kept at >= ${cfg.minRecords} records in a region, ${dropped} dropped`);
 
     // 4. Backbone names and higher taxonomy.
     const info = await mapLimit(kept, 4, (s) => gbif.species(http, s.key));
@@ -200,6 +223,9 @@ async function main() {
     const wd = await wikidataNames(http, kept, { log });
     const names = await mapLimit(kept, 4, (s) => commonName(http, s, wd.get(String(s.key)), cfg.nameSources));
     kept.forEach((s, i) => Object.assign(s, names[i]));
+    const overrides = editorial.overrideNames(cfg, kept);
+    log(`  name overrides: ${overrides.applied.length} applied` +
+        (overrides.unused.length ? `, ${overrides.unused.length} matched no species: ${overrides.unused.join(', ')}` : ''));
 
     // 6. Rows, grouped as the config orders the groups, then taxonomically.
     const groupOrder = cfg.groups.map((g) => g.label);
@@ -229,8 +255,10 @@ async function main() {
     const count = (f) => rows.reduce((m, r) => (m[f(r)] = (m[f(r)] || 0) + 1, m), {});
     const byRegion = Object.fromEntries(codes.map((c) => [c, rows.filter((r) => r.regions.includes(c)).length]));
     const summary = {
-        species: rows.length, speciesSeen: perSpecies.size, droppedBelowThreshold: dropped,
-        droppedHybrids: hybrids,
+        species: rows.length, speciesSeen: seen, droppedBelowThreshold: dropped,
+        droppedHybrids: hybrids, merged: merges.length, dropped: drops.length,
+        nameOverrides: overrides.applied.length,
+        excludedDatasetRecords: excluded.reduce((n, x) => n + x.records, 0),
         accidental: rows.filter((r) => r.accidental).length,
         byClass: count((r) => r.class), byRegion,
         commonNameSource: count((r) => r.commonSource),
@@ -249,6 +277,12 @@ async function main() {
                        gbif: 'backbone vernacularName, else the most attested /species/{key}/vernacularNames (eng)',
                        none: 'the scientific name',
                        wikidataApi: WIKIDATA_API },
+        editorial: {
+            excludeDatasets: (cfg.excludeDatasets || []).map((x) => Object.assign({}, x,
+                { removed: excluded.filter((e) => e.dataset === x.key) })),
+            merges, drops,
+            nameOverrides: overrides.applied, unusedNameOverrides: overrides.unused,
+        },
         queries, totals: summary,
     };
     const regionNames = cfg.regions.map((r) => r.code).join(', ');
@@ -258,7 +292,8 @@ async function main() {
             `CC0 / CC BY 4.0 GBIF occurrence records (${cfg.filters.year ? 'years ' + cfg.filters.year + ', ' : ''}` +
             `occurrenceStatus ${cfg.filters.occurrenceStatus || 'any'}) in at least one of ${regionNames}; ` +
             `accidental:true below ${cfg.accidentalShare} of a region's records everywhere it counts. ` +
-            `GBIF Backbone Taxonomy names, English common names from Wikidata (CC0) else GBIF. See ATTRIBUTION.md.`,
+            `GBIF Backbone Taxonomy names, English common names from Wikidata (CC0) else GBIF, ` +
+            `with hand-made merges and name overrides listed in meta.editorial. See ATTRIBUTION.md.`,
         taxonomy: 'GBIF Backbone Taxonomy',
         regions: codes,
         meta,
