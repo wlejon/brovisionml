@@ -22,6 +22,7 @@ the one exception).
 | SegFormer | FP32 | attention, logits upsample, and argmax run on-device; class ids download as bytes |
 | StyleGAN3 | FP16 top resolutions | top `num_fp16_res` (default 4) synthesis bands FP16; mapping and the inversion backward stay FP32; `Config::force_fp32` disables |
 | BiRefNet | FP32 | no FP16 path |
+| OWLv2 | mixed FP16 | vision q/k/v/o/fc1/fc2 GEMMs + attention + patch embed FP16; residual stream / norms, text tower and heads FP32 ([owlv2.md](owlv2.md)) |
 
 The mixed-precision pattern is consistent: tensor-core GEMMs and
 WMMA-covered convs get FP16 weights at `to()` time; residual streams,

@@ -11,11 +11,13 @@ segmentation (SAM), monocular depth, surface normals, and the ControlNet
 conditioning annotators (soft edge, lineart, straight lines, body pose, semantic
 segmentation).
 
-These are *vision tasks*, not multimodal language models. There is no tokenizer
-and no text in the graph, which is exactly why they do **not** belong in
+These are *vision tasks*, not multimodal language models. There is no language
+model in the graph, which is exactly why they do **not** belong in
 `brolm`: the vision encoders that live in brolm (CLIP vision, the Qwen-VL
 tower) are components of text/multimodal models; the models here take pixels in
-and emit masks / maps / boxes.
+and emit masks / maps / boxes. The one exception to "no text" is OWLv2
+(`owlv2.h`), a detector whose classes are text queries: its CLIP text tower and
+BPE tokenizer are local to it (`src/owlv2*.cpp`), not a brolm dependency.
 
 CPU-by-default (FP32 scalar backend); a GPU backend is enabled by forwarding
 `BROTENSOR_WITH_CUDA=ON`, `BROTENSOR_WITH_METAL=ON` or, on AMD,
@@ -99,8 +101,10 @@ When adding a new model family: header in `include/brovisionml/`, impl in
 
 ## Conventions
 
-- **C++20, pure C++.** No Python anywhere in this stack — not for scripts, not
-  for validation, not for weight conversion. Shell or C++ only.
+- **C++20, pure C++.** The only Python is reference-fixture generators
+  (`tests/ref/gen_*.py`, gitignored output) and weight converters
+  (`scripts/convert-*.py`); nothing at build or run time. Otherwise shell or
+  C++ only.
 - **GPU paths go through brotensor ops** for everything except DSINE's
   surface-normal domain ops (RayReLU + AngMF propagate), which ship as
   brovisionml's own CUDA kernels in `src/dsine_ops.cu` (gated on

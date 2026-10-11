@@ -788,6 +788,9 @@ Value makeVisionNamespace() {
     vision.set("Sam2", g_sam2Class.constructor());
     vision.set("Sam2Tracker", g_sam2TrackerClass.constructor());
 
+    // OWLv2 detector (native_vision_owlv2.cpp)
+    mountOwlv2(vision);
+
     // Ops and helpers
     mountVisionOps(vision);
 

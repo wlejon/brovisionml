@@ -12,8 +12,9 @@ safetensors checkpoints directly with no conversion or Python runtime.
 
 Each model is a small orchestrator class (`load()` → optional
 `to(Device::CUDA)` → one call per image) plus a matching CLI tool. There is
-no tokenizer and no language model anywhere in the graph: pixels in, masks /
-maps / boxes / images out.
+no language model anywhere in the graph: pixels in, masks / maps / boxes /
+images out. The one text input is OWLv2's detection queries, embedded by its
+own CLIP text tower and tokenizer.
 
 ## Models
 
@@ -28,6 +29,7 @@ maps / boxes / images out.
 | **OpenPose** | multi-person body pose (ControlNet "openpose") | `openpose::OpenposeDetector` / `openpose_pose` | [docs/openpose.md](docs/openpose.md) |
 | **SegFormer** | ADE20K semantic segmentation (ControlNet "seg") | `segformer::SegformerDetector` / `segformer_seg` | [docs/segformer.md](docs/segformer.md) |
 | **BiRefNet** | background removal / matting | `birefnet::BiRefNet` | [docs/birefnet.md](docs/birefnet.md) |
+| **OWLv2** | open-vocabulary object detection (text queries -> boxes) | `owlv2::Detector` | [docs/owlv2.md](docs/owlv2.md) |
 | **DINOv3** | ViT-H dense-feature backbone | `dinov3::Backbone` | [docs/dinov3.md](docs/dinov3.md) |
 | **StyleGAN3** | image generation (config-R/T) + image→W+ inversion | `stylegan3::Generator` / `stylegan3_generate` | [docs/stylegan3.md](docs/stylegan3.md) |
 

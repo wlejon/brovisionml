@@ -28,7 +28,9 @@ Two model-specific scripts cover the rest of the downloadable set:
   ~444 MB).
 
 SegFormer's checkpoint (`nvidia/segformer-b0-finetuned-ade-512-512`) is clean
-HF safetensors + `config.json`; fetch it from the hub directly.
+HF safetensors + `config.json`; fetch it from the hub directly. So is OWLv2's
+(`google/owlv2-base-patch16-ensemble`: `model.safetensors`, `vocab.json`,
+`merges.txt`), also kept unmodified in `brovisionml-data/owlv2`.
 
 ## Pickled checkpoints (out-of-repo conversion)
 

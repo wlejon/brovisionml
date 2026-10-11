@@ -186,6 +186,16 @@ target_compile_definitions(brovisionml_test_openpose PRIVATE
 target_compile_definitions(brovisionml_test_segformer PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
 
+# OWLv2: the weights-free preprocessing / decode test always runs; the parity
+# test against transformers needs the HF release (BROVISIONML_OWLV2_DIR, else
+# ../brovisionml-data/owlv2) and tests/fixtures/owlv2.bin from
+# tests/ref/gen_owlv2_fixture.py (gitignored), and skips cleanly without them.
+brovisionml_add_test(brovisionml_test_owlv2            test_owlv2.cpp)
+brovisionml_add_test(brovisionml_test_owlv2_parity     test_owlv2_parity.cpp)
+target_compile_definitions(brovisionml_test_owlv2_parity PRIVATE
+    BROVISIONML_DATA_DIR="${CMAKE_SOURCE_DIR}/../brovisionml-data"
+    BROVISIONML_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+
 # Bronze standalone JavaScript API test
 if(BROVISIONML_ENABLE_API)
     add_executable(brovisionml_test_api

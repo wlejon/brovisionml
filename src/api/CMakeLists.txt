@@ -8,6 +8,7 @@ add_library(brovisionml_api STATIC
     native_vision_ops.cpp
     native_vision_sam.cpp
     native_vision_sam2.cpp
+    native_vision_owlv2.cpp
 )
 
 target_include_directories(brovisionml_api PUBLIC

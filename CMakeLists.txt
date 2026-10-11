@@ -160,6 +160,14 @@ target_sources(brovisionml PRIVATE
     src/sam2_tracker.cpp
 )
 
+# OWLv2 open-vocabulary detector (its CLIP towers, tokenizer and preprocessing
+# are local: brovisionml carries no brolm dependency).
+target_sources(brovisionml PRIVATE
+    src/owlv2_tokenizer.cpp
+    src/owlv2_preprocess.cpp
+    src/owlv2.cpp
+)
+
 # brovisionml's own CUDA kernels (DSINE RayReLU + AngMF propagate). Compiled into
 # the library only when the GPU backend is on; BROVISIONML_WITH_CUDA gates the
 # device-dispatch branch in src/dsine_ops.cpp that calls them. Everything else in

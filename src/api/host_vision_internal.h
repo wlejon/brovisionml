@@ -416,4 +416,8 @@ void ensureVisionClassesInstalled();
 Value makeVisionNamespace();
 void mountVisionOps(ObjectBuilder& visionObj);
 
+// OWLv2 open-vocabulary detector, in native_vision_owlv2.cpp: installs the
+// Owlv2 class (once per realm thread) and adds loadOwlv2 + the constructor.
+void mountOwlv2(ObjectBuilder& visionObj);
+
 } // namespace brovisionml::api
