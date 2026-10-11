@@ -40,7 +40,7 @@ It writes, into `--out`:
 |---|---|
 | `species.json` | the list: `name`, `description`, `taxonomy`, `regions`, `meta`, `species[]` |
 | `datasets.tsv` | every GBIF dataset whose records were counted: key, record count, DOI, default licence, title |
-| `ATTRIBUTION.md` | the GBIF citation (derived-dataset form, DOI pending), licences, the exact search URLs, method and totals |
+| `ATTRIBUTION.md` | the citation (GBIF.org and the datasets in `datasets.tsv`), licences, the exact search URLs, method and totals |
 | `LICENSE` | the CC BY 4.0 legal code, fetched verbatim from creativecommons.org |
 
 ### Rows
@@ -207,9 +207,7 @@ own review of names before it ships.
 
 ## Publishing
 
-1. Register a derived dataset at https://www.gbif.org/derived-dataset/register
-   with `datasets.tsv` (dataset keys and record counts) and the search URLs in
-   `ATTRIBUTION.md`; GBIF mints a `10.15468/dd.*` DOI.
-2. Replace the `DOI: (pending GBIF derived-dataset registration)` line and the
-   `<pending>` in the citation of `ATTRIBUTION.md` with it.
-3. Ship `species.json`, `datasets.tsv`, `ATTRIBUTION.md` and `LICENSE` together.
+Ship `species.json`, `datasets.tsv`, `ATTRIBUTION.md` and `LICENSE` together:
+`datasets.tsv` is the attribution, every constituent dataset with its DOI. The
+lists are not registered as GBIF derived datasets (that needs a GBIF account);
+GBIF asks for the registration, CC BY 4.0 does not require it.

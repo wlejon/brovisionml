@@ -79,19 +79,17 @@ were counted, with its record count and DOI.
 
 ## Citation
 
-Please cite GBIF in its derived-dataset form (the list: *${doc.name}, species with
-CC0 / CC BY 4.0 occurrence records in ${doc.regions.join(', ')}*):
-
 \`\`\`
-GBIF.org (${date}) Derived dataset GBIF.org https://doi.org/10.15468/dd.<pending>
-DOI: (pending GBIF derived-dataset registration)
+${doc.name}: species with CC0 / CC BY 4.0 occurrence records in
+${doc.regions.join(', ')}. Compiled from occurrence data accessed through GBIF.org
+on ${date}, from the ${t.datasets} datasets listed in datasets.tsv.
 \`\`\`
 
-The derived-dataset DOI is minted by registering this list at
-https://www.gbif.org/derived-dataset/register with \`datasets.tsv\` (dataset key
-and record count per dataset) and the search URLs below. Until then, the
-constituent datasets are cited through \`datasets.tsv\` (${t.datasets} datasets,
-${t.datasetRecords} records).
+The attribution CC BY 4.0 asks for is GBIF.org and the publishers of the
+constituent datasets, each listed in \`datasets.tsv\` with its DOI (${t.datasets}
+datasets, ${t.datasetRecords} records), with the exact search URLs below. The
+list is not registered as a GBIF derived dataset, so it has no DOI of its own;
+that registration is something GBIF asks for, not a licence condition.
 
 ## Licences
 

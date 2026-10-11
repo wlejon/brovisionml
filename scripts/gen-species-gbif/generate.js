@@ -7,7 +7,7 @@
 // description, taxonomy, regions, species[] with common, scientific, kingdom ..
 // family, regions, accidental, plus records per region, gbifKey, commonSource
 // and a meta block), <dir>/datasets.tsv (every contributing GBIF dataset with
-// its record count, for the derived-dataset registration), <dir>/ATTRIBUTION.md
+// its record count and DOI: the attribution), <dir>/ATTRIBUTION.md
 // and <dir>/LICENSE (CC BY 4.0). See brovisionml/docs/species-lists.md.
 //
 // Options (each overrides the config file):
