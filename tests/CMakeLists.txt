@@ -37,6 +37,12 @@ brovisionml_add_test(brovisionml_test_sam               test_sam.cpp)
 target_compile_definitions(brovisionml_test_sam PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")
 brovisionml_add_test(brovisionml_test_sam_amg           test_sam_amg.cpp)
+# SAM 2.1 parity vs facebookresearch/sam2 (fixture from tests/ref/gen_sam2_fixture.py).
+brovisionml_add_test(brovisionml_test_sam2              test_sam2.cpp)
+target_compile_definitions(brovisionml_test_sam2 PRIVATE
+    BROVISIONML_SAM2_DIR="${CMAKE_SOURCE_DIR}/weights/sam2.1-hiera-base-plus"
+    BROVISIONML_SAM2_TINY_DIR="${CMAKE_SOURCE_DIR}/weights/sam2.1-hiera-tiny"
+    BROVISIONML_FIXTURES_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures")
 brovisionml_add_test(brovisionml_test_stylegan3_mapping test_stylegan3_mapping.cpp)
 target_compile_definitions(brovisionml_test_stylegan3_mapping PRIVATE
     BROVISIONML_WEIGHTS_DIR="${CMAKE_SOURCE_DIR}/weights")

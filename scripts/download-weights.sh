@@ -13,6 +13,10 @@
 #   model            sam-vit-base (default) | sam-vit-large | sam-vit-huge
 #                    | depth-anything-v2-small | depth-anything-v2-base
 #                    | depth-anything-v2-large
+#                    | sam2.1-hiera-tiny | sam2.1-hiera-small
+#                    | sam2.1-hiera-base-plus | sam2.1-hiera-large
+#                      (SAM 2.1, transformers Sam2VideoModel layout; the
+#                      size comes from config.json)
 #   --repo R         override the HuggingFace repo id
 #   --out-dir D      override the output directory
 #   --force          re-download even if the file already exists
@@ -53,12 +57,13 @@ FORCE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         sam-vit-base|sam-vit-large|sam-vit-huge) MODEL="$1"; shift ;;
+        sam2.1-hiera-tiny|sam2.1-hiera-small|sam2.1-hiera-base-plus|sam2.1-hiera-large) MODEL="$1"; shift ;;
         depth-anything-v2-small|depth-anything-v2-base|depth-anything-v2-large) MODEL="$1"; shift ;;
         --repo)    REPO="${2:?--repo needs a value}"; shift 2 ;;
         --out-dir) OUT_DIR="${2:?--out-dir needs a value}"; shift 2 ;;
         --force)   FORCE=1; shift ;;
         -h|--help)
-            sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) echo "error: unknown argument '$1' (try --help)" >&2; exit 2 ;;
     esac
@@ -76,6 +81,7 @@ case "$MODEL" in
     sam-vit-base)  [ -n "$REPO" ] || REPO="facebook/sam-vit-base"  ;;
     sam-vit-large) [ -n "$REPO" ] || REPO="facebook/sam-vit-large" ;;
     sam-vit-huge)  [ -n "$REPO" ] || REPO="facebook/sam-vit-huge"  ;;
+    sam2.1-hiera-*) [ -n "$REPO" ] || REPO="facebook/$MODEL" ;;
     depth-anything-v2-small)
         [ -n "$REPO" ] || REPO="depth-anything/Depth-Anything-V2-Small-hf"
         SUBDIR="Depth-Anything-V2-Small" ;;

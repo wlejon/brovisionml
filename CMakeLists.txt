@@ -151,6 +151,13 @@ target_sources(brovisionml PRIVATE
     src/stylegan3_filter.cpp
     src/stylegan3_synthesis.cpp
     src/stylegan3.cpp
+    src/sam2_config.cpp
+    src/sam2_ops.cpp
+    src/sam2_image_encoder.cpp
+    src/sam2_decoder.cpp
+    src/sam2_memory.cpp
+    src/sam2.cpp
+    src/sam2_tracker.cpp
 )
 
 # brovisionml's own CUDA kernels (DSINE RayReLU + AngMF propagate). Compiled into
