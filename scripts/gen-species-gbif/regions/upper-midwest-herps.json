@@ -1,0 +1,54 @@
+{
+  "name": "upper-midwest-herps",
+  "label": "Upper Midwest (MN, WI, IA, ND, SD, MB, ON): reptiles and amphibians",
+  "regions": [
+    {"code": "MN", "country": "US", "stateProvince": "Minnesota"},
+    {"code": "WI", "country": "US", "stateProvince": "Wisconsin"},
+    {"code": "IA", "country": "US", "stateProvince": "Iowa"},
+    {"code": "ND", "country": "US", "stateProvince": "North Dakota"},
+    {"code": "SD", "country": "US", "stateProvince": "South Dakota"},
+    {"code": "MB", "country": "CA", "stateProvince": "Manitoba"},
+    {"code": "ON", "country": "CA", "stateProvince": "Ontario"}
+  ],
+  "groups": [
+    {"label": "reptiles", "note": "the GBIF backbone has no class Reptilia: turtles (Testudines) and snakes and lizards (Squamata) are classes of their own there",
+     "taxa": [
+       {"name": "Testudines", "rank": "CLASS"},
+       {"name": "Squamata", "rank": "CLASS"}
+     ]},
+    {"label": "amphibians", "taxa": [{"name": "Amphibia", "rank": "CLASS"}]}
+  ],
+  "filters": {
+    "licenses": ["CC0_1_0", "CC_BY_4_0"],
+    "occurrenceStatus": "PRESENT",
+    "year": "1990,*",
+    "excludeBasisOfRecord": ["LIVING_SPECIMEN", "FOSSIL_SPECIMEN"]
+  },
+  "minRecords": 5,
+  "minRecordsNote": "herps have far fewer open (CC0 / CC BY) records than birds (most iNaturalist observations are CC BY-NC): every species with 5 to 9 records in a region is a native of it (Western Ratsnake, Six-lined Racerunner, Smooth Softshell, Western Ribbon Snake, Sagebrush Lizard, Northern Dusky Salamander), while those under 5 are mostly escapes and misplaced records (Pig-nosed Turtle, Brown Anole, Cottonmouth)",
+  "accidentalShare": 0.00002,
+
+  "excludeDatasets": [],
+
+  "merge": [
+    {"from": "Pantherophis alleghaniensis", "into": "Pantherophis spiloides", "why": "Ontario's ratsnake is the Gray Ratsnake (P. spiloides); most of its records sit on the older name P. alleghaniensis"},
+    {"from": 11018612, "into": 2431224, "why": "two backbone keys for Desmognathus fuscus (one DOUBTFUL); one salamander"}
+  ],
+
+  "drop": [
+    {"taxon": 12155764, "why": "'Amblystoma spec': salamanders identified to genus only, a doubtful backbone name, not a species"},
+    {"taxon": 10894772, "why": "'Ambystoma unisexual': the unisexual (hybrid-origin) salamander complex, not a species and not told apart from Blue-spotted or Jefferson Salamander in a photo"},
+    {"taxon": 9290463, "why": "Testudo nebrascensis is a fossil tortoise of the Badlands; the records are fossils catalogued with a recent year"}
+  ],
+
+  "names": {
+    "Anaxyrus fowleri": {"common": "Fowler's Toad", "why": "Wikidata's label is the old scientific name ('Bufo Fowleri')"},
+    "Pituophis catenifer": {"common": "Bullsnake", "why": "the subspecies of this region (P. c. sayi) and the name used here; Wikidata names the Pacific subspecies"},
+    "Nerodia sipedon": {"common": "Northern Water Snake", "why": "the name used in this region's field guides (Northern Watersnake); Wikidata has 'Common Watersnake'"},
+    "Pantherophis spiloides": {"common": "Gray Ratsnake", "why": "the name used in Ontario (see merge)"},
+    "Terrapene carolina": {"common": "Eastern Box Turtle", "why": "the name used in North America"},
+    "Trachemys scripta": {"common": "Red-eared Slider", "why": "the form found here (released pets); Wikidata names the species 'Pond Slider'"},
+    "Ambystoma texanum": {"common": "Smallmouth Salamander", "why": "the spelling of North American field guides"},
+    "Desmognathus fuscus": {"common": "Northern Dusky Salamander", "why": "the name used in Ontario; 'Dusky Salamander' alone is ambiguous beside the Allegheny Mountain Dusky Salamander"}
+  }
+}

@@ -97,6 +97,39 @@ large mammals seen in yards and on trail cameras: squirrels and chipmunks
 deer, canids, cats, bears, raccoon, skunks, mustelids and the opossum. Small
 rodents, shrews and bats are left out, as photos rarely tell them apart.
 
+`upper-midwest-herps.json` covers the same seven regions for reptiles and
+amphibians (78 species: 31 snakes and lizards, 14 turtles, 33 frogs, toads
+and salamanders), written to `species/upper-midwest-herps/`.
+`bro.vision.wildlife` merges it with the eBird-named `upper-midwest.json`
+by default, so the birds keep their checklist names and the herps come from
+open data. Its differences from the birds config:
+
+- **Groups.** The GBIF backbone has no class Reptilia: turtles (Testudines)
+  and snakes and lizards (Squamata) are classes of their own there, so the
+  reptile group is those two classes, and a row's `class` is `Testudines` or
+  `Squamata` with no `order`. (BioCLIP 2 scored the region's garter snakes a
+  little higher with class Reptilia and the order filled in, 0.92 against
+  0.89 on one burst, but the list keeps the backbone's taxonomy like the
+  others.)
+- **`minRecords` 5.** Open records are scarce for herps (most iNaturalist
+  observations are CC BY-NC): every species with 5 to 9 records in a region
+  is a native of it (Western Ratsnake, Six-lined Racerunner, Smooth
+  Softshell, Western Ribbon Snake, Sagebrush Lizard, Northern Dusky
+  Salamander), while those under 5 are mostly escapes and misplaced records
+  (Pig-nosed Turtle, Brown Anole, Cottonmouth).
+- **Editorial.** Dropped: "Amblystoma spec" (genus-only records under a
+  doubtful name), "Ambystoma unisexual" (the unisexual salamander complex,
+  not a species) and *Testudo nebrascensis* (Badlands fossil tortoises
+  catalogued with a recent year). Merged: Ontario's ratsnake records on
+  *Pantherophis alleghaniensis* into *P. spiloides* (Gray Ratsnake), and the
+  doubtful second key of *Desmognathus fuscus*. Renamed to the names this
+  region's field guides use: Fowler's Toad (Wikidata's label was "Bufo
+  Fowleri"), Bullsnake (the subspecies here; Wikidata names the Pacific
+  one), Northern Water Snake, Gray Ratsnake, Eastern Box Turtle, Red-eared
+  Slider, Smallmouth Salamander, Northern Dusky Salamander. Garter snakes
+  keep Wikidata's spaced form (Common Garter Snake; field guides also write
+  Common Gartersnake).
+
 ## Method
 
 1. **Counts.** For every region x group, an occurrence search with `limit=0`
