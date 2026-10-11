@@ -1,0 +1,39 @@
+{
+  "name": "upper-midwest-gbif",
+  "label": "Upper Midwest (MN, WI, IA, ND, SD, MB, ON)",
+  "regions": [
+    {"code": "MN", "country": "US", "stateProvince": "Minnesota"},
+    {"code": "WI", "country": "US", "stateProvince": "Wisconsin"},
+    {"code": "IA", "country": "US", "stateProvince": "Iowa"},
+    {"code": "ND", "country": "US", "stateProvince": "North Dakota"},
+    {"code": "SD", "country": "US", "stateProvince": "South Dakota"},
+    {"code": "MB", "country": "CA", "stateProvince": "Manitoba"},
+    {"code": "ON", "country": "CA", "stateProvince": "Ontario"}
+  ],
+  "groups": [
+    {"label": "birds", "taxa": [212]},
+    {"label": "mammals", "note": "medium and large mammals seen in yards, on feeders and on trail cameras; small rodents, shrews and bats are left out (hard to tell apart in photos)",
+     "taxa": [
+       {"name": "Sciuridae", "rank": "FAMILY"},
+       {"name": "Castoridae", "rank": "FAMILY"},
+       {"name": "Erethizontidae", "rank": "FAMILY"},
+       {"name": "Ondatra", "rank": "GENUS"},
+       {"name": "Leporidae", "rank": "FAMILY"},
+       {"name": "Cervidae", "rank": "FAMILY"},
+       {"name": "Canidae", "rank": "FAMILY"},
+       {"name": "Felidae", "rank": "FAMILY"},
+       {"name": "Ursidae", "rank": "FAMILY"},
+       {"name": "Procyonidae", "rank": "FAMILY"},
+       {"name": "Mephitidae", "rank": "FAMILY"},
+       {"name": "Mustelidae", "rank": "FAMILY"},
+       {"name": "Didelphidae", "rank": "FAMILY"}
+     ]}
+  ],
+  "filters": {
+    "licenses": ["CC0_1_0", "CC_BY_4_0"],
+    "occurrenceStatus": "PRESENT",
+    "year": "1990,*"
+  },
+  "minRecords": 10,
+  "accidentalShare": 0.00002
+}
