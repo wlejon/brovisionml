@@ -53,7 +53,8 @@ public:
     BiRefNet& operator=(BiRefNet&&) noexcept;
 
     // Load the Swin-L BiRefNet safetensors (any of F32/F16/BF16 on disk; widened
-    // to host FP32). Throws on a missing/mismatched key.
+    // to host FP32). Throws on a missing/mismatched key. `path` is the file,
+    // or a folder holding it: its model.safetensors, else its one .safetensors.
     void load(const std::string& path);
 
     // Migrate all weights to a device (CPU/CUDA/Metal). Call after load().

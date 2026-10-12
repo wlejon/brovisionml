@@ -17,6 +17,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -165,8 +166,26 @@ struct BiRefNet::Impl {
 
 // ── load ─────────────────────────────────────────────────────────────────────
 
+// The checkpoint `path` names: the file itself, or in a folder its
+// model.safetensors, else the folder's one .safetensors file.
+static std::string checkpointFile(const std::string& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_directory(path, ec)) return path;
+    const fs::path model = fs::path(path) / "model.safetensors";
+    if (fs::is_regular_file(model, ec)) return model.string();
+    std::vector<fs::path> found;
+    for (const auto& e : fs::directory_iterator(path, ec)) {
+        if (e.is_regular_file(ec) && e.path().extension() == ".safetensors") found.push_back(e.path());
+    }
+    if (found.size() == 1) return found[0].string();
+    throw std::runtime_error("birefnet::load: " + path + " holds " +
+                             (found.empty() ? std::string("no .safetensors file")
+                                            : std::to_string(found.size()) + " .safetensors files and no model.safetensors"));
+}
+
 void BiRefNet::Impl::load(const std::string& path) {
-    st::File f = st::File::open(path);
+    st::File f = st::File::open(checkpointFile(path));
     const std::string who = "birefnet::load: ";
 
     auto W2 = [&](const std::string& name, int rows, int cols) {
