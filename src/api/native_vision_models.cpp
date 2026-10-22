@@ -26,11 +26,12 @@ HostClass g_visionModelClass;
 
 // Template to add the standard "device" getter to any host class prototype
 template <typename WrapperT>
-static void addDeviceAccessor(ObjectBuilder& proto, const HostClass& cls) {
-    proto.accessor("device", [&cls](Value thisVal, std::span<const Value>) -> Value {
+static void addDeviceAccessor(ObjectBuilder& proto, const HostClass& cls, uint32_t expectedTag) {
+    proto.accessor("device", [&cls, expectedTag](Value thisVal, std::span<const Value>) -> Value {
         void* p = cls.unwrap(thisVal);
         if (!p) return ev::fromUtf8("CPU");
         auto* w = static_cast<WrapperT*>(p);
+        if (w->tag != expectedTag) return ev::fromUtf8("CPU");
         return ev::fromUtf8(deviceName(w->device));
     });
 }
@@ -97,7 +98,7 @@ static Value runDepthEstimator(DepthEstimatorWrapper* w, std::span<const Value> 
 }
 
 static void decorateDepthEstimatorProto(ObjectBuilder& proto) {
-    addDeviceAccessor<DepthEstimatorWrapper>(proto, g_depthEstimatorClass);
+    addDeviceAccessor<DepthEstimatorWrapper>(proto, g_depthEstimatorClass, kHostDepthEstimatorTag);
 
     // estimate(image, opts?) -> { width, height, depth, gray, min, max }
     proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
@@ -175,7 +176,7 @@ static Value runNormalEstimator(NormalEstimatorWrapper* w, std::span<const Value
 }
 
 static void decorateNormalEstimatorProto(ObjectBuilder& proto) {
-    addDeviceAccessor<NormalEstimatorWrapper>(proto, g_normalEstimatorClass);
+    addDeviceAccessor<NormalEstimatorWrapper>(proto, g_normalEstimatorClass, kHostNormalEstimatorTag);
 
     // estimate(image, opts?) -> { width, height, normals, normal }
     proto.def("estimate", 2, [](Value thisVal, std::span<const Value> args) -> Value {
@@ -213,27 +214,31 @@ static void decorateNormalEstimatorProto(ObjectBuilder& proto) {
 // VisionModel Wrapper
 // ═══════════════════════════════════════════════════════════════════════════
 
+static VisionModelWrapper* unwrapVisionModel(Value thisVal) {
+    void* p = g_visionModelClass.unwrap(thisVal);
+    if (!p) return nullptr;
+    auto* w = static_cast<VisionModelWrapper*>(p);
+    return w->tag == kHostVisionModelTag ? w : nullptr;
+}
+
 static void decorateVisionModelProto(ObjectBuilder& proto) {
-    addDeviceAccessor<VisionModelWrapper>(proto, g_visionModelClass);
+    addDeviceAccessor<VisionModelWrapper>(proto, g_visionModelClass, kHostVisionModelTag);
 
     proto.accessor("type", [](Value thisVal, std::span<const Value>) -> Value {
-        void* p = g_visionModelClass.unwrap(thisVal);
-        if (!p) return ev::fromUtf8("generic");
-        auto* w = static_cast<VisionModelWrapper*>(p);
+        auto* w = unwrapVisionModel(thisVal);
+        if (!w) return ev::fromUtf8("generic");
         return ev::fromUtf8(w->taskName);
     });
 
     proto.accessor("isLoaded", [](Value thisVal, std::span<const Value>) -> Value {
-        void* p = g_visionModelClass.unwrap(thisVal);
-        if (!p) return ev::fromBool(false);
-        auto* w = static_cast<VisionModelWrapper*>(p);
+        auto* w = unwrapVisionModel(thisVal);
+        if (!w) return ev::fromBool(false);
         return ev::fromBool(w->loaded);
     });
 
     proto.def("predict", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_visionModelClass.unwrap(thisVal);
-        if (!p) return ev::throwTypeError("VisionModel.prototype.predict: not a VisionModel");
-        auto* w = static_cast<VisionModelWrapper*>(p);
+        auto* w = unwrapVisionModel(thisVal);
+        if (!w) return ev::throwTypeError("VisionModel.prototype.predict: not a VisionModel");
         if (w->depthEstimator) return runDepthEstimator(w->depthEstimator.get(), args);
         if (w->sam) return runSamSegment(w->sam.get(), args);
         if (w->normalEstimator) return runNormalEstimator(w->normalEstimator.get(), args);
@@ -247,9 +252,8 @@ static void decorateVisionModelProto(ObjectBuilder& proto) {
     });
 
     proto.def("detect", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_visionModelClass.unwrap(thisVal);
-        if (!p) return ev::throwTypeError("VisionModel.prototype.detect: not a VisionModel");
-        auto* w = static_cast<VisionModelWrapper*>(p);
+        auto* w = unwrapVisionModel(thisVal);
+        if (!w) return ev::throwTypeError("VisionModel.prototype.detect: not a VisionModel");
         if (w->openpose) return runOpenposeDetect(w->openpose.get(), args);
         if (w->hed) return runHedDetect(w->hed.get(), args);
         if (w->lineart) return runLineartDetect(w->lineart.get(), args);
@@ -259,9 +263,8 @@ static void decorateVisionModelProto(ObjectBuilder& proto) {
     });
 
     proto.def("segment", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_visionModelClass.unwrap(thisVal);
-        if (!p) return ev::throwTypeError("VisionModel.prototype.segment: not a VisionModel");
-        auto* w = static_cast<VisionModelWrapper*>(p);
+        auto* w = unwrapVisionModel(thisVal);
+        if (!w) return ev::throwTypeError("VisionModel.prototype.segment: not a VisionModel");
         if (w->sam) return runSamSegment(w->sam.get(), args);
         if (w->segformer) return runSegformerDetect(w->segformer.get(), args);
         if (w->birefnet) return runBirefnet(w->birefnet.get(), args);
@@ -269,31 +272,28 @@ static void decorateVisionModelProto(ObjectBuilder& proto) {
     });
 
     proto.def("depth", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_visionModelClass.unwrap(thisVal);
-        if (!p) return ev::throwTypeError("VisionModel.prototype.depth: not a VisionModel");
-        auto* w = static_cast<VisionModelWrapper*>(p);
+        auto* w = unwrapVisionModel(thisVal);
+        if (!w) return ev::throwTypeError("VisionModel.prototype.depth: not a VisionModel");
         if (w->depthEstimator) return runDepthEstimator(w->depthEstimator.get(), args);
         return ev::throwError("VisionModel: model weights not loaded for task 'depth'");
     });
 
     proto.def("pose", 2, [](Value thisVal, std::span<const Value> args) -> Value {
-        void* p = g_visionModelClass.unwrap(thisVal);
-        if (!p) return ev::throwTypeError("VisionModel.prototype.pose: not a VisionModel");
-        auto* w = static_cast<VisionModelWrapper*>(p);
+        auto* w = unwrapVisionModel(thisVal);
+        if (!w) return ev::throwTypeError("VisionModel.prototype.pose: not a VisionModel");
         if (w->openpose) return runOpenposeDetect(w->openpose.get(), args);
         return ev::throwError("VisionModel: model weights not loaded for task 'pose'");
     });
 
     proto.def("ocr", 2, [](Value thisVal, std::span<const Value> /*args*/) -> Value {
-        void* p = g_visionModelClass.unwrap(thisVal);
-        if (!p) return ev::throwTypeError("VisionModel.prototype.ocr: not a VisionModel");
+        auto* w = unwrapVisionModel(thisVal);
+        if (!w) return ev::throwTypeError("VisionModel.prototype.ocr: not a VisionModel");
         return ev::throwTypeError("VisionModel.prototype.ocr: OCR backend requires an OCR model checkpoint to be explicitly loaded");
     });
 
     proto.def("dispose", 0, [](Value thisVal, std::span<const Value>) -> Value {
-        void* p = g_visionModelClass.unwrap(thisVal);
-        if (!p) return ev::undefined();
-        auto* w = static_cast<VisionModelWrapper*>(p);
+        auto* w = unwrapVisionModel(thisVal);
+        if (!w) return ev::throwTypeError("VisionModel.prototype.dispose: not a VisionModel");
         w->loaded = false;
         w->depthEstimator.reset();
         w->sam.reset();
@@ -313,12 +313,6 @@ static void decorateVisionModelProto(ObjectBuilder& proto) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void ensureVisionClassesInstalled() {
-    // Once per THREAD: a class's constructor and prototype are the
-    // installing thread's (host_class.h), so a Worker realm installs its own.
-    static thread_local bool installed = false;
-    if (installed) return;
-    installed = true;
-
     g_depthEstimatorClass.install("DepthEstimator", 0, nullptr, decorateDepthEstimatorProto);
     g_samClass.install("Sam", 0, nullptr, decorateSamProto);
     g_normalEstimatorClass.install("NormalEstimator", 0, nullptr, decorateNormalEstimatorProto);

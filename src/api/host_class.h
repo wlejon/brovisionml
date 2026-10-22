@@ -50,7 +50,7 @@ public:
 
     void setStatic(const char* name, Value v) const;
 
-    void* unwrap(Value val) const { return ev::handleData(val); }
+    void* unwrap(Value val) const;
 
     Value prototype() const;
     Value constructor() const;

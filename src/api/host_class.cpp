@@ -1,6 +1,7 @@
 #include "host_class.h"
 #include "object_builder.h"
 
+#include <mutex>
 #include <unordered_map>
 
 namespace brovisionml::api {
@@ -14,6 +15,45 @@ namespace {
 std::unordered_map<const HostClass*, HostClass::Slots>& threadSlots() {
     static thread_local std::unordered_map<const HostClass*, HostClass::Slots> t;
     return t;
+}
+
+struct Brand {
+    const HostClass* cls;
+    ev::HandleDestructor dtor;
+};
+
+std::mutex& brandMutex() {
+    static std::mutex m;
+    return m;
+}
+
+std::unordered_map<void*, Brand>& brandTable() {
+    static std::unordered_map<void*, Brand> t;
+    return t;
+}
+
+void brandedDestroy(void* p) {
+    ev::HandleDestructor fn = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(brandMutex());
+        auto& t = brandTable();
+        auto it = t.find(p);
+        if (it != t.end()) {
+            fn = it->second.dtor;
+            t.erase(it);
+        }
+    }
+    if (fn) fn(p);
+}
+
+void publishGlobal(const char* name, Value val) {
+    ev::Persistent valP(val);
+    ev::registerGlobal(name, valP.get());
+    ev::GlobalValue gt = ev::globalValue("globalThis");
+    if (gt.found && !gt.value.isUndefined() && ev::isObject(gt.value)) {
+        ev::Persistent gtP(gt.value);
+        ev::setProperty(gtP.get(), name, valP.get());
+    }
 }
 
 }  // namespace
@@ -42,6 +82,11 @@ void HostClass::install(const char* name, uint32_t arity, ev::NativeFn body,
     }
 
     Slots& s = slots();
+    delete s.ctor;
+    delete s.proto;
+    s.ctor = nullptr;
+    s.proto = nullptr;
+
     ev::Persistent ctor(ev::makeFunction(std::move(ctorBody), arity, name));
     s.ctor = new ev::Persistent(ctor.get());
 
@@ -52,21 +97,13 @@ void HostClass::install(const char* name, uint32_t arity, ev::NativeFn body,
         s.proto = new ev::Persistent(proto.get());
     }
 
-    ev::registerGlobal(name, s.ctor->get());
-    ev::GlobalValue gt = ev::globalValue("globalThis");
-    if (gt.found && !gt.value.isUndefined() && ev::isObject(gt.value)) {
-        ev::setProperty(gt.value, name, s.ctor->get());
-    }
+    publishGlobal(name, s.ctor->get());
 }
 
 void HostClass::alias(const char* name) const {
     const Slots* s = slotsIfAny();
     if (!s || !s->ctor) return;
-    ev::registerGlobal(name, s->ctor->get());
-    ev::GlobalValue gt = ev::globalValue("globalThis");
-    if (gt.found && !gt.value.isUndefined() && ev::isObject(gt.value)) {
-        ev::setProperty(gt.value, name, s->ctor->get());
-    }
+    publishGlobal(name, s->ctor->get());
 }
 
 void HostClass::inherit(const HostClass& base) const {
@@ -83,15 +120,31 @@ void HostClass::inherit(const HostClass& base) const {
 }
 
 Value HostClass::make(void* data, ev::HandleDestructor dtor, ev::Finalize when) const {
+    if (data) {
+        std::lock_guard<std::mutex> lock(brandMutex());
+        brandTable()[data] = Brand{this, dtor};
+    }
     const Slots* s = slotsIfAny();
-    if (!s || !s->proto) return ev::makeHandle(data, dtor, when);
-    return ev::makeHandle(data, dtor, when, s->proto->get());
+    if (!s || !s->proto) return ev::makeHandle(data, &brandedDestroy, when);
+    return ev::makeHandle(data, &brandedDestroy, when, s->proto->get());
+}
+
+void* HostClass::unwrap(Value val) const {
+    if (!ev::isObject(val)) return nullptr;
+    void* d = ev::handleData(val);
+    if (!d) return nullptr;
+    std::lock_guard<std::mutex> lock(brandMutex());
+    auto& t = brandTable();
+    auto it = t.find(d);
+    if (it == t.end() || it->second.cls != this) return nullptr;
+    return d;
 }
 
 void HostClass::setStatic(const char* name, Value v) const {
     const Slots* s = slotsIfAny();
     if (!s || !s->ctor) return;
-    s->ctor->set(ev::setProperty(s->ctor->get(), name, v));
+    ev::Persistent vP(v);
+    s->ctor->set(ev::setProperty(s->ctor->get(), name, vP.get()));
 }
 
 Value HostClass::prototype() const {

@@ -10,6 +10,7 @@
 
 #include <brovisionml/version.h>
 #include "../src/api/api.h"
+#include "../src/api/host_vision_internal.h"
 #include <eval/eval.h>
 
 #include <cstdio>
@@ -221,6 +222,46 @@ int main() {
 
     brovisionmlTestRestoredSurface();
     brovisionmlTestPathResolver();
+
+    // Regression (#22):
+    // 1. Re-installing bro.vision on the same thread refreshes HostClass slots
+    //    (including Owlv2) without leaking or returning stale constructors.
+    // 2. HostClass::unwrap and VisionModel/device accessors reject foreign or
+    //    cross-class native handles without memory corruption.
+    brovisionml::api::installVision();
+    {
+        static uint64_t s_foreignPayload = 0x564D4F44564D4F44ULL; // mimics 'VMOD' tag bytes
+        ev::Persistent foreignP(ev::makeHandle(&s_foreignPayload, [](void*) {}));
+        ev::registerGlobal("__testForeignHandle", foreignP.get());
+
+        auto samW = std::make_unique<brovisionml::api::SamWrapper>();
+        samW->device = brotensor::Device::CUDA;
+        ev::Persistent samP(brovisionml::api::g_samClass.createInstance(std::move(samW)));
+        ev::registerGlobal("__testSamHandle", samP.get());
+    }
+    runJs("handle branding, VisionModel tag checks, and multi-install (#22)", block(R"JS(
+        if (typeof V.Owlv2 !== "function" || typeof V.VisionModel !== "function") {
+            return "constructors missing after re-install";
+        }
+        const vmProto = V.VisionModel.prototype;
+        const depProto = V.DepthEstimator.prototype;
+        const devGetter = Object.getOwnPropertyDescriptor(depProto, "device").get;
+        const vmDevGetter = Object.getOwnPropertyDescriptor(vmProto, "device").get;
+        const vmTypeGetter = Object.getOwnPropertyDescriptor(vmProto, "type").get;
+        const vmLoadedGetter = Object.getOwnPropertyDescriptor(vmProto, "isLoaded").get;
+
+        for (const bad of [__testForeignHandle, __testSamHandle]) {
+            if (devGetter.call(bad) !== "CPU") return "DepthEstimator.device accepted wrong handle";
+            if (vmDevGetter.call(bad) !== "CPU") return "VisionModel.device accepted wrong handle";
+            if (vmTypeGetter.call(bad) !== "generic") return "VisionModel.type accepted wrong handle";
+            if (vmLoadedGetter.call(bad) !== false) return "VisionModel.isLoaded accepted wrong handle";
+            for (const m of ["predict", "detect", "segment", "depth", "pose", "ocr", "dispose"]) {
+                const r = throwsWith(() => vmProto[m].call(bad), (e) => e instanceof TypeError);
+                if (r) return "VisionModel." + m + " on wrong handle: " + r;
+            }
+        }
+        return "OK";
+    )JS"));
 
     if (g_failures > 0) {
         std::printf("FAILED: %d check(s) failed\n", g_failures);

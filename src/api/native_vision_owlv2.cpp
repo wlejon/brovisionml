@@ -209,11 +209,7 @@ void decorateOwlv2Proto(ObjectBuilder& proto) {
 }  // namespace
 
 void mountOwlv2(ObjectBuilder& vision) {
-    static thread_local bool installed = false;   // per realm thread (host_class.h)
-    if (!installed) {
-        installed = true;
-        g_owlv2Class.install("Owlv2", 0, nullptr, decorateOwlv2Proto);
-    }
+    g_owlv2Class.install("Owlv2", 0, nullptr, decorateOwlv2Proto);
 
     // loadOwlv2(dir, { device }) — dir holds the HF release: model.safetensors,
     // vocab.json, merges.txt.
