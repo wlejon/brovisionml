@@ -333,11 +333,8 @@ static Value js_decodeBoxes(Value, std::span<const Value> args) {
             numClasses = (nc >= 1.0 && nc <= 1.0e6) ? static_cast<int>(nc) : 0;
         }
 
-        Value ctVal = ev::getProperty(args[1], "confThreshold");
-        if (!ev::isUndefined(ctVal)) confThreshold = static_cast<float>(ev::toDouble(ctVal));
-
-        Value itVal = ev::getProperty(args[1], "iouThreshold");
-        if (!ev::isUndefined(itVal)) iouThreshold = static_cast<float>(ev::toDouble(itVal));
+        confThreshold = optFloat(args[1], "confThreshold", confThreshold);
+        iouThreshold = optFloat(args[1], "iouThreshold", iouThreshold);
 
         Value nmsVal = ev::getProperty(args[1], "nms");
         if (!ev::isUndefined(nmsVal)) doNms = ev::toBool(nmsVal);
@@ -571,7 +568,9 @@ static Value js_nms(Value, std::span<const Value> args) {
                 auto at = [&](uint32_t k, float def) -> float {
                     if (k >= elen) return def;
                     Value v = ev::getElement(elemRoot.get(), k);
-                    return ev::isNumber(v) ? static_cast<float>(ev::toDouble(v)) : def;
+                    if (!ev::isNumber(v)) return def;
+                    const double d = ev::toDouble(v);
+                    return std::isfinite(d) ? static_cast<float>(d) : def;
                 };
                 BoundingBox b;
                 b.x1 = at(0, 0.0f);
@@ -590,8 +589,7 @@ static Value js_nms(Value, std::span<const Value> args) {
             // 4c. Element is a JS Object: { x1, y1, x2, y2, score, classId }
             // Each read is converted before the next one allocates.
             auto prop = [&](const char* key, float def) -> float {
-                Value v = ev::getProperty(elemRoot.get(), key);
-                return ev::isNumber(v) ? static_cast<float>(ev::toDouble(v)) : def;
+                return optFloat(elemRoot.get(), key, def);
             };
             BoundingBox b;
             b.x1 = prop("x1", 0.0f);
@@ -726,10 +724,8 @@ static Value js_rasterizeMask(Value, std::span<const Value> args) {
             // copy the first may have moved.
             ev::Persistent p(ev::getElement(args[0], i));
             if (ev::isObject(p.get())) {
-                Value xv = ev::getProperty(p.get(), "x");
-                const float px = ev::isNumber(xv) ? static_cast<float>(ev::toDouble(xv)) : 0.0f;
-                Value yv = ev::getProperty(p.get(), "y");
-                const float py = ev::isNumber(yv) ? static_cast<float>(ev::toDouble(yv)) : 0.0f;
+                const float px = optFloat(p.get(), "x", 0.0f);
+                const float py = optFloat(p.get(), "y", 0.0f);
                 poly.emplace_back(px, py);
             }
         }
@@ -783,11 +779,17 @@ static Value js_colorMap(Value, std::span<const Value> args) {
         }
         {
             Value minv = ev::getProperty(args[1], "min");
-            if (ev::isNumber(minv)) { minVal = static_cast<float>(ev::toDouble(minv)); autoRange = false; }
+            if (ev::isNumber(minv) && std::isfinite(ev::toDouble(minv))) {
+                minVal = static_cast<float>(ev::toDouble(minv));
+                autoRange = false;
+            }
         }
         {
             Value maxv = ev::getProperty(args[1], "max");
-            if (ev::isNumber(maxv)) { maxVal = static_cast<float>(ev::toDouble(maxv)); autoRange = false; }
+            if (ev::isNumber(maxv) && std::isfinite(ev::toDouble(maxv))) {
+                maxVal = static_cast<float>(ev::toDouble(maxv));
+                autoRange = false;
+            }
         }
     }
     if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {

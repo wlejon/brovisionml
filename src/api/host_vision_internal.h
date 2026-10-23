@@ -297,24 +297,30 @@ inline int optInt(Value obj, const char* key, int def) {
     return static_cast<int>(d);
 }
 
-// obj[key] as a float when it is a number, else `def`.
+// obj[key] as a float when it is a finite number, else `def`.
 inline float optFloat(Value obj, const char* key, float def) {
     if (!ev::isObject(obj)) return def;
     Value v = ev::getProperty(obj, key);
-    return ev::isNumber(v) ? static_cast<float>(ev::toDouble(v)) : def;
+    if (!ev::isNumber(v)) return def;
+    const double d = ev::toDouble(v);
+    return std::isfinite(d) ? static_cast<float>(d) : def;
 }
 
-// obj[key] as a double when it is a number, else `def`.
+// obj[key] as a double when it is a finite number, else `def`.
 inline double optDouble(Value obj, const char* key, double def) {
     if (!ev::isObject(obj)) return def;
     Value v = ev::getProperty(obj, key);
-    return ev::isNumber(v) ? ev::toDouble(v) : def;
+    if (!ev::isNumber(v)) return def;
+    const double d = ev::toDouble(v);
+    return std::isfinite(d) ? d : def;
 }
 
-// arr[i] as a float when it is a number, else 0.
+// arr[i] as a float when it is a finite number, else 0.
 inline float numElem(Value arr, uint32_t i) {
     Value v = ev::getElement(arr, i);
-    return ev::isNumber(v) ? static_cast<float>(ev::toDouble(v)) : 0.0f;
+    if (!ev::isNumber(v)) return 0.0f;
+    const double d = ev::toDouble(v);
+    return std::isfinite(d) ? static_cast<float>(d) : 0.0f;
 }
 
 // obj[key] truthiness; undefined / null / absent give `def`.
@@ -345,7 +351,7 @@ inline uint32_t getJsArrayLength(Value v) {
     Value lenV = ev::getProperty(v, "length");
     if (ev::isUndefined(lenV) || ev::isObject(lenV)) return 0;
     double d = ev::toDouble(lenV);
-    return (d > 0.0) ? static_cast<uint32_t>(d) : 0;
+    return (std::isfinite(d) && d > 0.0) ? static_cast<uint32_t>(std::min(d, 4294967295.0)) : 0;
 }
 
 // Prototype decoration is split across translation units so each file stays

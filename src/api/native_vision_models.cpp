@@ -136,7 +136,7 @@ static Value runNormalEstimator(NormalEstimatorWrapper* w, std::span<const Value
         // Read straight off the rooted slot: a local copy of args[1] would be
         // stale after the first getProperty.
         Value fxv = ev::getProperty(args[1], "fx");
-        if (ev::isNumber(fxv)) {
+        if (ev::isNumber(fxv) && std::isfinite(ev::toDouble(fxv))) {
             hasIntrinsics = true;
             fx = static_cast<float>(ev::toDouble(fxv));
             fy = optFloat(args[1], "fy", fy);

@@ -59,9 +59,7 @@ void intProp(Value obj, const char* key, int& dst) {
 }
 
 void floatProp(Value obj, const char* key, float& dst) {
-    if (!ev::isObject(obj)) return;
-    Value v = ev::getProperty(obj, key);
-    if (ev::isNumber(v)) dst = static_cast<float>(ev::toDouble(v));
+    dst = optFloat(obj, key, dst);
 }
 
 bool boolProp(Value obj, const char* key, bool def) {
