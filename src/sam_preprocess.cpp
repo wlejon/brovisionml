@@ -2,6 +2,7 @@
 
 #include "broimage/geometric.h"
 #include "broimage/preproc.h"
+#include "broimage/preproc_jit.h"
 #include "broimage/normalize.h"
 #include "broimage/presets.h"
 
@@ -58,25 +59,25 @@ PreprocessedImage preprocess(const uint8_t* rgb, int w, int h, int channels,
     int new_w = 0, new_h = 0;
     preprocess_shape(w, h, input_size, new_w, new_h);
 
-    // 2. Resize longest side. Bilinear to match upstream's PIL BILINEAR; the
-    //    content keeps its aspect ratio and lands at the top-left of the square.
-    std::vector<uint8_t> resized(static_cast<size_t>(new_w) * new_h * 3);
-    broimage::resize_hwc_u8(rgb3.data(), w, h, 3,
-                            resized.data(), new_w, new_h,
-                            broimage::Filter::Bilinear);
-
-    // 3. Scale [0,255]->[0,1] into planar NCHW, then per-channel normalize. Run
-    //    on the (new_h x new_w) content only; the pad is added in step 4 as
-    //    exact zeros (matching Sam.preprocess, which pads after normalize).
+    // 2. Bilinear resize to (new_w, new_h) in uint8 (matching segment_anything
+    //    ResizeLongestSide.apply_image which quantizes resized pixels to uint8).
     const int content = new_w * new_h;
+    std::vector<uint8_t> resized;
+    const uint8_t* norm_src = rgb3.data();
+    if (w != new_w || h != new_h) {
+        resized.resize(static_cast<size_t>(content) * 3);
+        broimage::resize_hwc_u8(rgb3.data(), w, h, /*channels=*/3,
+                                resized.data(), new_w, new_h,
+                                broimage::Filter::Bilinear);
+        norm_src = resized.data();
+    }
+
+    // 3. Fused [0,255]->[0,1] + per-channel SAM normalize + HWC->CHW transpose
+    //    into planar NCHW content buffer via broimage JIT.
     std::vector<float> norm(static_cast<size_t>(content) * 3);
-    broimage::u8_nhwc_to_f32_nchw(resized.data(), /*N=*/1, new_h, new_w, /*C=*/3,
-                                  /*scale=*/1.0f / 255.0f, /*bias=*/0.0f,
-                                  norm.data());
-    broimage::image_normalize_nchw_f32(norm.data(),
-                                       broimage::SAM_MEAN, broimage::SAM_STD,
-                                       /*N=*/1, /*C=*/3, new_h, new_w,
-                                       norm.data());
+    broimage::fused_u8_nhwc_to_f32_nchw_normalized(
+        norm_src, new_w, new_h, norm.data(), new_w, new_h,
+        broimage::SAM_MEAN, broimage::SAM_STD);
 
     // 4. Place each normalized channel plane into the top-left of a zeroed
     //    input_size x input_size square. mat() zero-fills, so the bottom/right

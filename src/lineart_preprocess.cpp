@@ -2,6 +2,7 @@
 
 #include "broimage/geometric.h"
 #include "broimage/preproc.h"
+#include "broimage/preproc_jit.h"
 
 #include <algorithm>
 #include <cmath>
@@ -45,25 +46,21 @@ PreprocessedImage preprocess(const uint8_t* rgb, int w, int h, int channels,
     int proc_w = 0, proc_h = 0;
     lineart_proc_dims(w, h, detect_resolution, proc_w, proc_h);
 
-    // 2. Resize to the working resolution (bilinear), or keep native.
-    const uint8_t* src = rgb3.data();
-    std::vector<uint8_t> resized;
-    if (proc_w != w || proc_h != h) {
-        resized.resize(static_cast<size_t>(proc_w) * proc_h * 3);
-        broimage::resize_hwc_u8(rgb3.data(), w, h, 3,
-                                resized.data(), proc_w, proc_h,
-                                broimage::Filter::Bilinear);
-        src = resized.data();
-    }
-
-    // 3. Pack to planar NCHW FP32, scaling pixels to [0,1] (value/255 — the
-    //    generator was trained on /255 input; no mean/std normalization).
+    // 2+3. Resize to the working resolution (bilinear) and pack to planar NCHW
+    //      FP32 in [0,1] (value/255).
     const int plane = proc_w * proc_h;
     PreprocessedImage out;
     out.pixels = brotensor::Tensor::mat(1, 3 * plane);
     float* dst = out.pixels.host_f32_mut();
-    broimage::u8_nhwc_to_f32_nchw(src, /*N=*/1, proc_h, proc_w, /*C=*/3,
-                                  /*scale=*/1.0f / 255.0f, /*bias=*/0.0f, dst);
+    if (proc_w == w && proc_h == h) {
+        broimage::u8_nhwc_to_f32_nchw(rgb3.data(), /*N=*/1, proc_h, proc_w, /*C=*/3,
+                                      /*scale=*/1.0f / 255.0f, /*bias=*/0.0f, dst);
+    } else {
+        static constexpr float kZeroMean[3] = {0.0f, 0.0f, 0.0f};
+        static constexpr float kUnitStd[3]  = {1.0f, 1.0f, 1.0f};
+        broimage::fused_u8_nhwc_to_f32_nchw_normalized(
+            rgb3.data(), w, h, dst, proc_w, proc_h, kZeroMean, kUnitStd);
+    }
 
     out.transform.orig_w = w;
     out.transform.orig_h = h;

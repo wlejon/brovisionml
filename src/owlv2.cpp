@@ -1,5 +1,6 @@
 #include "brovisionml/owlv2.h"
 
+#include "brotensor/detail/cpu/thread_pool.h"
 #include "brotensor/ops.h"
 #include "brotensor/ops/fused.h"
 #include "brotensor/runtime.h"
@@ -429,17 +430,25 @@ Predictions Detector::predict(const Pixels& px, const float* query_embeds, int n
 
     // logit = (cos + shift) * (elu(scale) + 1); box = sigmoid(raw + bias).
     out.logits.resize(static_cast<std::size_t>(P) * num_queries);
-    for (int i = 0; i < P; ++i) {
-        const float shift = shift_scale[2 * i];
-        const float sc = shift_scale[2 * i + 1];
-        const float scale = (sc > 0.f ? sc : std::expm1(sc)) + 1.0f;
-        for (int qi = 0; qi < num_queries; ++qi) {
-            const std::size_t at = static_cast<std::size_t>(i) * num_queries + qi;
-            out.logits[at] = (logits[at] + shift) * scale;
+    constexpr int kChunk = 128;
+    const std::size_t n_chunks = static_cast<std::size_t>((P + kChunk - 1) / kChunk);
+    brotensor::detail::cpu::parallel_for(n_chunks, [&](std::size_t ci) {
+        const int i0 = static_cast<int>(ci) * kChunk;
+        const int i1 = std::min(P, i0 + kChunk);
+        for (int i = i0; i < i1; ++i) {
+            const float shift = shift_scale[2 * i];
+            const float sc = shift_scale[2 * i + 1];
+            const float scale = (sc > 0.f ? sc : std::expm1(sc)) + 1.0f;
+            for (int qi = 0; qi < num_queries; ++qi) {
+                const std::size_t at = static_cast<std::size_t>(i) * num_queries + qi;
+                out.logits[at] = (logits[at] + shift) * scale;
+            }
+            for (int k = 0; k < 4; ++k) {
+                const std::size_t bi = static_cast<std::size_t>(i) * 4 + k;
+                out.boxes[bi] = sigmoid(out.boxes[bi] + w.box_bias[bi]);
+            }
         }
-    }
-    for (std::size_t i = 0; i < out.boxes.size(); ++i)
-        out.boxes[i] = sigmoid(out.boxes[i] + w.box_bias[i]);
+    });
     return out;
 }
 

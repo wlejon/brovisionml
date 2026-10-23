@@ -16,11 +16,12 @@
 
 #include "brovisionml/owlv2.h"
 
+#include "brotensor/detail/cpu/thread_pool.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
-#include <thread>
 #include <vector>
 
 namespace brovisionml::owlv2 {
@@ -162,18 +163,17 @@ Pixels preprocess(const uint8_t* pixels, int width, int height, int channels, in
         }
     };
 
-    // Bands of output rows on up to 8 threads; a small input stays on one.
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    const int threads = static_cast<std::size_t>(S) * S < (std::size_t(1) << 20)
-                            ? 1 : static_cast<int>(std::min({hw, 8u, static_cast<unsigned>(size)}));
-    if (threads == 1) {
+    // Bands of output rows via brotensor's parallel_for; a small input stays on one.
+    if (static_cast<std::size_t>(S) * S < (std::size_t(1) << 20)) {
         band(0, size);
     } else {
-        auto edge = [&](int t) { return static_cast<int>(static_cast<int64_t>(size) * t / threads); };
-        std::vector<std::thread> pool;
-        for (int t = 1; t < threads; ++t) pool.emplace_back(band, edge(t), edge(t + 1));
-        band(edge(0), edge(1));
-        for (std::thread& th : pool) th.join();
+        constexpr int kBand = 16;
+        const std::size_t n_bands = static_cast<std::size_t>((size + kBand - 1) / kBand);
+        brotensor::detail::cpu::parallel_for(n_bands, [&](std::size_t bi) {
+            const int oy0 = static_cast<int>(bi) * kBand;
+            const int oy1 = std::min(size, oy0 + kBand);
+            band(oy0, oy1);
+        });
     }
     return out;
 }
