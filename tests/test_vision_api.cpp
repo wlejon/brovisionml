@@ -23,6 +23,8 @@ void brovisionmlTestRestoredSurface();
 // tests/test_vision_api_paths.cpp — setPathResolver: the host's resolver is
 // consulted for every model path the loaders take.
 void brovisionmlTestPathResolver();
+// test_vision_api_gate.cpp
+void brovisionmlTestAccessGate();
 
 namespace {
 
@@ -222,6 +224,7 @@ int main() {
 
     brovisionmlTestRestoredSurface();
     brovisionmlTestPathResolver();
+    brovisionmlTestAccessGate();
 
     // Regression (#22):
     // 1. Re-installing bro.vision on the same thread refreshes HostClass slots

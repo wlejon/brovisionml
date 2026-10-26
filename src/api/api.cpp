@@ -1,5 +1,10 @@
 #include "api.h"
 #include "host_vision_internal.h"
+#include "embed/embed_access.h"
+
+#include <filesystem>
+#include <string_view>
+#include <system_error>
 
 namespace brovisionml::api {
 
@@ -15,6 +20,23 @@ std::function<std::string(const std::string&)>& pathResolverSlot() {
 std::string resolvePath(const std::string& path) {
     auto& r = pathResolverSlot();
     return r ? r(path) : path;
+}
+
+PathRefusal checkReadAccess(std::string_view path) {
+    if (path.empty() || !ev::accessGateActive()) return {};
+    std::filesystem::path p(std::u8string(path.begin(), path.end()));
+    std::error_code ec;
+    std::filesystem::path abs = std::filesystem::absolute(p, ec);
+    if (ec) abs = p;
+    const std::u8string u = abs.lexically_normal().u8string();
+    PathRefusal r;
+    r.path.assign(u.begin(), u.end());
+    r.message = ev::checkAccess(ev::AccessKind::Read, r.path);
+    return r;
+}
+
+Value throwRefusal(const PathRefusal& refusal) {
+    return ev::throwAccessError(refusal.message, "EACCES", refusal.path);
 }
 
 void setPathResolver(std::function<std::string(const std::string&)> resolver) {

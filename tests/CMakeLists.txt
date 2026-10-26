@@ -201,7 +201,9 @@ if(BROVISIONML_ENABLE_API)
     add_executable(brovisionml_test_api
         test_vision_api.cpp
         test_vision_api_restored.cpp
-        test_vision_api_paths.cpp)
+        test_vision_api_paths.cpp
+        # every loader under a refusing access gate (embed/embed_access.h)
+        test_vision_api_gate.cpp)
     target_include_directories(brovisionml_test_api PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../src/api
     )

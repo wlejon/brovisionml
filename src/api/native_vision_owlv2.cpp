@@ -217,6 +217,7 @@ void mountOwlv2(ObjectBuilder& vision) {
         if (args.empty() || !ev::isString(args[0]))
             return ev::throwTypeError("bro.vision.loadOwlv2: path is required (a directory)");
         const std::string path = resolvePath(ev::toUtf8(args[0]));
+        if (PathRefusal r = checkReadAccess(path)) return throwRefusal(r);
         std::error_code ec;
         if (!std::filesystem::is_directory(path, ec))
             return ev::throwError("loadOwlv2 failed: model dir not found: " + path);

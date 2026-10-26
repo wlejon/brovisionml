@@ -120,6 +120,9 @@ bool readImageInput(Value val, std::vector<uint8_t>& rgba, int& w, int& h, std::
     ev::Persistent img(val);
     if (ev::isString(img.get())) {
         std::string path = resolvePath(ev::toUtf8(img.get()));
+        // A refused image throws from here (every caller is a JS-thread
+        // native, outside any catch): its EACCES Error, not a decode failure.
+        if (PathRefusal r = checkReadAccess(path)) throwRefusal(r);
         broimage::Image decoded;
         if (!broimage::decode_file(path, decoded, &err)) {
             if (err.empty()) err = "Failed to decode image file: " + path;

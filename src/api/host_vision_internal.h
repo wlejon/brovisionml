@@ -31,6 +31,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace brovisionml::api {
@@ -251,6 +252,21 @@ bool readImageInput(Value val, std::vector<uint8_t>& rgba, int& w, int& h, std::
 // (api.h setPathResolver). Every string path a binding hands to brovisionml
 // or to broimage's decoder goes through this first.
 std::string resolvePath(const std::string& path);
+
+// The host's access gate (embed/embed_access.h; api.h, "Access"). A loader,
+// and readImageInput for an image named by path, asks Read about the resolved
+// path on the JS thread before anything is opened or stat'ed (a directory
+// covers what is in it). The gate is handed the path absolute and lexically
+// normal, in UTF-8; an empty path is skipped. A set PathRefusal carries the
+// gate's sentence and that path.
+struct PathRefusal {
+    std::string message, path;
+    explicit operator bool() const { return !message.empty(); }
+};
+PathRefusal checkReadAccess(std::string_view path);
+// The refusal thrown into the running program (Error, code EACCES, path);
+// unwinds like every ev::throw*.
+Value throwRefusal(const PathRefusal& refusal);
 
 Value makeFloat32Array(const float* data, size_t count);
 Value makeUint8Array(const uint8_t* data, size_t count);

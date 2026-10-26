@@ -340,6 +340,10 @@ static bool validateLoaderPath(const char* name, std::span<const Value> args, st
         return false;
     }
     path = resolvePath(ev::toUtf8(args[0]));
+    if (PathRefusal r = checkReadAccess(path)) {
+        outError = throwRefusal(r);
+        return false;
+    }
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) {
         outError = ev::throwError(std::string(name) + " failed: model dir not found: " + path);
