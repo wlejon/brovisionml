@@ -3,14 +3,15 @@
 // Shared device selection for the brovisionml CLI tools.
 //
 // Every tool accepts
-//     --device D   cpu | cuda | metal | vulkan | vk | gpu   (default: cpu)
+//     --device D   cpu | cuda | metal | vulkan | vk | gpu   (default: gpu)
 //     --cuda       legacy spelling of --device gpu
 // "gpu" (and so --cuda) means the best GPU backend this binary registered —
 // brotensor::default_device() after init() when that is a GPU (CUDA > Metal >
 // Vulkan, honouring BROTENSOR_DEFAULT_DEVICE), else the
 // first GPU available (Vulkan last). On a
-// CUDA build that is CUDA, exactly what --cuda always selected. A named backend
-// that is not available falls back to the CPU with a note on stderr.
+// CUDA build that is CUDA, exactly what --cuda always selected. A GPU request
+// this machine cannot meet ends the tool with an error; the CPU runs only
+// when --device cpu asks for it.
 //
 // Built standalone only, alongside the tools; not part of the library.
 
@@ -18,6 +19,7 @@
 #include "brotensor/tensor.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 namespace brovisionml_tools {
@@ -37,7 +39,7 @@ inline brotensor::Device best_gpu() {
 // model is loaded.
 struct DeviceRequest {
     enum class Kind { Cpu, Gpu, Cuda, Metal, Vulkan };
-    Kind kind = Kind::Cpu;
+    Kind kind = Kind::Gpu;
 
     // Parses a --device value; false for an unknown name.
     bool parse(const std::string& s) {
@@ -53,7 +55,7 @@ struct DeviceRequest {
     bool wants_gpu() const { return kind != Kind::Cpu; }
 
     // Initializes brotensor (GPU requests only) and returns the device to run
-    // on, printing it. An unavailable backend yields Device::CPU.
+    // on, printing it. An unavailable backend exits with an error.
     brotensor::Device resolve() const {
         if (kind == Kind::Cpu) return brotensor::Device::CPU;
         brotensor::init();
@@ -70,8 +72,8 @@ struct DeviceRequest {
             std::printf("running on %s\n", brotensor::device_name(want));
             return want;
         }
-        std::fprintf(stderr, "%s requested but unavailable; using CPU\n", what);
-        return brotensor::Device::CPU;
+        std::fprintf(stderr, "%s requested but unavailable (--device cpu runs on the CPU)\n", what);
+        std::exit(1);
     }
 };
 
