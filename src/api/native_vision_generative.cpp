@@ -1,15 +1,8 @@
 // StyleGAN3 (generate / synthesize / invert) and BiRefNet (removeBackground /
 // dispose) — the two generative / matting classes.
 //
-// Ported from the QuickJS-era src/js/vision_bindings.cpp (js_stylegan3_generate
-// / _synthesize / _invert, sg3BuildResult, js_loadStyleGAN3, js_birefnet_remove
-// / _dispose). The bronze port had reduced StyleGAN3.generate() to a flat gray
-// buffer, never constructed a Generator at all, and replaced
-// BiRefNet.removeBackground() with an estimate() that returned a byte mask.
-//
-// The old bodies returned ImageBitmaps (`image`, `matte`) built by bro's DOM;
-// a standalone sibling cannot mint one, so pixels come back as typed arrays
-// (`data` / `alpha`) exactly as native_vision_ops.cpp already does.
+// A standalone sibling cannot mint a DOM ImageBitmap, so pixels come back as
+// typed arrays (`data` / `alpha`), as they do in native_vision_ops.cpp.
 
 #include "host_vision_internal.h"
 
@@ -81,7 +74,7 @@ sg3::Config sg3ConfigFor(int res, char variant) {
 }
 
 // { data, width, height, channels, [seed], [w, numWs, wDim], [loss, lossCurve] }
-// — the old sg3BuildResult with its ImageBitmap replaced by the pixel bytes.
+// — the StyleGAN3 result, its pixels as bytes rather than an ImageBitmap.
 Value sg3Result(const StyleGAN3Wrapper& w, const sg3::Image& img, int64_t seed,
                 const std::vector<float>& ws, bool hasLoss, float loss,
                 const std::vector<float>& lossCurve) {
@@ -312,9 +305,9 @@ Value sgInvert(Value thisVal, std::span<const Value> args) {
 
 // removeBackground(image, opts?) -> { width, height, alpha, matte, data }
 //   alpha  Float32Array(h*w) in [0, 1]
-//   matte  Uint8Array(h*w)   the same matte as bytes (the old `matte` bitmap)
+//   matte  Uint8Array(h*w)   the same matte as bytes (also as `mask`)
 //   data   Uint8Array(h*w*4) the input RGBA with its alpha replaced — the
-//          ready-to-draw cutout the old binding returned as `image`.
+//          ready-to-draw cutout.
 Value runBirefnet(BirefnetWrapper* w, std::span<const Value> args) {
     if (!w) {
         return ev::throwTypeError("BiRefNet: not a BiRefNet instance");
@@ -384,8 +377,7 @@ Value runBirefnet(BirefnetWrapper* w, std::span<const Value> args) {
     {
         ev::Persistent m(makeUint8Array(bytes.data(), bytes.size()));
         res.set("matte", m.get());
-        // `mask` is what the bronze port's estimate() called this plane; keep
-        // it so callers written against the port keep working.
+        // `mask`: a second name for the same plane.
         ev::Persistent m2(makeUint8Array(bytes.data(), bytes.size()));
         res.set("mask", m2.get());
     }
@@ -478,8 +470,7 @@ void decorateStyleGAN3Proto(ObjectBuilder& proto) {
         auto* w = sgSelf(thisVal);
         return ev::fromDouble(w ? w->imgResolution : 1024);
     });
-    // imgResolution / imgChannels are the bronze port's names for the same two
-    // numbers; kept so callers written against the port keep working.
+    // imgResolution / imgChannels: second names for the same two numbers.
     proto.accessor("imgResolution", [](Value thisVal, std::span<const Value>) -> Value {
         auto* w = sgSelf(thisVal);
         return ev::fromDouble(w ? w->imgResolution : 1024);
@@ -509,7 +500,7 @@ void decorateBirefnetProto(ObjectBuilder& proto) {
     });
 
     proto.def("removeBackground", 2, brRemoveBackground);
-    // The bronze port named this estimate(); it is the same operation.
+    // estimate() is a second name for removeBackground().
     proto.def("estimate", 2, brRemoveBackground);
 
     // dispose() — the weights are GPU-resident and invisible to the JS heap

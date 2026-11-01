@@ -1,18 +1,15 @@
 // ControlNet annotators: HED (soft edges), Lineart, MLSD (line segments),
 // OpenPose and SegFormer.
 //
-// Ported from the QuickJS-era src/js/vision_bindings.cpp (js_hed_detect,
-// js_lineart_detect, js_mlsd_detect, js_openpose_detect, js_segformer_detect).
-// The bronze port renamed every detect() to estimate() and renamed the result
-// planes with it (edge -> edges, line -> lines, segments -> lines, bodies ->
-// poses, classes -> segments), and dropped the per-keypoint `present` flag and
-// the per-body totalScore / totalParts. Both names are published here: the old
-// one because callers and docs use it, the new one so the port's callers keep
-// working.
+// Every annotator answers to both detect() and estimate(), and each result
+// carries two spellings of its planes: edge / edges, line / lines, segments /
+// lines (MLSD), bodies / poses, classes / segments (SegFormer). OpenPose
+// keypoints carry a `present` flag, and each body its totalScore / totalParts
+// (also published as `score`).
 //
-// The old `image` result key was an ImageBitmap built by bro's DOM; a
-// standalone sibling cannot mint one, so the pixel planes come back as typed
-// arrays and the caller rasterizes.
+// A standalone sibling cannot mint a DOM ImageBitmap, so there is no `image`
+// result key: the pixel planes come back as typed arrays and the caller
+// rasterizes.
 
 #include "host_vision_internal.h"
 
@@ -34,7 +31,7 @@ WrapperT* selfOf(const HostClass& cls, Value thisVal, uint32_t tag) {
     return w->tag == tag ? w : nullptr;
 }
 
-// Unit-scalar plane -> bytes, for the port's `edges` / `lines` keys.
+// Unit-scalar plane -> bytes, for the `edges` / `lines` keys.
 std::vector<uint8_t> toBytes(const std::vector<float>& unit) {
     std::vector<uint8_t> out(unit.size());
     for (size_t i = 0; i < unit.size(); ++i) {
@@ -43,21 +40,21 @@ std::vector<uint8_t> toBytes(const std::vector<float>& unit) {
     return out;
 }
 
-// A scalar-plane result carrying both key spellings: `oldKey` as the FP32 plane
-// the pre-transition binding returned, `newKey` as the port's byte plane.
+// A scalar-plane result carrying both key spellings: `floatKey` as the FP32
+// plane, `byteKey` as the same plane in bytes.
 Value scalarPlaneResult(int w, int h, const std::vector<float>& plane,
-                        const char* oldKey, const char* newKey) {
+                        const char* floatKey, const char* byteKey) {
     const std::vector<uint8_t> bytes = toBytes(plane);
     ObjectBuilder res;
     res.set("width", static_cast<double>(w));
     res.set("height", static_cast<double>(h));
     {
         ev::Persistent f(makeFloat32Array(plane.data(), plane.size()));
-        res.set(oldKey, f.get());
+        res.set(floatKey, f.get());
     }
     {
         ev::Persistent b(makeUint8Array(bytes.data(), bytes.size()));
-        res.set(newKey, b.get());
+        res.set(byteKey, b.get());
     }
     return res.build();
 }
@@ -158,7 +155,7 @@ Value runMlsdDetect(MlsdWrapper* w, std::span<const Value> args) {
         res.set("width", static_cast<double>(segs.width));
         res.set("height", static_cast<double>(segs.height));
         res.set("segments", arr.get());
-        res.set("lines", arr.get());   // the port's name for the same array
+        res.set("lines", arr.get());   // second name for the same array
         return res.build();
     } catch (const std::exception& e) {
         return ev::throwError(std::string("MLSD detect failed: ") + e.what());
@@ -205,7 +202,7 @@ Value runOpenposeDetect(OpenposeWrapper* w, std::span<const Value> args) {
             bo.set("keypoints", kps.get());
             bo.set("totalScore", static_cast<double>(body.total_score));
             bo.set("totalParts", static_cast<double>(body.total_parts));
-            // The port published the body score as `score`; keep it.
+            // The body score again, as `score`.
             bo.set("score", static_cast<double>(body.total_score));
             return bo.build();
         }));
@@ -213,7 +210,7 @@ Value runOpenposeDetect(OpenposeWrapper* w, std::span<const Value> args) {
         res.set("width", static_cast<double>(pose.width));
         res.set("height", static_cast<double>(pose.height));
         res.set("bodies", bodies.get());
-        res.set("poses", bodies.get());   // the port's name for the same array
+        res.set("poses", bodies.get());   // second name for the same array
         return res.build();
     } catch (const std::exception& e) {
         return ev::throwError(std::string("Openpose detect failed: ") + e.what());
@@ -259,12 +256,12 @@ Value runSegformerDetect(SegformerWrapper* w, std::span<const Value> args) {
     res.set("width", static_cast<double>(outW));
     res.set("height", static_cast<double>(outH));
     {
-        // `classes` is the old key: the raw class-id bytes, ids in [0, 149].
+        // `classes`: the raw class-id bytes, ids in [0, 149].
         ev::Persistent c(makeUint8Array(classes.data(), classes.size()));
         res.set("classes", c.get());
     }
     {
-        // `segments` is the port's name, as Int32 — kept for its callers.
+        // `segments`: the same class ids as Int32.
         ev::Persistent s(makeInt32Array(asI32.data(), asI32.size()));
         res.set("segments", s.get());
     }
@@ -277,8 +274,7 @@ Value segformerDetect(Value thisVal, std::span<const Value> args) {
     return runSegformerDetect(w, args);
 }
 
-// Both names for the same body: `detect` is what the pre-transition binding
-// published, `estimate` is what the bronze port renamed it to.
+// Both names for the same body: `detect` and `estimate`.
 template <typename Fn>
 void defDetect(ObjectBuilder& proto, Fn fn) {
     proto.def("detect", 2, fn);

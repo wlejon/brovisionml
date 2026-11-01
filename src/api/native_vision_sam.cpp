@@ -1,11 +1,7 @@
 // Sam — promptable segmentation. setImage() caches the ViT embedding,
 // segment() is the cheap per-click decode, segmentEverything() drives the
-// AutomaticMaskGenerator.
-//
-// Ported from the QuickJS-era src/js/vision_bindings.cpp (js_sam_setImage /
-// js_sam_segment / js_sam_segmentEverything). The bronze port had lost
-// segment()'s labels / boxes / multimask options and left segmentEverything()
-// as a fixed 512x512 empty result.
+// AutomaticMaskGenerator. segment() takes points plus labels / boxes /
+// multimask options.
 
 #include "host_vision_internal.h"
 
@@ -28,7 +24,7 @@ SamWrapper* samSelf(Value thisVal) {
 }
 
 // [[x, y], ...] or [{x, y, label?}, ...]. The object form also carries the
-// per-point label, which the bronze port read but the array form did not.
+// per-point label.
 // Every reader below roots its argument before the first allocating call
 // (isJsArray reads `length`), and each element before its second read.
 void readPointsAndLabels(Value v, std::vector<std::array<float, 2>>& points,
@@ -345,8 +341,7 @@ Value buildSegmentation(const brovisionml::sam::Segmentation& seg) {
         ObjectBuilder mo;
         mo.set("iou", m < seg.iou.size() ? static_cast<double>(seg.iou[m]) : 0.0);
         mo.set("data", makeUint8Array(bin.data(), bin.size()));
-        // The raw per-mask logits, which the bronze port returned under
-        // `masks`; keeping them means neither caller has to change.
+        // The raw per-mask logits beside the thresholded `data`.
         mo.set("logits", makeFloat32Array(lg, plane));
         return mo.build();
     }));

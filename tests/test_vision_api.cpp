@@ -16,9 +16,8 @@
 #include <cstdio>
 #include <string>
 
-// tests/test_vision_api_restored.cpp — the bro.vision members the bronze port
-// dropped or renamed.
-void brovisionmlTestRestoredSurface();
+// tests/test_vision_api_restored.cpp — the bro.vision class prototypes.
+void brovisionmlTestClassSurface();
 
 // tests/test_vision_api_paths.cpp — setPathResolver: the host's resolver is
 // consulted for every model path the loaders take.
@@ -222,7 +221,7 @@ int main() {
         return "OK";
     )JS"));
 
-    brovisionmlTestRestoredSurface();
+    brovisionmlTestClassSurface();
     brovisionmlTestPathResolver();
     brovisionmlTestAccessGate();
 

@@ -1,10 +1,5 @@
-// DINOv2 / DINOv3 ViT backbones — encode() and dispose().
-//
-// Ported from the QuickJS-era src/js/vision_bindings.cpp (js_dinov2_encode,
-// js_dinov3_encode, js_dinov3_dispose, dinoPreprocess, downloadF32,
-// js_loadDinov2, js_loadDinov3). The bronze port had both classes returning a
-// fixed array of 512 zeros from an estimate() that never touched the model,
-// and neither loader constructed a Backbone.
+// DINOv2 / DINOv3 ViT backbones — encode() (also published as estimate())
+// and dispose(), plus the loaders, which construct the Backbone.
 
 #include "host_vision_internal.h"
 
@@ -235,7 +230,7 @@ void decorateDinov2Proto(ObjectBuilder& proto) {
     });
 
     proto.def("encode", 2, v2Encode);
-    // The bronze port named this estimate(); it is the same operation.
+    // estimate() is a second name for encode().
     proto.def("estimate", 2, v2Encode);
     proto.def("dispose", 0, [](Value thisVal, std::span<const Value>) -> Value {
         auto* w = v2Self(thisVal);

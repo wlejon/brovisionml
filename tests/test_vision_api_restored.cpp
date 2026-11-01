@@ -1,13 +1,11 @@
-// Coverage for the bro.vision members the QuickJS -> bronze port dropped or
-// renamed (the vision rows of
-// build/binding-audit/shape_all.txt).
+// Coverage for the bro.vision class prototypes: SAM's setImage / segment /
+// segmentEverything, the annotators' detect() and estimate(), the depth and
+// normal estimators, BiRefNet, StyleGAN3 and the DINOv2 / DINOv3 backbones.
 //
 // The heavyweight paths need checkpoints this repo does not ship, so the
-// checks run against the class prototypes: every restored name must be a
-// callable member with the pre-transition arity, the model-bound ones must
-// reject a foreign receiver, and the ones with a model-free fallback are
-// called for real so the restored option and result-key names are exercised
-// rather than merely present.
+// checks run against the class prototypes: every name must be a callable
+// member with its declared arity, the model-bound ones must reject a foreign
+// receiver, and the accessors must be present.
 //
 // Linked into brovisionml_test_api; called from its main(). Failures exit the
 // process: assert() is a no-op in the Release configuration this test runs in.
@@ -23,8 +21,8 @@ namespace {
 namespace ev = bronze::embed;
 } // namespace
 
-void brovisionmlTestRestoredSurface() {
-    std::cout << "Checking the restored bro.vision surface..." << std::endl;
+void brovisionmlTestClassSurface() {
+    std::cout << "Checking the bro.vision class surface..." << std::endl;
 
     const char* script = R"JS(
         const V = bro.vision;
@@ -52,7 +50,7 @@ void brovisionmlTestRestoredSurface() {
         // A 2x2 RGBA image, enough to drive the model-free fallbacks.
         const img = { width: 2, height: 2, data: new Uint8Array(16) };
 
-        // ── Sam: segment() reads labels/boxes/multimask again, and
+        // ── Sam: segment() reads labels/boxes/multimask, and
         //    segmentEverything() takes the AMG config ─────────────────────
         const sam = proto("Sam");
         needFn(sam, "Sam", "setImage", 2);
@@ -63,10 +61,9 @@ void brovisionmlTestRestoredSurface() {
         needThrows(sam, "Sam", "setImage", [img]);
         needGetter(sam, "Sam", "hasImage");
 
-        // ── Annotators: detect() is back beside the port's estimate(), and
-        //    both spellings of each result key are published ───────────────
+        // ── Annotators: detect() and estimate() are both published ────────
         const scalarPlanes = [["Hed", "edge", "edges"], ["Lineart", "line", "lines"]];
-        for (const [cls, oldKey, newKey] of scalarPlanes) {
+        for (const [cls, floatKey, byteKey] of scalarPlanes) {
             const p = proto(cls);
             needFn(p, cls, "detect", 2);
             needFn(p, cls, "estimate", 2);
@@ -143,12 +140,12 @@ void brovisionmlTestRestoredSurface() {
 
     auto res = bronze::eval::evalScript(script);
     if (res.thrown) {
-        std::cerr << "  restored-surface script threw: " << ev::toUtf8(res.value) << std::endl;
+        std::cerr << "  class-surface script threw: " << ev::toUtf8(res.value) << std::endl;
         std::exit(1);
     }
     if (ev::toUtf8(res.value) != "SUCCESS") {
-        std::cerr << "  restored-surface script returned: " << ev::toUtf8(res.value) << std::endl;
+        std::cerr << "  class-surface script returned: " << ev::toUtf8(res.value) << std::endl;
         std::exit(1);
     }
-    std::cout << "  restored bro.vision members OK." << std::endl;
+    std::cout << "  bro.vision class surface OK." << std::endl;
 }

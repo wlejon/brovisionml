@@ -115,7 +115,7 @@ static void decorateDepthEstimatorProto(ObjectBuilder& proto) {
 // Sam
 // ═══════════════════════════════════════════════════════════════════════════
 
-// decorateSamProto lives in native_vision_sam.cpp — the restored setImage /
+// decorateSamProto lives in native_vision_sam.cpp — setImage /
 // segment(points, labels, boxes, multimask) / segmentEverything(image, cfg).
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -171,7 +171,7 @@ static Value runNormalEstimator(NormalEstimatorWrapper* w, std::span<const Value
     res.set("height", static_cast<double>(height));
     ev::Persistent norm(makeFloat32Array(normals.data(), normals.size()));
     res.set("normals", norm.get());
-    res.set("normal", norm.get());   // the port's name for the same plane
+    res.set("normal", norm.get());   // second name for the same plane
     return res.build();
 }
 
@@ -194,21 +194,21 @@ static void decorateNormalEstimatorProto(ObjectBuilder& proto) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // The five ControlNet annotators (HED, Lineart, MLSD, OpenPose, SegFormer)
-// live in native_vision_annotators.cpp, where detect() is restored alongside
-// the port's estimate() and both spellings of the result keys are published.
+// live in native_vision_annotators.cpp, which publishes detect() and
+// estimate() and both spellings of the result keys.
 
-// decorateBirefnetProto lives in native_vision_generative.cpp — the restored
+// decorateBirefnetProto lives in native_vision_generative.cpp —
 // removeBackground() (alpha / matte / cutout) plus dispose().
 
 // ═══════════════════════════════════════════════════════════════════════════
 // StyleGAN3, DINOv2, DINOv3
 // ═══════════════════════════════════════════════════════════════════════════
 
-// decorateStyleGAN3Proto lives in native_vision_generative.cpp — the restored
+// decorateStyleGAN3Proto lives in native_vision_generative.cpp —
 // generate(seed/z/truncation/returnLatents), synthesize(w) and invert(image).
 
 // decorateDinov2Proto / decorateDinov3Proto live in native_vision_backbones.cpp
-// — the restored encode(image, opts) and dispose().
+// — encode(image, opts) (also as estimate()) and dispose().
 
 // ═══════════════════════════════════════════════════════════════════════════
 // VisionModel Wrapper
@@ -729,8 +729,7 @@ Value makeVisionNamespace() {
         auto w = std::make_unique<StyleGAN3Wrapper>();
         w->path = path;
         w->device = dev;
-        // Actually construct and load the Generator: the bronze port only
-        // recorded the path, which is why generate() could not do anything.
+        // Construct and load the Generator now, so generate() runs the model.
         std::string loadErr;
         if (!loadStyleGAN3Generator(path, args.size() > 1 ? args[1] : ev::undefined(), *w, loadErr)) {
             return ev::throwError(loadErr);

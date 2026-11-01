@@ -399,9 +399,9 @@ Value runSegformerDetect(SegformerWrapper* w, std::span<const Value> args);
 Value runSamSegment(SamWrapper* w, std::span<const Value> args);
 Value runBirefnet(BirefnetWrapper* w, std::span<const Value> args);
 
-// { num, width, height, best, masks: [{ iou, data: Uint8Array }] } — the shape
-// the pre-transition Sam.segment() returned (minus the ImageBitmap, which is
-// an engine-side type; callers rasterize `data` themselves).
+// { num, width, height, best, masks: [{ iou, data: Uint8Array, logits }] } —
+// Sam.segment()'s result. There is no ImageBitmap (an engine-side type);
+// callers rasterize `data` themselves.
 Value buildSegmentation(const brovisionml::sam::Segmentation& seg);
 
 // Build a StyleGAN3 generator for `path`. opts.resolution (256/512/1024) and
