@@ -53,6 +53,12 @@ bro_dependency(brotensor GITHUB wlejon/brotensor)
 # CUDA/Metal image preproc forwards into brotensor, so no GPU language here.
 bro_dependency(broimage GITHUB wlejon/broimage)
 
+option(BROVISIONML_COVERAGE "Enable gcov/llvm-cov coverage instrumentation" OFF)
+if(BROVISIONML_COVERAGE AND (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
+    add_compile_options(-O0 -g --coverage)
+    add_link_options(--coverage)
+endif()
+
 # --- brovisionml library ---
 
 add_library(brovisionml STATIC)

@@ -10,6 +10,7 @@
 #include "gpu_mir_ops.h"
 
 #include <brass/codegen/kernel_jit.hpp>
+#include <brass/mir/gpu_opt.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/target/msl_target.hpp>
 #include <brass/target/ptx_target.hpp>
@@ -557,13 +558,60 @@ struct CompiledKernel {
     std::uint32_t lx = 256, ly = 1, lz = 1;
 };
 
-Function* build_kernel(Module& mod, KernelId id, std::uint32_t& lx, std::uint32_t& ly) {
+void pack_u32(std::vector<std::uint8_t>& out, std::uint32_t v) {
+    out.push_back(static_cast<std::uint8_t>(v & 0xffu));
+    out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xffu));
+    out.push_back(static_cast<std::uint8_t>((v >> 16) & 0xffu));
+    out.push_back(static_cast<std::uint8_t>((v >> 24) & 0xffu));
+}
+
+bool unpack_u32(const std::vector<std::uint8_t>& in, std::size_t& pos, std::uint32_t& out) {
+    if (pos + 4u > in.size()) return false;
+    out = static_cast<std::uint32_t>(in[pos]) | (static_cast<std::uint32_t>(in[pos + 1]) << 8) |
+          (static_cast<std::uint32_t>(in[pos + 2]) << 16) | (static_cast<std::uint32_t>(in[pos + 3]) << 24);
+    pos += 4u;
+    return true;
+}
+
+std::vector<std::uint8_t> pack_msl(const brass::target::MslKernel& k) {
+    std::vector<std::uint8_t> b;
+    pack_u32(b, 0x4D534C31u);
+    pack_u32(b, static_cast<std::uint32_t>(k.entry_name.size()));
+    b.insert(b.end(), k.entry_name.begin(), k.entry_name.end());
+    pack_u32(b, static_cast<std::uint32_t>(k.source.size()));
+    b.insert(b.end(), k.source.begin(), k.source.end());
+    pack_u32(b, k.num_buffers); pack_u32(b, k.scalar_params_bytes);
+    pack_u32(b, k.workgroup_x); pack_u32(b, k.workgroup_y); pack_u32(b, k.workgroup_z);
+    pack_u32(b, k.uses_shared_memory ? 1u : 0u); pack_u32(b, k.shared_memory_bytes);
+    pack_u32(b, static_cast<std::uint32_t>(k.scalar_param_offsets.size()));
+    for (std::uint32_t o : k.scalar_param_offsets) pack_u32(b, o);
+    return b;
+}
+
+bool unpack_msl(const std::vector<std::uint8_t>& b, brass::target::MslKernel& k) {
+    std::size_t pos = 0;
+    std::uint32_t magic = 0, elen = 0, slen = 0, sm = 0, noff = 0;
+    if (!unpack_u32(b, pos, magic) || magic != 0x4D534C31u || !unpack_u32(b, pos, elen) || pos + elen > b.size()) return false;
+    k.entry_name.assign(reinterpret_cast<const char*>(b.data() + pos), elen); pos += elen;
+    if (!unpack_u32(b, pos, slen) || pos + slen > b.size()) return false;
+    k.source.assign(reinterpret_cast<const char*>(b.data() + pos), slen); pos += slen;
+    if (!unpack_u32(b, pos, k.num_buffers) || !unpack_u32(b, pos, k.scalar_params_bytes) ||
+        !unpack_u32(b, pos, k.workgroup_x) || !unpack_u32(b, pos, k.workgroup_y) || !unpack_u32(b, pos, k.workgroup_z) ||
+        !unpack_u32(b, pos, sm) || !unpack_u32(b, pos, k.shared_memory_bytes) || !unpack_u32(b, pos, noff) ||
+        pos + static_cast<std::size_t>(noff) * 4u != b.size()) return false;
+    k.uses_shared_memory = (sm != 0u);
+    k.scalar_param_offsets.resize(noff);
+    for (std::uint32_t i = 0; i < noff; ++i) (void)unpack_u32(b, pos, k.scalar_param_offsets[i]);
+    return !k.source.empty() && !k.entry_name.empty();
+}
+
+Function* build_kernel(Module& mod, KernelId id) {
     switch (id) {
-        case KernelId::DptPreprocess:   lx = 16;  ly = 16; return build_dpt_preprocess_mir(mod);
-        case KernelId::DsineRayReluF32: lx = 256; ly = 1;  return build_dsine_ray_relu_mir(mod, false);
-        case KernelId::DsineRayReluF64: lx = 256; ly = 1;  return build_dsine_ray_relu_mir(mod, true);
-        case KernelId::DsineAngmfF32:   lx = 256; ly = 1;  return build_dsine_angmf_mir(mod, false);
-        case KernelId::DsineAngmfF64:   lx = 256; ly = 1;  return build_dsine_angmf_mir(mod, true);
+        case KernelId::DptPreprocess:   return build_dpt_preprocess_mir(mod);
+        case KernelId::DsineRayReluF32: return build_dsine_ray_relu_mir(mod, false);
+        case KernelId::DsineRayReluF64: return build_dsine_ray_relu_mir(mod, true);
+        case KernelId::DsineAngmfF32:   return build_dsine_angmf_mir(mod, false);
+        case KernelId::DsineAngmfF64:   return build_dsine_angmf_mir(mod, true);
     }
     fail("unknown kernel id");
 }
@@ -580,35 +628,69 @@ const CompiledKernel& get_kernel(KernelId id, BackendKind bk) {
         if (auto it = cache->map.find(key); it != cache->map.end()) return it->second;
     }
 
-    Module mod("brovisionml_mir");
-    std::uint32_t lx = 256, ly = 1;
-    Function* fn = build_kernel(mod, id, lx, ly);
-
+    const std::uint32_t lx = (id == KernelId::DptPreprocess) ? 16u : 256u;
+    const std::uint32_t ly = (id == KernelId::DptPreprocess) ? 16u : 1u;
+    const std::string sig = "k" + std::to_string(static_cast<std::uint32_t>(id)) + ":opt1";
     CompiledKernel ck;
     ck.lx = lx;
     ck.ly = ly;
     ck.lz = 1;
-    if (bk == BackendKind::Vulkan) {
-        brass::target::SpirvOptions opts;
-        opts.stage = brass::target::SpirvStage::Compute;
-        opts.local_size_x = lx;
-        opts.local_size_y = ly;
-        opts.local_size_z = 1;
-        opts.local_size_spec_constants = false;
-        ck.spv = brass::target::SpirvTarget::compile(*fn, opts);
-    } else if (bk == BackendKind::Cuda) {
-        brass::target::PtxOptions opts;
-        opts.sm_arch = "sm_70";
-        opts.ptx_version_major = 7;
-        opts.ptx_version_minor = 0;
-        ck.ptx = brass::target::PtxTarget::emit_function(*fn, opts);
-        ck.ptx_entry = std::string(fn->name());
-    } else {
-        brass::target::MslOptions opts;
-        opts.workgroup_x = lx;
-        opts.workgroup_y = ly;
-        opts.workgroup_z = 1;
-        ck.msl = brass::target::MslTarget::compile(*fn, opts);
+
+    bool loaded = false;
+    std::vector<std::uint8_t> blob;
+    if (bk == BackendKind::Vulkan &&
+        bt::interop::load_cached_blob("brovisionml_spv", sig.c_str(), blob) &&
+        brass::target::deserialize_spirv_kernel(blob, ck.spv)) {
+        loaded = !ck.spv.words.empty();
+    } else if (bk == BackendKind::Cuda &&
+               bt::interop::load_cached_blob("brovisionml_ptx", (sig + ":sm_70").c_str(), blob)) {
+        const auto* p = reinterpret_cast<const char*>(blob.data());
+        const void* nul = std::memchr(p, '\0', blob.size());
+        if (nul && static_cast<const char*>(nul) > p) {
+            const std::size_t elen = static_cast<std::size_t>(static_cast<const char*>(nul) - p);
+            ck.ptx_entry.assign(p, elen);
+            ck.ptx.assign(p + elen + 1, blob.size() - elen - 1);
+            loaded = !ck.ptx.empty();
+        }
+    } else if (bk == BackendKind::Metal &&
+               bt::interop::load_cached_blob("brovisionml_msl", sig.c_str(), blob)) {
+        loaded = unpack_msl(blob, ck.msl);
+    }
+
+    if (!loaded) {
+        Module mod("brovisionml_mir");
+        Function* fn = build_kernel(mod, id);
+        brass::GpuOptOptions gopt;
+        gopt.opt_level = 1;
+        gopt.enable_fma = true;
+        brass::optimize_gpu_function(*fn, mod, gopt);
+
+        if (bk == BackendKind::Vulkan) {
+            brass::target::SpirvOptions opts;
+            opts.stage = brass::target::SpirvStage::Compute;
+            opts.local_size_x = lx; opts.local_size_y = ly; opts.local_size_z = 1;
+            opts.local_size_spec_constants = false;
+            ck.spv = brass::target::SpirvTarget::compile(*fn, opts);
+            const auto enc = brass::target::serialize_spirv_kernel(ck.spv);
+            (void)bt::interop::store_cached_blob("brovisionml_spv", sig.c_str(), enc.data(), enc.size());
+        } else if (bk == BackendKind::Cuda) {
+            brass::target::PtxOptions opts;
+            opts.sm_arch = "sm_70"; opts.ptx_version_major = 7; opts.ptx_version_minor = 0;
+            ck.ptx = brass::target::PtxTarget::emit_function(*fn, opts);
+            ck.ptx_entry = std::string(fn->name());
+            std::vector<std::uint8_t> enc;
+            enc.reserve(ck.ptx_entry.size() + 1u + ck.ptx.size());
+            enc.insert(enc.end(), ck.ptx_entry.begin(), ck.ptx_entry.end());
+            enc.push_back(0);
+            enc.insert(enc.end(), ck.ptx.begin(), ck.ptx.end());
+            (void)bt::interop::store_cached_blob("brovisionml_ptx", (sig + ":sm_70").c_str(), enc.data(), enc.size());
+        } else {
+            brass::target::MslOptions opts;
+            opts.workgroup_x = lx; opts.workgroup_y = ly; opts.workgroup_z = 1;
+            ck.msl = brass::target::MslTarget::compile(*fn, opts);
+            const auto enc = pack_msl(ck.msl);
+            (void)bt::interop::store_cached_blob("brovisionml_msl", sig.c_str(), enc.data(), enc.size());
+        }
     }
 
     std::lock_guard<std::mutex> lk(cache->mu);

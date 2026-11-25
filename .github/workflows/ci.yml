@@ -10,24 +10,16 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  SCCACHE_GHA_ENABLED: "true"
+
 # brovisionml composes brotensor ops and uses broimage for host-side image
 # decode / resampling / normalize. Its dependency closure is bromath
 # (header-only) + brotensor (Tensor + CPU op backend) + broimage. CI builds the
-# default CPU-only configuration (GPU backends OFF), so the DSINE CUDA kernels
-# brovisionml ships are not compiled. Every job builds a plain clone, checked
-# out under brovisionml/ with the build tree beside it; the three siblings and
-# bronze (the JavaScript runtime brovisionml_api binds, with brass, its code
-# generator) come from the heads of their main branches (cmake/bro_deps.cmake),
-# fetched at configure. There are no submodules and no sibling checkouts.
-#
-# bronze and brass compile inside this build tree with the
-# job's own compiler and CRT — the api is bound across bronze's C++ embed
-# boundary, so a prebuilt bronze would be an unverifiable ABI hazard. That is
-# what makes brovisionml_test_api the check that the library works the way
-# bro uses it.
-#
-# Ninja on Linux/macOS bounds parallelism once brotensor's op TUs are in the
-# build; Windows keeps the VS generator (MSBuild /m is bounded).
+# default CPU-only configuration (GPU backends OFF); custom GPU kernels lower
+# directly from pure C++20 Brass MIR via brotensor::interop. Every job builds a
+# plain clone under brovisionml/ with the build tree beside it; siblings and
+# bronze/brass come from the heads of their main branches (cmake/bro_deps.cmake).
 jobs:
   test:
     name: ${{ matrix.name }}
@@ -47,10 +39,43 @@ jobs:
 
       - name: Install Ninja (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ninja-build
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ninja-build ccache
       - name: Install Ninja (macOS)
         if: runner.os == 'macOS'
-        run: brew install ninja
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+        run: brew install ninja ccache
+
+      - name: Compiler cache (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.name }}
+          max-size: 500M
+
+      - name: Setup MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Seed sccache tool cache (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ARCH="x64"; ASSET="sccache-v0.19.0-x86_64-pc-windows-msvc.tar.gz"
+          DEST="$RUNNER_TOOL_CACHE/sccache/0.19.0/$ARCH"
+          mkdir -p "$DEST"
+          if (cd "$DEST" && gh release download v0.19.0 -R mozilla/sccache -p "$ASSET" -O "$ASSET" && tar -xzf "$ASSET" --strip-components=1 && rm -f "$ASSET"); then
+            touch "${DEST}.complete"
+          fi
+
+      - name: Compiler cache (Windows)
+        if: runner.os == 'Windows'
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.19.0"
 
       - name: Configure
         env:
@@ -58,9 +83,13 @@ jobs:
           CXX: ${{ matrix.cxx }}
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            cmake -S brovisionml -B build -DCMAKE_BUILD_TYPE=Release
+            cmake -S brovisionml -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl \
+              -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+              -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
           else
-            cmake -S brovisionml -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+            cmake -S brovisionml -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           fi
         shell: bash
 
@@ -80,13 +109,21 @@ jobs:
           path: brovisionml
 
       - name: Install gcovr + Ninja
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcovr ninja-build
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcovr ninja-build ccache
 
+      - name: Compiler cache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: coverage
+          max-size: 500M
+
+      # Release keeps bronze/brass/brotensor/broimage at -O3 while BROVISIONML_COVERAGE
+      # applies -O0 -g --coverage to brovisionml's own targets.
       - name: Configure (instrumented)
         run: |
-          cmake -S brovisionml -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_FLAGS="--coverage" \
-            -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+          cmake -S brovisionml -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBROVISIONML_COVERAGE=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build
         run: cmake --build build --parallel 4
