@@ -253,9 +253,9 @@ if(BROVISIONML_ENABLE_API)
     endif()
 endif()
 
-if(BROTENSOR_WITH_VULKAN AND TARGET brass)
+if(TARGET brass)
     brovisionml_add_test(brovisionml_test_vulkan_shader_audit test_vulkan_shader_audit.cpp)
     target_link_libraries(brovisionml_test_vulkan_shader_audit PRIVATE brass)
     target_include_directories(brovisionml_test_vulkan_shader_audit PRIVATE
-        "${CMAKE_BINARY_DIR}/brovisionml_vk_shaders")
+        "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 endif()

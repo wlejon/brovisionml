@@ -18,42 +18,13 @@ endif()
 
 # --- GPU backend selection ---
 #
-# brovisionml composes brotensor ops — it ships no GPU kernels of its own, so it
-# enables no CUDA/Metal language. It only forwards the backend choice so a
-# standalone GPU build resolves brotensor's CUDA/Metal backend. Built inside
-# bro, brotensor is already a target (added transitively) and the
-# if(NOT TARGET ...) guards below reuse it, backend and all.
+# brovisionml stays pure C++20: it composes brotensor ops and lowers its small
+# set of domain-specific GPU kernels (DPT bicubic preprocess, DSINE RayReLU and
+# AngMF propagate) from single-source Brass MIR through brotensor::interop — no
+# CUDA, Objective-C++, or GLSL/glslc build toolchain required here.
 option(BROTENSOR_WITH_CUDA  "Build the CUDA GPU backend"  OFF)
 option(BROTENSOR_WITH_METAL "Build the Metal GPU backend" OFF)
 option(BROTENSOR_WITH_VULKAN "Build the Vulkan GPU backend" OFF)
-
-# Unlike the rest of the stack (which composes brotensor ops), brovisionml ships
-# a small number of its own CUDA kernels for DSINE's surface-normal *domain* math
-# — RayReLU and the fused AngMF propagate — which have no brotensor primitive.
-# Enable the CUDA language only when the GPU backend is requested, mirroring
-# brotensor's own setup. The .cu sources are added to the brovisionml target
-# below, guarded by the same option.
-if(BROTENSOR_WITH_CUDA)
-    if(NOT CMAKE_CUDA_ARCHITECTURES)
-        set(CMAKE_CUDA_ARCHITECTURES native)
-    endif()
-    enable_language(CUDA)
-    set(CMAKE_CUDA_STANDARD 17)
-    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-    find_package(CUDAToolkit REQUIRED)
-    if(MSVC AND DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
-        set(CMAKE_CUDA_RUNTIME_LIBRARY "${CMAKE_MSVC_RUNTIME_LIBRARY}")
-    endif()
-endif()
-
-# The Metal twin of the DSINE kernels (src/dsine_ops.mm) is Objective-C++. Enable
-# OBJCXX only when the Metal backend is requested; the Metal frameworks it needs
-# come transitively from brotensor's brotensor_metal target (which PUBLIC-links
-# Foundation/Metal), and the kernels are authored against brotensor's public
-# <brotensor/metal_interop.h> surface, so no find_library is needed here.
-if(BROTENSOR_WITH_METAL)
-    enable_language(OBJCXX)
-endif()
 
 # --- Dependencies: bromath (header-only), bronze (+ brass), brotensor, broimage ---
 #
@@ -76,14 +47,6 @@ bro_dependency(bronze GITHUB wlejon/bronze TARGET bronze_runtime_shared
 
 bro_dependency(brotensor GITHUB wlejon/brotensor)
 
-if(BROTENSOR_WITH_VULKAN)
-    # The Vulkan twins of the DSINE and DPT kernels are GLSL (src/vulkan/*.comp),
-    # compiled by brotensor's cmake/BrotensorVulkan.cmake: glslc and brotensor's
-    # shader include directory, found as brotensor's own build finds them.
-    include("${brotensor_SOURCE_DIR}/cmake/BrotensorVulkan.cmake")
-    brotensor_vulkan_prepare()
-endif()
-
 # broimage — host-side image decode + geometric resampling + normalize presets
 # (CLIP/ImageNet/SAM). It is the preprocessing front-end every vision model in
 # this repo feeds: decode → resize/letterbox → normalize → NHWC->NCHW. Its own
@@ -105,6 +68,7 @@ target_link_libraries(brovisionml PUBLIC
     brotensor::brotensor
     broimage::broimage
 )
+target_link_libraries(brovisionml PRIVATE $<BUILD_INTERFACE:brass>)
 
 if(MSVC)
     target_compile_options(brovisionml PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4>)
@@ -163,61 +127,11 @@ target_sources(brovisionml PRIVATE
 # OWLv2 open-vocabulary detector (its CLIP towers, tokenizer and preprocessing
 # are local: brovisionml carries no brolm dependency).
 target_sources(brovisionml PRIVATE
+    src/gpu_mir_ops.cpp
     src/owlv2_tokenizer.cpp
     src/owlv2_preprocess.cpp
     src/owlv2.cpp
 )
-
-# brovisionml's own CUDA kernels (DSINE RayReLU + AngMF propagate). Compiled into
-# the library only when the GPU backend is on; BROVISIONML_WITH_CUDA gates the
-# device-dispatch branch in src/dsine_ops.cpp that calls them. Everything else in
-# the library stays device-agnostic by composing brotensor ops.
-if(BROTENSOR_WITH_CUDA)
-    target_sources(brovisionml PRIVATE src/dsine_ops.cu src/dpt_preprocess_gpu.cu)
-    target_compile_definitions(brovisionml PRIVATE BROVISIONML_WITH_CUDA=1)
-    # Static CUDA runtime so the shipped binary carries no cudart DLL dependency
-    # and launches on machines without the CUDA toolkit (falls back to CPU).
-    target_link_libraries(brovisionml PUBLIC CUDA::cudart_static)
-    # dsine_ops.cu is self-contained (kernels + host launchers in one TU, no
-    # cross-TU device symbols), so it uses whole-program compilation — no
-    # separable/relocatable device code, which would otherwise need a device-link
-    # step (__cudaRegisterLinkedBinary) the static library does not perform.
-    set_target_properties(brovisionml PROPERTIES
-        CUDA_STANDARD 17
-        CUDA_STANDARD_REQUIRED ON
-        CUDA_SEPARABLE_COMPILATION OFF)
-endif()
-
-# brovisionml's Vulkan twins of the same kernels: GLSL embedded as SPIR-V
-# (src/vulkan/*.comp; the generated brovisionml_vk_shaders.h) and dispatched by
-# src/vulkan_ops.cpp through brotensor::vulkan::dispatch. BROVISIONML_WITH_VULKAN
-# gates the Vulkan branches in src/dsine_ops.cpp and src/dpt_preprocess.cpp.
-if(BROTENSOR_WITH_VULKAN)
-    target_sources(brovisionml PRIVATE src/vulkan_ops.cpp)
-    target_compile_definitions(brovisionml PRIVATE BROVISIONML_WITH_VULKAN=1)
-    brotensor_vulkan_add_shaders(brovisionml
-        NAMESPACE brovisionml::detail::vk
-        HEADER brovisionml_vk_shaders.h
-        SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/vulkan"
-        SHADERS "dsine_ray_relu|dsine_ops.comp|-DOP=0"
-                "dsine_angmf|dsine_ops.comp|-DOP=1"
-                "dsine_ray_relu_f64|dsine_ops.comp|-DOP=0 -DF64"
-                "dsine_angmf_f64|dsine_ops.comp|-DOP=1 -DF64"
-                "dpt_preprocess|dpt_preprocess.comp")
-endif()
-
-# brovisionml's Metal twin of the same DSINE kernels. Compiled into the library
-# only when the Metal backend is on; BROVISIONML_WITH_METAL gates the
-# device-dispatch branch in src/dsine_ops.cpp that calls them. The .mm is
-# Objective-C++ with ARC; it links no Metal frameworks of its own (they arrive
-# transitively via brotensor::brotensor -> brotensor_metal).
-if(BROTENSOR_WITH_METAL)
-    target_sources(brovisionml PRIVATE src/dsine_ops.mm)
-    target_compile_definitions(brovisionml PRIVATE BROVISIONML_WITH_METAL=1)
-    set_source_files_properties(src/dsine_ops.mm PROPERTIES
-        LANGUAGE OBJCXX
-        COMPILE_OPTIONS "-fobjc-arc")
-endif()
 
 # --- Install ---
 #

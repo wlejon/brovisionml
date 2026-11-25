@@ -5,12 +5,7 @@
 #include "broimage/normalize.h"
 #include "broimage/presets.h"
 
-#if defined(BROVISIONML_WITH_CUDA)
-#include "dpt_preprocess_gpu.h"
-#endif
-#if defined(BROVISIONML_WITH_VULKAN)
-#include "vulkan_ops.h"
-#endif
+#include "gpu_mir_ops.h"
 
 #include <cmath>
 #include <stdexcept>
@@ -106,16 +101,7 @@ PreprocessedImage preprocess_device(const uint8_t* rgb, int w, int h, int channe
     if (dev == brotensor::Device::CPU) {
         return preprocess(rgb, w, h, channels, target, multiple, keep_aspect_ratio);
     }
-    // The fused bicubic + normalise kernel of the tensor's backend (CUDA,
-    // Vulkan); any other GPU preprocesses on the host and uploads.
-    bool fused = false;
-#if defined(BROVISIONML_WITH_CUDA)
-    fused = fused || dev.is_cuda();
-#endif
-#if defined(BROVISIONML_WITH_VULKAN)
-    fused = fused || dev.is_vulkan();
-#endif
-    if (!fused) {
+    if (!dev.is_gpu()) {
         PreprocessedImage pp = preprocess(rgb, w, h, channels, target, multiple, keep_aspect_ratio);
         pp.pixels = pp.pixels.to(dev);
         return pp;
@@ -131,16 +117,7 @@ PreprocessedImage preprocess_device(const uint8_t* rgb, int w, int h, int channe
     resize_output_size(w, h, target, multiple, keep_aspect_ratio, new_w, new_h);
 
     PreprocessedImage out;
-#if defined(BROVISIONML_WITH_VULKAN)
-    if (dev.is_vulkan()) {
-        detail::dpt_preprocess_vulkan(rgb, w, h, channels, dev, new_w, new_h, out.pixels);
-    }
-#endif
-#if defined(BROVISIONML_WITH_CUDA)
-    if (dev.is_cuda()) {
-        detail::dpt_preprocess_gpu(rgb, w, h, channels, dev, new_w, new_h, out.pixels);
-    }
-#endif
+    detail::dpt_preprocess_gpu(rgb, w, h, channels, dev, new_w, new_h, out.pixels);
     out.transform.orig_w    = w;
     out.transform.orig_h    = h;
     out.transform.resized_w = new_w;

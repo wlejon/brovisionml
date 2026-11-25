@@ -5,15 +5,7 @@
 #include <stdexcept>
 #include <string>
 
-#if defined(BROVISIONML_WITH_CUDA) || defined(BROTENSOR_HAS_CUDA)
-#include "dsine_ops_cuda.h"
-#endif
-#if defined(BROVISIONML_WITH_METAL)
-#include "dsine_ops_metal.h"
-#endif
-#if defined(BROVISIONML_WITH_VULKAN)
-#include "vulkan_ops.h"
-#endif
+#include "gpu_mir_ops.h"
 
 namespace brovisionml::dsine {
 
@@ -189,28 +181,11 @@ void ray_relu(brotensor::Tensor& normal, const brotensor::Tensor& ray,
         ray_relu_cpu(normal, ray, H, W);
         return;
     }
-    // Each GPU backend gets its own kernel: a CUDA + Vulkan build must never
-    // hand a Vulkan buffer address to the CUDA kernel.
-#if defined(BROVISIONML_WITH_VULKAN)
-    if (normal.device.is_vulkan()) {
-        detail::ray_relu_vulkan(normal, ray, H, W);
+    if (normal.device.is_gpu()) {
+        detail::ray_relu_gpu(normal, ray, H, W);
         return;
     }
-#endif
-#if defined(BROVISIONML_WITH_CUDA) || defined(BROTENSOR_HAS_CUDA)
-    if (normal.device.is_cuda()) {
-        detail::ray_relu_cuda(normal, ray, H, W);
-        return;
-    }
-#endif
-#if defined(BROVISIONML_WITH_METAL)
-    if (normal.device.is_metal()) {
-        detail::ray_relu_metal(normal, ray, H, W);
-        return;
-    }
-#endif
-    fail("ray_relu: tensor on " + std::string(brotensor::to_string(normal.device)) +
-         ", but brovisionml was built without a kernel for that backend");
+    fail("ray_relu: unsupported device " + std::string(brotensor::to_string(normal.device)));
 }
 
 void angmf_propagate(const brotensor::Tensor& pred_norm,
@@ -227,29 +202,12 @@ void angmf_propagate(const brotensor::Tensor& pred_norm,
                             H, W, out);
         return;
     }
-#if defined(BROVISIONML_WITH_VULKAN)
-    if (dev.is_vulkan()) {
-        detail::angmf_propagate_vulkan(pred_norm, prob, xy, angle, ray, fu, cu, fv, cv,
-                                       H, W, out);
+    if (dev.is_gpu()) {
+        detail::angmf_propagate_gpu(pred_norm, prob, xy, angle, ray, fu, cu, fv, cv,
+                                    H, W, out);
         return;
     }
-#endif
-#if defined(BROVISIONML_WITH_CUDA) || defined(BROTENSOR_HAS_CUDA)
-    if (dev.is_cuda()) {
-        detail::angmf_propagate_cuda(pred_norm, prob, xy, angle, ray, fu, cu, fv, cv,
-                                     H, W, out);
-        return;
-    }
-#endif
-#if defined(BROVISIONML_WITH_METAL)
-    if (dev.is_metal()) {
-        detail::angmf_propagate_metal(pred_norm, prob, xy, angle, ray, fu, cu, fv, cv,
-                                      H, W, out);
-        return;
-    }
-#endif
-    fail("angmf_propagate: tensors on " + std::string(brotensor::to_string(dev)) +
-         ", but brovisionml was built without a kernel for that backend");
+    fail("angmf_propagate: unsupported device " + std::string(brotensor::to_string(dev)));
 }
 
 }  // namespace brovisionml::dsine

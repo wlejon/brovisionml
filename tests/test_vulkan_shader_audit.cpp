@@ -1,6 +1,6 @@
-// Static SPIR-V verification & memory-safety audit of brovisionml Vulkan shaders.
+// Static SPIR-V verification & memory-safety audit of brovisionml Brass MIR GPU kernels.
 
-#include "brovisionml_vk_shaders.h"
+#include "gpu_mir_ops.h"
 
 #include <brass/target/spirv/spirv_binary_reader.hpp>
 #include <brass/target/spirv/spirv_ir.hpp>
@@ -53,23 +53,23 @@ bool run_mem_safety(
 } // namespace
 
 int main() {
-    namespace vk = brovisionml::detail::vk;
-    const std::size_t n = vk::shader_count();
-    std::printf("Auditing %zu brovisionml Vulkan shaders...\n", n);
+    const auto shaders = brovisionml::detail::compile_mir_spirv_for_audit();
+    const std::size_t n = shaders.size();
+    std::printf("Auditing %zu brovisionml Brass MIR SPIR-V kernels...\n", n);
     CHECK(n == 5);
 
     for (std::size_t i = 0; i < n; ++i) {
-        const vk::EmbeddedShader* info = vk::shader_info(i);
-        CHECK(info != nullptr && info->words != nullptr && info->word_count > 0);
-        if (!info || !info->words || info->word_count == 0) continue;
+        const auto& info = shaders[i];
+        CHECK(!info.words.empty());
+        if (info.words.empty()) continue;
 
-        const std::string name = info->name;
-        std::printf("  [%zu/%zu] %s (%zu words)\n", i + 1, n, name.c_str(), info->word_count);
+        const std::string& name = info.name;
+        std::printf("  [%zu/%zu] %s (%zu words)\n", i + 1, n, name.c_str(), info.words.size());
 
         brass::spirv::Module mod;
         std::string parse_err;
         const bool parsed = brass::spirv::parse_binary(
-            std::span<const std::uint32_t>(info->words, info->word_count), mod, &parse_err);
+            std::span<const std::uint32_t>(info.words.data(), info.words.size()), mod, &parse_err);
         if (!parsed) std::printf("    parse error: %s\n", parse_err.c_str());
         CHECK(parsed);
         if (!parsed) continue;
