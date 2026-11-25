@@ -22,16 +22,16 @@ BPE tokenizer are local to it (`src/owlv2*.cpp`), not a brolm dependency.
 CPU-by-default (FP32 scalar backend); a GPU backend is enabled by forwarding
 `BROTENSOR_WITH_CUDA=ON`, `BROTENSOR_WITH_METAL=ON` or, on AMD,
 `BROTENSOR_WITH_VULKAN=ON` (the AMD GPU backend; the default device) to
-brotensor. Almost
-everything composes brotensor ops, so brovisionml ships **almost no GPU kernels**.
-The lone exception is DSINE's surface-normal *domain* math — RayReLU and the fused
-AngMF propagate — which has no brotensor primitive; `src/dsine_ops.cu` provides a
-CUDA path, compiled into the library and dispatched behind `BROVISIONML_WITH_CUDA`
-when `BROTENSOR_WITH_CUDA=ON` (whole-program compilation, no separable device
-code); its Vulkan twin (and DPT preprocessing's) is GLSL in
-`src/vulkan/*.comp`, dispatched by `src/vulkan_ops.cpp` behind
-`BROVISIONML_WITH_VULKAN` when `BROTENSOR_WITH_VULKAN=ON`. If a *general* op is missing, still add it to brotensor — only true
-domain-specific kernels belong here.
+brotensor. Everything else in `brovisionml` composes `brotensor` ops, so `brovisionml`
+ships **no `.cu`, `.mm`, or `.comp` GPU kernel files** and requires no CUDA,
+Objective-C++, or GLSL toolchain of its own. The two domain-specific GPU kernel
+sets (DSINE's RayReLU / AngMF propagate and the DPT bicubic preprocess) live in
+one pure C++20 Brass MIR module (`src/gpu_mir_ops.{h,cpp}`) lowered on demand to
+SPIR-V (Vulkan), PTX (CUDA), and MSL (Metal) and dispatched through
+`brotensor::interop::dispatch_{spirv,ptx,msl}` (using `device_has_float64` to
+select FP64 geometry on CUDA and Vulkan `shaderFloat64`, or FP32 on Metal /
+non-FP64 Vulkan). If a *general* op is missing, still add it to brotensor — only
+true domain-specific kernels belong here.
 
 ## Sibling dependencies
 
@@ -81,11 +81,10 @@ include/brovisionml/       — public headers: one orchestrator per model
                              their stage/preprocess headers, the shared dinov2.h
                              / dpt_head.h substrate, tile_runner.h (overlapping-
                              tile driver for the local annotators), version.h
-src/                       — one .cpp per public header; src/dsine_ops.cu holds
-                             brovisionml's only GPU kernels (DSINE RayReLU +
-                             AngMF propagate), compiled in under BROTENSOR_WITH_CUDA;
-                             src/vulkan/*.comp + src/vulkan_ops.cpp are the Vulkan twins
-                             (DSINE ops, DPT preprocess) under BROTENSOR_WITH_VULKAN
+src/                       — one .cpp per public header; src/gpu_mir_ops.{h,cpp} holds
+                             brovisionml's single-source Brass MIR GPU kernels (DPT
+                             preprocess, DSINE RayReLU + AngMF propagate), lowered
+                             to SPIR-V / PTX / MSL via brotensor::interop
 tests/                     — one test file per header; test_smoke.cpp proves
                              the brotensor + broimage links. Real-checkpoint /
                              golden-parity tests skip cleanly when weights/ is empty
@@ -106,9 +105,9 @@ When adding a new model family: header in `include/brovisionml/`, impl in
   (`scripts/convert-*.py`); nothing at build or run time. Otherwise shell or
   C++ only.
 - **GPU paths go through brotensor ops** for everything except DSINE's
-  surface-normal domain ops (RayReLU + AngMF propagate), which ship as
-  brovisionml's own CUDA kernels in `src/dsine_ops.cu` (gated on
-  `BROTENSOR_WITH_CUDA`, dispatched behind `BROVISIONML_WITH_CUDA`; Vulkan uses the GLSL twins in `src/vulkan/`).
+  surface-normal domain ops (RayReLU + AngMF propagate) and DPT's fused bicubic
+  preprocess, which live in `src/gpu_mir_ops.{h,cpp}` as single-source Brass MIR
+  dispatched across CUDA / Metal / Vulkan through `brotensor::interop`.
   If a general op is missing, add it to brotensor — don't grow the local kernel set beyond the
   genuine domain math.
 - **Load HF safetensors directly** through `brotensor::safetensors` — no

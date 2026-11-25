@@ -22,18 +22,20 @@ configure. Override one with `-DFETCHCONTENT_SOURCE_DIR_<NAME>=...`.
 
 There is no `brolm` dependency — see [Ecosystem](#ecosystem) below.
 
-## The one kernel exception
+## Domain GPU kernels (single-source Brass MIR)
 
 DSINE's surface-normal *domain* math — **RayReLU** and the fused **AngMF
 propagate** (per-pixel per-neighbor axis-angle rotation + neighborhood unfold)
-— has no brotensor primitive and is too domain-specific to belong there.
-`src/dsine_ops.cu` provides the CUDA path for those two ops, compiled into the
-library when `BROTENSOR_WITH_CUDA=ON` and dispatched behind
-`BROVISIONML_WITH_CUDA` (whole-program compilation, no separable device code).
-Each op also has a CPU FP32 path.
+— and DPT's fused bicubic resize + ImageNet normalize have no single-op
+brotensor primitive, so they live in [src/gpu_mir_ops.cpp](../src/gpu_mir_ops.cpp)
+as pure C++20 Brass MIR builders lowered on demand to SPIR-V (Vulkan), PTX
+(CUDA), and MSL (Metal) and dispatched through `brotensor::interop` (selecting
+FP64 DSINE geometry when `device_has_float64` holds, FP32 otherwise). Each op
+also has a CPU FP32/FP64 host path.
 
-The rule: cross-model mechanics go to brotensor; only genuine single-model
-domain math may live here, and today that set is exactly those two DSINE ops.
+The rule: cross-model mechanics go to brotensor; only genuine domain math may
+live here, authored once in Brass MIR with no backend-specific `.cu`, `.mm`, or
+`.comp` code.
 
 ## Device model
 
@@ -70,8 +72,8 @@ include/brovisionml/   public headers: one orchestrator per model (sam.h,
                        openpose.h, segformer.h, stylegan3.h, birefnet.h),
                        their stage/preprocess headers, the dinov2.h / dinov3.h
                        / dpt_head.h substrate, tile_runner.h, version.h
-src/                   one .cpp per public header; dsine_ops.cu is the only
-                       GPU kernel source
+src/                   one .cpp per public header; src/gpu_mir_ops.{h,cpp} holds
+                       the single-source Brass MIR GPU kernels
 tests/                 one test file per header; CPU-only tests are
                        unconditional, real-checkpoint / golden-parity tests
                        skip cleanly when weights/ is empty

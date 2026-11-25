@@ -7,8 +7,9 @@ mean-field") refinement that rotation-smooths the normals in SO(3) and
 convex-upsamples back to full resolution. The encoder and decoder compose
 ops `brotensor` already exposes; the refinement adds the only two pieces in
 the whole library with no brotensor primitive — DSINE's surface-normal
-*domain* math — as brovisionml's own ops, each with a CPU FP32 path and a
-CUDA kernel (`src/dsine_ops.cu`):
+*domain* math — as brovisionml's own ops, each with a CPU reference path and a
+single-source Brass MIR GPU kernel (`src/gpu_mir_ops.cpp`) compiled on demand for
+CUDA (FP64 PTX), Vulkan (FP64/FP32 SPIR-V), and Metal (FP32 MSL):
 
 | Component | implementation |
 |---|---|
@@ -53,9 +54,11 @@ normal_estimate /path/to/dsine photo.jpg --out normal.png
 ## GPU path
 
 `est.to(Device::CUDA)` moves the whole pipeline — the brotensor-composed
-encoder/decoder plus the RayReLU and AngMF-propagate CUDA kernels — onto the
-GPU. On CUDA the encoder and decoder run **FP16** through the WMMA conv
-path; the ConvGRU/AngMF refiner stays FP32. With `BROVISIONML_PROFILE=1`
+encoder/decoder plus the RayReLU and AngMF-propagate Brass MIR GPU kernels — onto
+the GPU (CUDA, Metal, or Vulkan). On GPU the encoder and decoder run **FP16** through
+brotensor's tensor-core / cooperative-matrix conv path; the ConvGRU/AngMF
+refiner stays FP32 (with FP64 per-pixel rotation math on CUDA and Vulkan
+`shaderFloat64`, FP32 on Metal). With `BROVISIONML_PROFILE=1`
 the encoder / decoder / refine stages report individually. See
 [performance.md](performance.md).
 

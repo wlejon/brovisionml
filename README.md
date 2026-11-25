@@ -65,11 +65,12 @@ brovisionml links three sibling libraries:
 [`brotensor`](https://github.com/wlejon/brotensor) (tensors + compute
 kernels + the safetensors loader), and
 [`broimage`](https://github.com/wlejon/broimage) (image decode, resampling,
-normalize presets). The JavaScript binding in `src/api/` also needs
-[bronze](https://github.com/wlejon/bronze) and its code generator
-[brass](https://github.com/wlejon/brass), compiled inside this build tree
-because the binding has to be compiled against the same bronze as the program
-that loads it. A plain clone is all it takes: each dependency is pinned to a
+normalize presets). It also links [`brass`](https://github.com/wlejon/brass) to
+lower its domain GPU kernels from single-source Brass MIR to SPIR-V, PTX, and
+MSL, while the JavaScript binding in `src/api/` links
+[bronze](https://github.com/wlejon/bronze) and brass (compiled inside this build
+tree because the binding has to match the bronze runtime of the program that
+loads it). A plain clone is all it takes: each dependency is pinned to a
 commit in `CMakeLists.txt` (`bro_dependency()`, `cmake/bro_deps.cmake`) and
 resolves the way every repo in the ecosystem resolves one: an existing target
 wins, then a working tree beside this one at `../<name>`, then the pinned
@@ -126,10 +127,11 @@ flag is kept and means `--device gpu`. An unavailable backend falls back to
 the CPU with a note on stderr.
 
 Almost all GPU work happens inside brotensor ops; brovisionml's own GPU code
-is two small kernel sets — DSINE's two surface-normal domain ops and the DPT
-(Depth-Anything) preprocess — each as a CUDA source (`src/*.cu`) and a Vulkan
-compute shader (`src/vulkan/*.comp`), with a Metal twin for the DSINE ops
-(`src/dsine_ops.mm`). See [docs/architecture.md](docs/architecture.md).
+is a single pure C++20 Brass MIR module ([src/gpu_mir_ops.cpp](src/gpu_mir_ops.cpp))
+for DSINE's two surface-normal domain ops and the DPT (Depth-Anything) bicubic
+preprocess, lowered on demand to SPIR-V (Vulkan), PTX (CUDA), and MSL (Metal)
+and dispatched through `brotensor::interop` — no `nvcc`, Objective-C++, or
+`glslc` toolchain is needed here. See [docs/architecture.md](docs/architecture.md).
 
 **Platforms.** The library builds and its self-contained tests pass on Windows
 (MSVC), Linux (GCC and Clang) and macOS (arm64); CI covers the CPU build. The
